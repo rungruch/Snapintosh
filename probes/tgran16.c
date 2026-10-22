@@ -35,6 +35,24 @@ typedef unsigned long u64;
 #define ISB()        __asm__ volatile("isb")
 #define FLUSH()      __asm__ volatile("dsb ish; tlbi vmalle1is; dsb ish; isb")
 
+/* The EL1&0 regime's registers, named from EL2. q1n1 runs with HCR_EL2.E2H
+ * clear, where the _EL1 encodings reach EL1. A VHE host has E2H set (slbounce
+ * hands EL2 over that way), and there the same encodings are redirected to
+ * EL2's own registers: the walk would rewrite the caller's translation and
+ * never touch EL1. TGRAN16_EL12 selects the _EL12 aliases, which reach EL1
+ * only when E2H is set; probes/el2qual builds both and picks by E2H. */
+#ifdef TGRAN16_EL12
+#define REG_SCTLR    "s3_5_c1_c0_0"     /* SCTLR_EL12 */
+#define REG_TCR      "s3_5_c2_c0_2"     /* TCR_EL12 */
+#define REG_TTBR0    "s3_5_c2_c0_0"     /* TTBR0_EL12 */
+#define REG_MAIR     "s3_5_c10_c2_0"    /* MAIR_EL12 */
+#else
+#define REG_SCTLR    "sctlr_el1"
+#define REG_TCR      "tcr_el1"
+#define REG_TTBR0    "ttbr0_el1"
+#define REG_MAIR     "mair_el1"
+#endif
+
 /* Block descriptor: valid block, AttrIndx 0, AP RW, inner shareable, AF set.
  * Without AF the walk takes an Access Flag fault and the result is ambiguous. */
 #define BLOCK 0x741UL
@@ -70,11 +88,11 @@ static u64 walk(u64 tcr, u64 table, int valid)
     for (unsigned n = 0; n < 16384 / 8; n++) entry[n] = 0;
     if (valid) entry[0] = BLOCK;
 
-    WR("mair_el1", 0xffUL);          /* attr0 = Normal write-back */
-    WR("ttbr0_el1", table);
-    WR("tcr_el1", tcr);
+    WR(REG_MAIR, 0xffUL);          /* attr0 = Normal write-back */
+    WR(REG_TTBR0, table);
+    WR(REG_TCR, tcr);
     ISB();
-    WR("sctlr_el1", SCTLR_ON);
+    WR(REG_SCTLR, SCTLR_ON);
     FLUSH();
 
     __asm__ volatile("at s1e1r, %0" :: "r"(0x1000UL));
@@ -89,11 +107,11 @@ static u64 walk_far(u64 tcr, u64 table)
     for (unsigned n = 0; n < 16384 / 8; n++) entry[n] = 0;
     entry[1] = FAR_BLOCK | BLOCK;
 
-    WR("mair_el1", 0xffUL);
-    WR("ttbr0_el1", table);
-    WR("tcr_el1", tcr);
+    WR(REG_MAIR, 0xffUL);
+    WR(REG_TTBR0, table);
+    WR(REG_TCR, tcr);
     ISB();
-    WR("sctlr_el1", SCTLR_ON);
+    WR(REG_SCTLR, SCTLR_ON);
     FLUSH();
 
     __asm__ volatile("at s1e1r, %0" :: "r"(PROBE_VA));
@@ -105,8 +123,8 @@ void tgran16_probe(u64 *out, u64 table);
 void tgran16_probe(u64 *out, u64 table)
 {
     u64 hcr = RD("hcr_el2");
-    u64 sctlr = RD("sctlr_el1"), tcr = RD("tcr_el1");
-    u64 ttbr = RD("ttbr0_el1"), mair = RD("mair_el1");
+    u64 sctlr = RD(REG_SCTLR), tcr = RD(REG_TCR);
+    u64 ttbr = RD(REG_TTBR0), mair = RD(REG_MAIR);
 
     /* AT S1E1R only walks the EL1&0 regime when that regime is live: TGE routes
      * it to EL2 instead, and VM would fold stage 2 into the answer.
@@ -127,10 +145,10 @@ void tgran16_probe(u64 *out, u64 table)
     out[5] = RD("id_aa64mmfr0_el1");
     out[6] = EXPECT_16K;
 
-    WR("sctlr_el1", sctlr);
-    WR("tcr_el1", tcr);
-    WR("ttbr0_el1", ttbr);
-    WR("mair_el1", mair);
+    WR(REG_SCTLR, sctlr);
+    WR(REG_TCR, tcr);
+    WR(REG_TTBR0, ttbr);
+    WR(REG_MAIR, mair);
     FLUSH();
     WR("hcr_el2", hcr);
     ISB();
