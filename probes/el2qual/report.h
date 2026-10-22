@@ -56,6 +56,7 @@ struct el2q_cpu {
     uint64_t current_el, mpidr, hcr;
     uint64_t id[EL2Q_ID_COUNT];
     uint64_t probe_esr[EL2Q_PROBES], probe_value[EL2Q_PROBES];
+    uint64_t pac_ran;                /* 0: skipped (nopac), every PAC field unset */
     uint64_t pac_in[EL2Q_PAC_TRIALS], pac_out[EL2Q_PAC_TRIALS];
     uint64_t pac_rt_esr, pac_rt_ran;
     uint64_t pac_rt[3];              /* PACIA, AUTIA of it, XPACI of it */
@@ -116,6 +117,14 @@ enum el2q_verdict el2q_walks_16k(const struct el2q_cpu *cpu);
 void el2q_report(const struct el2q_run *run, struct el2q_text *text);
 void el2q_raw_line(const struct el2q_run *run, unsigned slot, unsigned index,
                    char out[EL2Q_TEXT_COLS + 1]);
+
+/* One fixed-format line per slot for tools/qemu-el2qual.py:
+ *   SUM <slot> EL<n> <state> PAC=<v> 16K=<v> NV2=<f>/<p> ECV=... FGT=... RNDR=...
+ * <v> is Y, N, I (inconclusive) or - (not run); <f> the ID field and <p> OK,
+ * UD (undefined) or EX (another exception) for the matching probe
+ * instruction. A slot that did not finish stops after <state>. */
+void el2q_summary_line(const struct el2q_run *run, unsigned slot,
+                       char out[EL2Q_TEXT_COLS + 1]);
 
 /* Draws the report into a 32 bpp framebuffer (stride in pixels), at the
  * largest integer scale of a 6x9 cell that fits every line. bgr selects

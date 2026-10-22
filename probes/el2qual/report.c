@@ -182,7 +182,7 @@ enum el2q_dt_state el2q_fdt_zap_state(const void *fdt, size_t limit)
 
 enum el2q_verdict el2q_pauth_signs(const struct el2q_cpu *c)
 {
-    if (c->current_el != 2 || c->state != EL2Q_CPU_DONE) return EL2Q_NOT_RUN;
+    if (c->current_el != 2 || c->state != EL2Q_CPU_DONE || !c->pac_ran) return EL2Q_NOT_RUN;
     unsigned changed = 0;
     for (unsigned i = 0; i < EL2Q_PAC_TRIALS; i++) changed += c->pac_out[i] != c->pac_in[i];
     int keys = c->probe_esr[EL2Q_PROBE_APIAKEY] == 0;
@@ -281,7 +281,10 @@ static const char *core_name(uint64_t midr)
     static const struct { uint8_t imp; uint16_t part; char name[12]; } known[] = {
         {0x41, 0xd07, "CORTEX-A57"}, {0x41, 0xd08, "CORTEX-A72"}, {0x41, 0xd0b, "CORTEX-A76"},
         {0x41, 0xd0d, "CORTEX-A77"}, {0x41, 0xd41, "CORTEX-A78"}, {0x41, 0xd44, "CORTEX-X1"},
-        {0x41, 0xd4b, "CORTEX-A78C"}, {0x41, 0xd4c, "CORTEX-X1C"}, {0x51, 0x001, "ORYON"},
+        {0x41, 0xd4b, "CORTEX-A78C"}, {0x41, 0xd4c, "CORTEX-X1C"},
+        /* 0x001 is the X Elite's Oryon; the A16's X2 Elite reads 0x512f0021,
+         * part 0x002 (docs/FEASIBILITY.md). */
+        {0x51, 0x001, "ORYON"}, {0x51, 0x002, "ORYON"},
     };
     unsigned imp = (midr >> 24) & 0xff, part = (midr >> 4) & 0xfff;
     for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
@@ -366,40 +369,52 @@ static void header(const struct el2q_run *r, struct el2q_text *t)
  * J700 route is the current monitor: it refuses to start without ECV and
  * RNDR, and the stock kernel needs NV2 to run below EL2. The VirtualMac
  * route needs only what an EL1 arm64e guest needs. Neither line is a claim
- * that the route works; a NO is a claim that it cannot. */
+ * that the route works; a NO is a claim that it cannot. A requirement that
+ * was not measured, or measured inconclusively, is listed with a "?": it
+ * keeps the route from CPU OK without claiming the route is impossible. */
+static void requirement(struct lb *b, const char *name, enum el2q_verdict v)
+{
+    if (v == EL2Q_YES) return;
+    put_c(b, ' ');
+    put_s(b, name);
+    if (v != EL2Q_NO) put_c(b, '?');
+}
+
 static void routes(const struct el2q_cpu *c, struct el2q_text *t)
 {
     const uint64_t *id = c->id;
-    int signs = el2q_pauth_signs(c) == EL2Q_YES, walks = el2q_walks_16k(c) == EL2Q_YES;
+    enum el2q_verdict signs = el2q_pauth_signs(c), walks = el2q_walks_16k(c);
     int nv2 = field(id_of(id, 7, 2), 24) >= 2, ecv = field(id_of(id, 7, 0), 60) >= 1;
     int rndr = field(id_of(id, 6, 0), 60) >= 1;
+    int j700 = nv2 && ecv && rndr && signs == EL2Q_YES;
+    int vmac = signs == EL2Q_YES && walks == EL2Q_YES;
 
-    struct lb b = new_line(t, nv2 && ecv && rndr && signs ? EL2Q_GREEN : EL2Q_RED);
+    struct lb b = new_line(t, j700 ? EL2Q_GREEN : EL2Q_RED);
     label(&b, "J700 ROUTE (AS ON A16)");
-    if (nv2 && ecv && rndr && signs) put_s(&b, "CPU OK");
+    if (j700) put_s(&b, "CPU OK");
     else {
         put_s(&b, "BLOCKED:");
         if (!nv2) put_s(&b, " NV2");
         if (!ecv) put_s(&b, " ECV");
         if (!rndr) put_s(&b, " RNDR");
-        if (!signs) put_s(&b, " PAUTH");
+        requirement(&b, "PAUTH", signs);
     }
 
-    b = new_line(t, signs && walks ? EL2Q_GREEN : EL2Q_RED);
+    b = new_line(t, vmac ? EL2Q_GREEN : EL2Q_RED);
     label(&b, "VIRTUALMAC ROUTE (EL1)");
-    if (signs && walks) put_s(&b, "CPU OK");
+    if (vmac) put_s(&b, "CPU OK");
     else {
         put_s(&b, "BLOCKED:");
-        if (!signs) put_s(&b, " PAUTH");
-        if (!walks) put_s(&b, " 16K");
+        requirement(&b, "PAUTH", signs);
+        requirement(&b, "16K", walks);
     }
 }
 
 static void verdicts(const struct el2q_cpu *c, struct el2q_text *t)
 {
     const uint64_t *id = c->id;
-    uint64_t isar0 = id_of(id, 6, 0), isar1 = id_of(id, 6, 1), isar2 = id_of(id, 6, 2);
-    uint64_t mmfr0 = id_of(id, 7, 0), mmfr1 = id_of(id, 7, 1), mmfr2 = id_of(id, 7, 2);
+    uint64_t isar1 = id_of(id, 6, 1), isar2 = id_of(id, 6, 2);
+    uint64_t mmfr0 = id_of(id, 7, 0), mmfr1 = id_of(id, 7, 1);
     uint64_t pfr0 = id_of(id, 4, 0), pfr1 = id_of(id, 4, 1);
     static const unsigned parange[] = {32, 36, 40, 42, 44, 48, 52, 56};
 
@@ -649,6 +664,45 @@ void el2q_raw_line(const struct el2q_run *r, unsigned slot, unsigned index,
     put_s(&b, el2q_idregs[index].name);
     put_c(&b, ' ');
     put_hex(&b, slot >= EL2Q_MAX_CPUS ? r->start_id[index] : r->cpu[slot].id[index], 16);
+}
+
+static char verdict_letter(enum el2q_verdict v)
+{
+    return v == EL2Q_YES ? 'Y' : v == EL2Q_NO ? 'N' : v == EL2Q_INCONCLUSIVE ? 'I' : '-';
+}
+
+static const char *probe_word(uint64_t esr)
+{
+    return !esr ? "OK" : (esr >> 26) == 0 ? "UD" : "EX";
+}
+
+void el2q_summary_line(const struct el2q_run *r, unsigned slot, char out[EL2Q_TEXT_COLS + 1])
+{
+    struct lb b = {out, 0};
+    out[0] = 0;
+    if (slot >= r->cpu_count || slot >= EL2Q_MAX_CPUS) return;
+    const struct el2q_cpu *c = &r->cpu[slot];
+    put_s(&b, "SUM ");
+    put_dec(&b, slot);
+    put_s(&b, " EL");
+    put_dec(&b, c->current_el);
+    put_c(&b, ' ');
+    put_s(&b, state_word(c->state));
+    if (c->state != EL2Q_CPU_DONE) return;
+    put_s(&b, " PAC=");
+    put_c(&b, verdict_letter(el2q_pauth_signs(c)));
+    put_s(&b, " 16K=");
+    put_c(&b, verdict_letter(el2q_walks_16k(c)));
+    static const struct { const char *name; unsigned crm, op2, lsb, probe; } feats[] = {
+        {" NV2=", 7, 2, 24, EL2Q_PROBE_VNCR},   {" ECV=", 7, 0, 60, EL2Q_PROBE_CNTPOFF},
+        {" FGT=", 7, 0, 56, EL2Q_PROBE_HFGRTR}, {" RNDR=", 6, 0, 60, EL2Q_PROBE_RNDR},
+    };
+    for (unsigned i = 0; i < sizeof feats / sizeof feats[0]; i++) {
+        put_s(&b, feats[i].name);
+        put_dec(&b, field(id_of(c->id, feats[i].crm, feats[i].op2), feats[i].lsb));
+        put_c(&b, '/');
+        put_s(&b, probe_word(c->probe_esr[feats[i].probe]));
+    }
 }
 
 /* ---- Font ----------------------------------------------------------------
