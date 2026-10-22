@@ -188,4 +188,6 @@ visible; `nopac` and `nosmp` remove those steps. Without either option the
 run ends in a WFE loop, and holding the power button ends it.
 
 Status: QEMU runs pass on all four models (TCG, 4 CPUs). Not yet run on any
-real machine.
+real machine. Runs on the gaokun3 follow the supervised plan in
+[GAOKUN3-QUALIFICATION.md](GAOKUN3-QUALIFICATION.md); `tools/el2qual-usb.py`
+assembles its USB stick layouts.
