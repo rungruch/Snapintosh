@@ -145,3 +145,47 @@ Both probes are flat AArch64 blobs uploaded to q1n1 and executed at EL2; they
 restore every register they touch. `--device` selects the q1n1 link. Sources:
 `probes/tgran16.c`, `probes/idregs.S`, `probes/run.py`. To qualify another
 candidate host, run trial D on it.
+
+### Qualifying a host without q1n1: el2qual
+
+`probes/el2qual/` is the same qualification as a standalone UEFI application,
+for a machine q1n1 does not run on yet (first the SC8280XP MateBook E Go). It
+records the ID registers at the level firmware runs at, calls
+ExitBootServices (where slbounce, if installed, switches to EL2), and then, on
+the boot CPU and on each CPU the MADT lists (started one at a time with PSCI
+`CPU_ON`), measures at EL2:
+
+- the 45 ID registers `probes/idregs.h` reads;
+- whether `RNDR`, `VNCR_EL2`, `CNTPOFF_EL2` and `HFGRTR_EL2` execute, compared
+  with the ID field that advertises each;
+- PAuth: whether the key registers exist, whether `PACIA1716` changes a
+  pointer, whether sign, authenticate and strip return it, and `PACGA`;
+- the four-trial 16K walk from `probes/tgran16.c` (the `_EL12` build when
+  `HCR_EL2.E2H` is set, as slbounce leaves it).
+
+The report is drawn on the GOP framebuffer and ends with a verdict for the
+J700 route (NV2, ECV, RNDR, PAuth) and the VirtualMac route (PAuth, 16K). A
+requirement that was not measured is shown with `?`, never as absent.
+
+```sh
+python3 probes/el2qual/build.py            # build/el2qual/el2qual.efi
+python3 tools/test-el2qual.py              # report code, host
+python3 tools/qemu-el2qual.py              # max, max-vhe, max-nopauth, cortex-a76
+```
+
+`build.py` finds LLVM from `--llvm`, `SNAP_LLVM`, Homebrew, then `PATH`;
+`qemu-el2qual.py` finds QEMU from `--qemu`, `SNAP_QEMU`, then `PATH`. Load
+options: `serial` (also write to an SPCR PL011/SBSA UART), `poweroff` (PSCI
+`SYSTEM_OFF` at the end; QEMU), `nopac`, `nosmp`, and `emulate-vhe`
+(test only: recreates slbounce's `E2H|TGE` state on a machine that started at
+EL2).
+
+It reads registers and executes test instructions only. Two things it cannot
+catch: a PAuth key access or PAC instruction that `SCR_EL3.{API,APK}` traps to
+EL3, and a secondary that PSCI never returns. Before each such step it prints
+a breadcrumb on screen, so a hang or reset leaves the step that caused it
+visible; `nopac` and `nosmp` remove those steps. Without either option the
+run ends in a WFE loop, and holding the power button ends it.
+
+Status: QEMU runs pass on all four models (TCG, 4 CPUs). Not yet run on any
+real machine.
