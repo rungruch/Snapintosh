@@ -28,7 +28,10 @@
  *
  * x0 = out buffer, x1 = table base, which must be 16K aligned and 16K long.
  */
-typedef unsigned long u64;
+/* long long, not long: probes/el2qual links this file into a PE/COFF UEFI
+ * image, an LLP64 target where long is 32 bits. On the LP64 ELF blob both
+ * are 64 bits and the generated code is the same. */
+typedef unsigned long long u64;
 
 #define RD(reg)      ({ u64 v_; __asm__ volatile("mrs %0, " reg : "=r"(v_)); v_; })
 #define WR(reg, v)   __asm__ volatile("msr " reg ", %0" :: "r"((u64)(v)))
@@ -55,16 +58,16 @@ typedef unsigned long u64;
 
 /* Block descriptor: valid block, AttrIndx 0, AP RW, inner shareable, AF set.
  * Without AF the walk takes an Access Flag fault and the result is ambiguous. */
-#define BLOCK 0x741UL
+#define BLOCK 0x741ULL
 
 /* T0SZ 28, IRGN0/ORGN0 write-back, SH0 inner, EPD1 (no TTBR1 walks), IPS 44-bit. */
-#define TCR_BASE (28UL | (1UL << 8) | (1UL << 10) | (3UL << 12) | (1UL << 23) | (4UL << 32))
+#define TCR_BASE (28ULL | (1ULL << 8) | (1ULL << 10) | (3ULL << 12) | (1ULL << 23) | (4ULL << 32))
 #define TCR_4K   (TCR_BASE)                  /* TG0 = 0b00 */
-#define TCR_16K  (TCR_BASE | (2UL << 14))    /* TG0 = 0b10 */
+#define TCR_16K  (TCR_BASE | (2ULL << 14))   /* TG0 = 0b10 */
 
 /* SCTLR_EL1 RES1 bits for ARMv8.1+, plus M. Leaving RES1 clear is UNPREDICTABLE. */
-#define SCTLR_ON ((1UL << 11) | (1UL << 20) | (1UL << 22) | (1UL << 23) | \
-                  (1UL << 28) | (1UL << 29) | 1UL)
+#define SCTLR_ON ((1ULL << 11) | (1ULL << 20) | (1ULL << 22) | (1ULL << 23) | \
+                  (1ULL << 28) | (1ULL << 29) | 1ULL)
 
 /* The discriminator.
  *
@@ -78,9 +81,9 @@ typedef unsigned long u64;
  * So map only entry 1 and translate PROBE_VA. Under 16K that is index 1, valid,
  * and resolves into a distinctive PA. Under 4K it is index 0, which is empty,
  * and faults. The two interpretations now disagree. */
-#define PROBE_VA  0x2001000UL          /* 32MB + 4K */
-#define FAR_BLOCK 0x4000000UL          /* 32MB-aligned, nothing else maps here */
-#define EXPECT_16K (FAR_BLOCK | 0x1000UL)
+#define PROBE_VA  0x2001000ULL         /* 32MB + 4K */
+#define FAR_BLOCK 0x4000000ULL         /* 32MB-aligned, nothing else maps here */
+#define EXPECT_16K (FAR_BLOCK | 0x1000ULL)
 
 static u64 walk(u64 tcr, u64 table, int valid)
 {
@@ -88,14 +91,14 @@ static u64 walk(u64 tcr, u64 table, int valid)
     for (unsigned n = 0; n < 16384 / 8; n++) entry[n] = 0;
     if (valid) entry[0] = BLOCK;
 
-    WR(REG_MAIR, 0xffUL);          /* attr0 = Normal write-back */
+    WR(REG_MAIR, 0xffULL);         /* attr0 = Normal write-back */
     WR(REG_TTBR0, table);
     WR(REG_TCR, tcr);
     ISB();
     WR(REG_SCTLR, SCTLR_ON);
     FLUSH();
 
-    __asm__ volatile("at s1e1r, %0" :: "r"(0x1000UL));
+    __asm__ volatile("at s1e1r, %0" :: "r"(0x1000ULL));
     ISB();
     return RD("par_el1");
 }
@@ -107,7 +110,7 @@ static u64 walk_far(u64 tcr, u64 table)
     for (unsigned n = 0; n < 16384 / 8; n++) entry[n] = 0;
     entry[1] = FAR_BLOCK | BLOCK;
 
-    WR(REG_MAIR, 0xffUL);
+    WR(REG_MAIR, 0xffULL);
     WR(REG_TTBR0, table);
     WR(REG_TCR, tcr);
     ISB();
@@ -134,7 +137,7 @@ void tgran16_probe(u64 *out, u64 table)
      * faults. On parts with no AArch32 at EL1 this bit is RES1 and the bug is
      * invisible; it only showed up against QEMU's -cpu max, which does offer
      * AArch32 and so leaves RW clear. */
-    WR("hcr_el2", (hcr & ~((1UL << 27) | 1UL)) | (1UL << 31));
+    WR("hcr_el2", (hcr & ~((1ULL << 27) | 1ULL)) | (1ULL << 31));
     ISB();
 
     out[0] = hcr;

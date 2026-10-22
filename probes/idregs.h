@@ -80,8 +80,9 @@ static uint64_t id_register(uint32_t crm, uint32_t op2)
  * xzr` at 0xfffffe000c245030 -- undefined here, and delivered to EL1 where we
  * cannot see it. Every feature we cannot actually support has to be denied at
  * the source rather than caught after the fact. */
-#define ID_AA64PFR0_EL1_SVE  (0xfUL << 32)
-#define ID_AA64PFR1_EL1_SME  (0xfUL << 24)
+/* ULL: probes/el2qual includes this header in an LLP64 (PE/COFF) build. */
+#define ID_AA64PFR0_EL1_SVE  (0xfULL << 32)
+#define ID_AA64PFR1_EL1_SME  (0xfULL << 24)
 
 static uint64_t id_forge(uint32_t crm, uint32_t op2, uint64_t value)
 {
