@@ -178,6 +178,41 @@ enum el2q_dt_state el2q_fdt_zap_state(const void *fdt, size_t limit)
     return EL2Q_DT_BAD;
 }
 
+/* ---- Screen mode -----------------------------------------------------------
+ * After ExitBootServices the only way to show anything is to write pixels to
+ * a GOP framebuffer, and a mode may not have one. The gaokun3's firmware
+ * leaves the screen in mode 7, a 2560x1600 landscape twin of the native
+ * 1600x2560 panel that its RotateScreen driver serves through Blt only, and
+ * reports framebuffer address 0 for it (gaokun-android
+ * docs/hw/gk3probe-e3-20261005.txt, docs/boot-entry-design.md §2.1). Its
+ * native mode 0 has the same area and a lower number, so it is tried first.
+ * Whether a candidate has an address is known only after SetMode, so this
+ * orders the candidates and el2qual.c tries them. */
+
+unsigned el2q_gop_order(const struct el2q_gop_mode *modes, unsigned count, unsigned current,
+                        unsigned order[EL2Q_GOP_MODES])
+{
+    unsigned n = 0;
+    if (count > EL2Q_GOP_MODES) count = EL2Q_GOP_MODES;
+    for (unsigned i = 0; i < count; i++) {
+        const struct el2q_gop_mode *m = &modes[i];
+        if (i == current || !m->valid || (m->format != 0 && m->format != 1) ||
+            !m->width || !m->height)
+            continue;
+        uint64_t area = (uint64_t)m->width * m->height;
+        /* Insertion by area, larger first; a later index never passes an
+         * equal area, so ties keep ascending mode numbers. */
+        unsigned at = n;
+        while (at && (uint64_t)modes[order[at - 1]].width * modes[order[at - 1]].height < area) {
+            order[at] = order[at - 1];
+            at--;
+        }
+        order[at] = i;
+        n++;
+    }
+    return n;
+}
+
 /* ---- Verdicts ------------------------------------------------------------ */
 
 enum el2q_verdict el2q_pauth_signs(const struct el2q_cpu *c)
@@ -363,6 +398,23 @@ static void header(const struct el2q_run *r, struct el2q_text *t)
     put_dec(&b, r->fb_width);
     put_c(&b, 'X');
     put_dec(&b, r->fb_height);
+
+    /* Which mode the report is drawn on, so a photo records it; a switch away
+     * from the firmware's mode is the gaokun3 case described above. */
+    int moved = r->fb_mode != r->fb_first_mode;
+    b = new_line(t, moved || !r->fb_base ? EL2Q_YELLOW : EL2Q_WHITE);
+    put_s(&b, "SCREEN GOP MODE ");
+    put_dec(&b, r->fb_mode);
+    if (r->fb_base) {
+        put_s(&b, "  FB ");
+        put_hex(&b, r->fb_base, 16);
+    } else {
+        put_s(&b, "  NO FRAMEBUFFER ADDRESS");
+    }
+    if (moved) {
+        put_s(&b, "  FROM MODE ");
+        put_dec(&b, r->fb_first_mode);
+    }
 }
 
 /* The two ways forward from docs research, as minimum CPU requirements. The

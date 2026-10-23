@@ -63,6 +63,25 @@ machine halted unattended.
    Windows as before.
 6. **A camera.** The screen is el2qual's only output on this machine.
 
+## The screen
+
+el2qual can draw after `ExitBootServices` only by writing pixels to a GOP
+framebuffer. The firmware leaves the screen in GOP mode 7, a 2560x1600
+landscape twin of the native 1600x2560 panel that its RotateScreen driver
+serves through `Blt` only, and reports framebuffer address 0 for it
+(OBSERVED by gaokun-android's gk3probe, `docs/hw/gk3probe-e3-20261005.txt`).
+A first run on 2026-10-23, built before el2qual handled this, showed only the
+firmware console's own line `SNAPINTOSH EL2QUAL: STARTED AT EL1, CALLING
+EXITBOOTSERVICES`: el2qual had nothing to draw on, so that run measured
+nothing.
+
+el2qual now switches to the largest mode that reports an address, trying
+mode 0 (the native 1600x2560) first, and draws everything from then on in
+portrait: rotate the tablet or the photo. That mode 0 has an address is
+INFERRED (only the rotated modes are documented as `Blt`-only). If no mode
+has one, el2qual says so on the firmware console and stops before
+`ExitBootServices`, so no Secure Launch is attempted.
+
 ## Inputs and their provenance
 
 | File | Stages | Source | Notes |
@@ -129,15 +148,20 @@ is attempted.
 4. Photograph the whole screen. Hold the power button, remove the stick, and
    confirm Windows starts.
 
-Expected screen: `START EL1  AFTER EBS EL1`, `NOT AT EL2: ONLY THE STARTING
-VIEW BELOW`, `SLBOUNCE GATE: NO DEVICE TREE: WILL NOT SWITCH`, an ACPI CPU
-count and GIC version, the framebuffer size, and the ID registers as EL1
-sees them.
+Expected screen, in portrait (see "The screen"): first the yellow
+breadcrumb `SCREEN: GOP MODE 0 1600X2560 FB <address> FROM MODE 7`, then
+the report: `START EL1  AFTER EBS EL1`, `SCREEN GOP MODE 0  FB <address>
+FROM MODE 7`, `NOT AT EL2: ONLY THE STARTING VIEW BELOW`, `SLBOUNCE GATE: NO
+DEVICE TREE: WILL NOT SWITCH`, an ACPI CPU count and GIC version, the
+framebuffer size, and the ID registers as EL1 sees them.
 
-Pass: the report is complete and legible, and the ID registers agree with
-the values Windows caches (MIDR `0x410FD4B0` or `0x410FD4C0`,
-`ID_AA64ISAR1 0x01200031`, `ID_AA64MMFR0 0x0000011100101022`; OBSERVED
-2026-10-22). Record the framebuffer size, ACPI CPU count and GIC version.
+Pass: the report is complete and legible. Record the GOP mode and address,
+the framebuffer size, ACPI CPU count and GIC version, and compare the ID
+registers with the values Windows caches (MIDR `0x410FD4B0` or
+`0x410FD4C0`, `ID_AA64ISAR1 0x01200031`, `ID_AA64MMFR0
+0x0000011100101022`; OBSERVED 2026-10-22). A difference is recorded, not
+a failure: UEFI runs under Qualcomm's hypervisor and Windows may run under
+Hyper-V, and either may present ID registers its own way.
 
 ## Stage 1b: systemd-boot with the device tree, no slbounce
 
@@ -198,7 +222,9 @@ the A78C and X1C cores.
 | What you see | Likely meaning | Then |
 | --- | --- | --- |
 | Firmware refuses the stick | Secure Boot still on, or not FAT32 | fix and retry the same stage |
-| Nothing drawn at all | el2qual found no usable GOP mode | photograph, stop, report |
+| Only the firmware's small `... CALLING EXITBOOTSERVICES` line, nothing after | an `el2qual.efi` built before the screen fix: the firmware's mode 7 has no framebuffer address | rebuild from the current tree and retry |
+| `NO GOP MODE HAS A FRAMEBUFFER ADDRESS` and `STOPPED BEFORE EXITBOOTSERVICES` | no GOP mode exposes a framebuffer el2qual can write; nothing was attempted | photograph, stop, report |
+| Nothing drawn at all | no GOP at all, or a fault before the first line | photograph, stop, report |
 | Reboot right after `CALLING EXITBOOTSERVICES` (stage 2) | Secure Launch failed: `tcblaunch.exe` too new, or slbounce/firmware mismatch | stop; check the `tcblaunch.exe` version |
 | `AFTER EBS EL1` with the gate `OPEN` (stage 2) | slbounce did not switch: driver not loaded (file name) or reported Secure Launch unavailable | check the manifest paths; stop |
 | Hang with `PAC: READING APIAKEYLO_EL1` last | EL3 traps PAuth key access from EL2 | a result, not a fault: record it |

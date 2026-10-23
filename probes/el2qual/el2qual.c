@@ -21,7 +21,14 @@
  *   nopac       skip every PAuth key access and PAC instruction
  *   nosmp       measure the boot CPU only
  *   emulate-vhe recreate slbounce's E2H|TGE handoff first; test only, and
- *               refused unless the machine started at EL2 without E2H */
+ *               refused unless the machine started at EL2 without E2H
+ *   emulate-rotated  treat the firmware's GOP mode as having no framebuffer
+ *               address, as the gaokun3's does; test only
+ *   emulate-no-fb    treat every GOP mode that way; test only
+ *
+ * With no mode that has a framebuffer address and no "serial" UART, nothing
+ * could show the results, so el2qual says so on the firmware console and
+ * stops before ExitBootServices: no Secure Launch is attempted for nothing. */
 #include <stddef.h>
 #include <stdint.h>
 #include "el2qual.h"
@@ -167,7 +174,15 @@ struct efi_gop_mode {
     struct efi_gop_mode_info *info;
     uint64_t info_size, framebuffer, framebuffer_size;
 };
-struct efi_gop { void *query_mode, *set_mode, *blt; struct efi_gop_mode *mode; };
+struct efi_gop {
+    efi_status (*query_mode)(struct efi_gop *self, uint32_t mode, uint64_t *info_size,
+                             struct efi_gop_mode_info **info);
+    efi_status (*set_mode)(struct efi_gop *self, uint32_t mode);
+    void *blt;
+    struct efi_gop_mode *mode;
+};
+_Static_assert(offsetof(struct efi_gop, mode) == 24, "UEFI 12.9");
+_Static_assert(offsetof(struct efi_gop_mode, framebuffer) == 24, "UEFI 12.9");
 
 enum { GOP_RGBX = 0, GOP_BGRX = 1 };
 
@@ -276,11 +291,11 @@ static uint64_t vhe_tcr(uint64_t tcr)
 static struct el2q_run run;
 static struct el2q_text text;
 static struct {
-    int serial, poweroff, nopac, nosmp, emulate_vhe;
+    int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb;
 } opt;
 static struct {
     uint32_t *base;
-    int bgr;
+    int bgr, gop;
 } screen;
 static struct efi_text_output *con_out;
 static uintptr_t image_base;
@@ -571,6 +586,8 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "nopac")) opt.nopac = 1;
         if (word_is(w, len, "nosmp")) opt.nosmp = 1;
         if (word_is(w, len, "emulate-vhe")) opt.emulate_vhe = 1;
+        if (word_is(w, len, "emulate-rotated")) opt.emulate_rotated = 1;
+        if (word_is(w, len, "emulate-no-fb")) opt.emulate_no_fb = 1;
     }
 }
 
@@ -587,21 +604,113 @@ static void find_tables(struct efi_system_table *st)
     run.dt_state = el2q_fdt_zap_state(fdt, 64u << 20);
 }
 
+/* Whether the GOP's current mode can still be drawn on after
+ * ExitBootServices: a 32 bpp RGB or BGR layout, a framebuffer address, and
+ * room for every line. `hide` pretends the address is 0 (emulate-* options). */
+static int mode_writable(const struct efi_gop_mode *m, int hide)
+{
+    const struct efi_gop_mode_info *i = m->info;
+    return i && !hide && m->framebuffer &&
+           (i->format == GOP_RGBX || i->format == GOP_BGRX) &&
+           (uint64_t)i->stride * i->height * 4 <= m->framebuffer_size;
+}
+
+static void use_mode(const struct efi_gop_mode *m)
+{
+    const struct efi_gop_mode_info *i = m->info;
+    run.fb_mode = m->mode;
+    run.fb_width = i->width;
+    run.fb_height = i->height;
+    run.fb_stride = i->stride;
+    run.fb_format = i->format;
+    run.fb_base = m->framebuffer;
+    screen.base = (uint32_t *)(uintptr_t)m->framebuffer;
+    screen.bgr = i->format == GOP_BGRX;
+}
+
+/* The firmware's mode if it has a framebuffer address, otherwise the first
+ * mode in el2q_gop_order's ranking that has one once set (report.c says why
+ * the gaokun3's does not). If none has, the firmware's mode is restored so
+ * the console can say so, and screen.base stays 0. */
 static void find_screen(struct efi_boot_services *bs)
 {
     struct efi_gop *gop = 0;
     if (EFI_ERROR(bs->locate_protocol(&gop_guid, 0, (void **)&gop)) || !gop || !gop->mode ||
         !gop->mode->info)
         return;
-    const struct efi_gop_mode_info *info = gop->mode->info;
-    run.fb_width = info->width;
-    run.fb_height = info->height;
-    run.fb_stride = info->stride;
-    run.fb_format = info->format;
-    if (info->format != GOP_RGBX && info->format != GOP_BGRX) return;
-    if ((uint64_t)info->stride * info->height * 4 > gop->mode->framebuffer_size) return;
-    screen.base = (uint32_t *)(uintptr_t)gop->mode->framebuffer;
-    screen.bgr = info->format == GOP_BGRX;
+    screen.gop = 1;
+    const struct efi_gop_mode *m = gop->mode;
+    uint32_t first = m->mode;
+    run.fb_first_mode = run.fb_mode = first;
+    run.fb_width = m->info->width;
+    run.fb_height = m->info->height;
+    run.fb_stride = m->info->stride;
+    run.fb_format = m->info->format;
+    if (mode_writable(m, opt.emulate_rotated || opt.emulate_no_fb)) {
+        use_mode(m);
+        return;
+    }
+
+    struct el2q_gop_mode modes[EL2Q_GOP_MODES];
+    unsigned count = m->max_mode < EL2Q_GOP_MODES ? m->max_mode : EL2Q_GOP_MODES;
+    for (unsigned i = 0; i < count; i++) {
+        /* The firmware allocates *info from pool; it is not freed, and the
+         * few bytes are gone at ExitBootServices anyway. */
+        struct efi_gop_mode_info *info = 0;
+        uint64_t size = 0;
+        modes[i] = (struct el2q_gop_mode){0, 0, 0, 0};
+        if (!EFI_ERROR(gop->query_mode(gop, i, &size, &info)) && info && size >= sizeof *info)
+            modes[i] = (struct el2q_gop_mode){info->width, info->height, info->format, 1};
+    }
+    unsigned order[EL2Q_GOP_MODES];
+    unsigned n = el2q_gop_order(modes, count, first, order);
+    for (unsigned j = 0; j < n; j++) {
+        if (EFI_ERROR(gop->set_mode(gop, order[j]))) continue;
+        if (mode_writable(gop->mode, opt.emulate_no_fb)) {
+            use_mode(gop->mode);
+            return;
+        }
+    }
+    if (gop->mode->mode != first) gop->set_mode(gop, first);
+}
+
+/* Breadcrumb text only; the report's own text is built in report.c. */
+static char *append(char *p, const char *s)
+{
+    while (*s) *p++ = *s++;
+    *p = 0;
+    return p;
+}
+
+static char *append_dec(char *p, uint64_t v)
+{
+    char d[20];
+    unsigned n = 0;
+    do d[n++] = (char)('0' + v % 10); while ((v /= 10) && n < sizeof d);
+    while (n) *p++ = d[--n];
+    *p = 0;
+    return p;
+}
+
+/* With nothing to draw on and no UART, a run could show nothing, and on the
+ * gaokun3 it would spend a Secure Launch (slbounce runs inside
+ * ExitBootServices) for no result. Say why while the firmware console still
+ * works, and stop with boot services up. */
+__attribute__((noreturn)) static void stop_before_ebs(void)
+{
+    char line[96], *p = line;
+    if (!screen.gop) {
+        p = append(p, "NO GRAPHICS OUTPUT PROTOCOL");
+    } else {
+        p = append(p, "NO GOP MODE HAS A FRAMEBUFFER ADDRESS (MODE ");
+        p = append_dec(p, run.fb_first_mode);
+        p = append(p, ")");
+    }
+    console_line(line);
+    console_line("STOPPED BEFORE EXITBOOTSERVICES: NOTHING WAS MEASURED");
+    console_line("HOLD THE POWER BUTTON TO TURN THE MACHINE OFF");
+    if (opt.poweroff && run.start_el == 2) psci(PSCI_SYSTEM_OFF, 0, 0, 0);
+    for (;;) __asm__ volatile("wfe");
 }
 
 uint64_t efi_main(void *image, struct efi_system_table *st)
@@ -622,6 +731,20 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     }
     find_tables(st);
     find_screen(bs);
+    if (!screen.base && !uart()) stop_before_ebs();
+    if (screen.base) {
+        char where[96], *p = append(where, "SCREEN: GOP MODE ");
+        p = append_dec(p, run.fb_mode);
+        p = append(p, " ");
+        p = append_dec(p, run.fb_width);
+        p = append(p, "X");
+        p = append_dec(p, run.fb_height);
+        p = append(p, " FB ");
+        put_hex(p, run.fb_base, 16);
+        p = append(p + 16, run.fb_mode != run.fb_first_mode ? " FROM MODE " : "");
+        if (run.fb_mode != run.fb_first_mode) append_dec(p, run.fb_first_mode);
+        progress(where);
+    }
 
     /* tgran16 needs one 16 KiB-aligned, 16 KiB table: eight pages hold one. */
     uint64_t pages = 0;

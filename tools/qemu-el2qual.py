@@ -18,9 +18,15 @@ report it writes to the PL011:
   max-nopauth  -cpu max,pauth=off: PAuth absent, the rest present
   cortex-a76   Armv8.2, the nearest model to the gaokun3's cores: NV2, ECV,
                FGT, RNG and PAuth absent; 16K walks
+  max-rotated  as max, with the firmware's GOP mode treated as having no
+               framebuffer address (the gaokun3's mode 7): el2qual must move
+               to another mode and say so
+  max-no-fb    every GOP mode treated that way and no "serial": el2qual must
+               stop before ExitBootServices, saying why on the console
 
-On every configuration all four CPUs must finish at EL2 without a fault, and
-each feature's ID field must agree with whether its probe instruction ran.
+On every configuration that runs, all four CPUs must finish at EL2 without
+a fault, the report must name the GOP mode it drew on, and each feature's
+ID field must agree with whether its probe instruction ran.
 --self-test feeds the checker deliberately wrong logs it must reject.
 
 QEMU is found from --qemu, then SNAP_QEMU, then PATH; its EDK2 image from
@@ -58,7 +64,25 @@ CONFIGS = {
     'cortex-a76': dict(cpu='cortex-a76', options='', pac='N', walk='Y',
                        features=dict.fromkeys(FEATURES, False),
                        routes=('BLOCKED: NV2 ECV RNDR PAUTH', 'BLOCKED: PAUTH')),
+    'max-rotated': dict(cpu='max', options='emulate-rotated', pac='Y', walk='Y', moved=True,
+                        features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # Without "serial" a stop is the only correct outcome; the firmware
+    # console, which EDK2 also sends to the PL011, is where it is reported.
+    'max-no-fb': dict(cpu='max', options='emulate-no-fb', serial=False, stop=True),
 }
+
+STOP_LINES = ('NO GOP MODE HAS A FRAMEBUFFER ADDRESS', 'STOPPED BEFORE EXITBOOTSERVICES')
+SCREEN = re.compile(r'^SCREEN GOP MODE (\d+)  FB ([0-9A-F]{16})(?:  FROM MODE (\d+))?$')
+
+
+def check_stop(log):
+    """Problems with a run that had to stop before ExitBootServices."""
+    problems = [f'no "{s}" on the console' for s in STOP_LINES if s not in log]
+    if 'CALLING EXITBOOTSERVICES' in log:
+        problems.append('ExitBootServices was attempted with nothing to show the result on')
+    if 'EL2QUAL BEGIN' in log:
+        problems.append('a report was written although el2qual should have stopped')
+    return problems
 
 SUM = re.compile(r'^SUM (\d+) EL(\d) (.+?)(?: PAC=(\S) 16K=(\S) NV2=(\d+)/(\w+) ECV=(\d+)/(\w+)'
                  r' FGT=(\d+)/(\w+) RNDR=(\d+)/(\w+))?$')
@@ -77,10 +101,23 @@ def report_lines(log):
 
 def check(log, expect, smp=SMP):
     """Problems with one run's serial log; empty when it is what expect says."""
+    if expect.get('stop'):
+        return check_stop(log)
     lines = report_lines(log)
     if lines is None:
         return ['no complete EL2QUAL BEGIN..END report on the serial port']
     problems = []
+    screens = [m for line in lines for m in [SCREEN.match(line)] if m]
+    if len(screens) != 1:
+        problems.append(f'{len(screens)} SCREEN GOP MODE lines with an address, wanted 1')
+    else:
+        mode, base, first = screens[0][1], int(screens[0][2], 16), screens[0][3]
+        if not base:
+            problems.append('the report was drawn on framebuffer address 0')
+        if expect.get('moved') and (first is None or first == mode):
+            problems.append(f'mode {mode}: wanted a move away from the firmware\'s mode')
+        if not expect.get('moved') and first is not None:
+            problems.append(f'moved from mode {first} to {mode} without being asked to')
     sums = {}
     for line in lines:
         m = SUM.match(line)
@@ -132,10 +169,17 @@ def check(log, expect, smp=SMP):
 # ---- Self-test: the checker must refuse logs that are wrong -----------------
 
 def synthetic(expect, smp=SMP):
+    if expect.get('stop'):
+        return '\n'.join(['Shell> el2qual.efi poweroff emulate-no-fb',
+                          'NO GOP MODE HAS A FRAMEBUFFER ADDRESS (MODE 0)',
+                          'STOPPED BEFORE EXITBOOTSERVICES: NOTHING WAS MEASURED',
+                          'HOLD THE POWER BUTTON TO TURN THE MACHINE OFF', ''])
     feats = ' '.join(f'{n}={PRESENT_AT[n] if expect["features"][n] else 0}/'
                      f'{"OK" if expect["features"][n] else "UD"}' for n in FEATURES)
     hcr = (1 << 34 | 1 << 27) if expect.get('vhe') else 1 << 31
-    lines = ['junk before', 'EL2QUAL BEGIN', f'ENTRY HCR_EL2 {hcr:016X} SCTLR 0000000030C5183D']
+    screen = 'SCREEN GOP MODE 1  FB 0000000080000000' + ('  FROM MODE 0' if expect.get('moved') else '')
+    lines = ['junk before', 'EL2QUAL BEGIN', screen,
+             f'ENTRY HCR_EL2 {hcr:016X} SCTLR 0000000030C5183D']
     if expect.get('vhe'):
         lines.append('TEST ONLY: SLBOUNCE E2H STATE EMULATED')
     lines += ['  CONTROLS A OK  B FAULT  C FAULT  (WANT OK FAULT FAULT)',
@@ -156,6 +200,21 @@ def self_test():
     for name, expect in CONFIGS.items():
         good = synthetic(expect)
         expect_result(f'{name} good', good, expect, True)
+        if expect.get('stop'):
+            expect_result(f'{name} no reason', good.replace(STOP_LINES[0], 'NOTHING'), expect, False)
+            expect_result(f'{name} went on to EBS', good + 'SNAPINTOSH EL2QUAL: STARTED AT EL2, '
+                          'CALLING EXITBOOTSERVICES\n', expect, False)
+            expect_result(f'{name} wrote a report', good + synthetic(CONFIGS['max']), expect, False)
+            continue
+        expect_result(f'{name} no screen line', re.sub(r'SCREEN GOP MODE .*\n', '', good),
+                      expect, False)
+        expect_result(f'{name} screen at 0', good.replace('FB 0000000080000000',
+                                                          'FB 0000000000000000'), expect, False)
+        if expect.get('moved'):
+            expect_result(f'{name} did not move', good.replace('  FROM MODE 0', ''), expect, False)
+        else:
+            expect_result(f'{name} moved unasked', good.replace(
+                'FB 0000000080000000', 'FB 0000000080000000  FROM MODE 0'), expect, False)
         expect_result(f'{name} truncated', good.replace('EL2QUAL END', ''), expect, False)
         expect_result(f'{name} missing slot', good.replace('SUM 3 ', 'XUM 3 '), expect, False)
         expect_result(f'{name} slot faulted',
@@ -230,7 +289,8 @@ def run_config(name, efi, qemu, firmware, out, timeout, screenshot=None):
     shutil.rmtree(work, ignore_errors=True)
     esp.mkdir(parents=True)
     shutil.copyfile(efi, esp / 'el2qual.efi')
-    options = ' '.join(filter(None, ['serial', '' if screenshot else 'poweroff', expect['options']]))
+    options = ' '.join(filter(None, ['serial' if expect.get('serial', True) else '',
+                                     '' if screenshot else 'poweroff', expect['options']]))
     (esp / 'startup.nsh').write_text(f'fs0:\nel2qual.efi {options}\n')
     log = work / 'serial.log'
     port = 4444 + list(CONFIGS).index(name)

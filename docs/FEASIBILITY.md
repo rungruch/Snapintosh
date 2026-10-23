@@ -167,18 +167,27 @@ The report is drawn on the GOP framebuffer and ends with a verdict for the
 J700 route (NV2, ECV, RNDR, PAuth) and the VirtualMac route (PAuth, 16K). A
 requirement that was not measured is shown with `?`, never as absent.
 
+A GOP mode may have no framebuffer address: the gaokun3's firmware leaves a
+rotated mode that only `Blt` can draw on, and `Blt` is gone after
+ExitBootServices. el2qual then switches to the largest mode that has an
+address and names it in the report (`SCREEN GOP MODE ...`). With no such
+mode and no `serial` UART it stops before ExitBootServices and says why on
+the firmware console.
+
 ```sh
 python3 probes/el2qual/build.py            # build/el2qual/el2qual.efi
 python3 tools/test-el2qual.py              # report code, host
-python3 tools/qemu-el2qual.py              # max, max-vhe, max-nopauth, cortex-a76
+python3 tools/qemu-el2qual.py              # max, max-vhe, max-nopauth, cortex-a76,
+                                           # max-rotated, max-no-fb
 ```
 
 `build.py` finds LLVM from `--llvm`, `SNAP_LLVM`, Homebrew, then `PATH`;
 `qemu-el2qual.py` finds QEMU from `--qemu`, `SNAP_QEMU`, then `PATH`. Load
 options: `serial` (also write to an SPCR PL011/SBSA UART), `poweroff` (PSCI
-`SYSTEM_OFF` at the end; QEMU), `nopac`, `nosmp`, and `emulate-vhe`
-(test only: recreates slbounce's `E2H|TGE` state on a machine that started at
-EL2).
+`SYSTEM_OFF` at the end; QEMU), `nopac`, `nosmp`, and three test-only
+options: `emulate-vhe` (recreates slbounce's `E2H|TGE` state on a machine
+that started at EL2), `emulate-rotated` (treats the firmware's GOP mode as
+having no framebuffer address) and `emulate-no-fb` (treats every mode so).
 
 It reads registers and executes test instructions only. Two things it cannot
 catch: a PAuth key access or PAC instruction that `SCR_EL3.{API,APK}` traps to
@@ -187,7 +196,8 @@ a breadcrumb on screen, so a hang or reset leaves the step that caused it
 visible; `nopac` and `nosmp` remove those steps. Without either option the
 run ends in a WFE loop, and holding the power button ends it.
 
-Status: QEMU runs pass on all four models (TCG, 4 CPUs). Not yet run on any
-real machine. Runs on the gaokun3 follow the supervised plan in
-[GAOKUN3-QUALIFICATION.md](GAOKUN3-QUALIFICATION.md); `tools/el2qual-usb.py`
-assembles its USB stick layouts.
+Status: QEMU runs pass on all six configurations (TCG, 4 CPUs). One run on
+the gaokun3 (2026-10-23, a build before the screen fix) drew nothing and
+measured nothing; see "The screen" in the supervised plan,
+[GAOKUN3-QUALIFICATION.md](GAOKUN3-QUALIFICATION.md), which all gaokun3 runs
+follow; `tools/el2qual-usb.py` assembles its USB stick layouts.

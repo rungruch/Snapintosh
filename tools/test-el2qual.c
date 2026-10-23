@@ -546,12 +546,81 @@ static void test_render(void)
     CHECK(tiny[2] == GUARD && tiny[3] == GUARD && tiny[8] == GUARD);
 }
 
+/* ---- Screen mode ------------------------------------------------------------ */
+
+/* The gaokun3's 14 GOP modes and its current mode 7, as gaokun-android's
+ * gk3probe recorded them (docs/hw/gk3probe-e3-20261005.txt): all BGRX, and
+ * mode 7 the rotated twin that reports framebuffer address 0. */
+static const struct el2q_gop_mode gaokun3_modes[14] = {
+    {1600, 2560, 1, 1}, {480, 640, 1, 1},   {600, 800, 1, 1},   {720, 1280, 1, 1},
+    {768, 1024, 1, 1},  {768, 1280, 1, 1},  {768, 1366, 1, 1},  {2560, 1600, 1, 1},
+    {640, 480, 1, 1},   {800, 600, 1, 1},   {1280, 720, 1, 1},  {1024, 768, 1, 1},
+    {1280, 768, 1, 1},  {1366, 768, 1, 1},
+};
+
+static void test_gop_order(void)
+{
+    unsigned order[EL2Q_GOP_MODES];
+    static const unsigned want[] = {0, 6, 13, 5, 12, 3, 10, 4, 11, 2, 9, 1, 8};
+    unsigned n = el2q_gop_order(gaokun3_modes, 14, 7, order);
+    CHECK(n == sizeof want / sizeof want[0]);
+    for (unsigned i = 0; i < n; i++) CHECK(order[i] == want[i]);   /* native mode 0 first */
+
+    /* Formats other than RGBX/BGRX, failed queries and empty modes are never
+     * tried; the next largest leads. */
+    struct el2q_gop_mode m[14];
+    memcpy(m, gaokun3_modes, sizeof m);
+    m[0].format = 3;                                     /* PixelBltOnly */
+    m[6].format = 2;                                     /* PixelBitMask */
+    m[13].valid = 0;
+    m[5].width = 0;
+    n = el2q_gop_order(m, 14, 7, order);
+    CHECK(n == 9 && order[0] == 12);
+    for (unsigned i = 0; i < n; i++) CHECK(order[i] != 0 && order[i] != 6 && order[i] != 13 &&
+                                           order[i] != 5 && order[i] != 7);
+
+    /* Equal areas keep ascending mode numbers; a current mode outside the
+     * list excludes nothing. */
+    struct el2q_gop_mode same[5];
+    for (unsigned i = 0; i < 5; i++) same[i] = (struct el2q_gop_mode){800, 600, 0, 1};
+    n = el2q_gop_order(same, 5, 99, order);
+    CHECK(n == 5);
+    for (unsigned i = 0; i < n; i++) CHECK(order[i] == i);
+    CHECK(el2q_gop_order(same, 5, 2, order) == 4 && order[2] == 3);
+
+    /* More modes than the table holds: only the first EL2Q_GOP_MODES count. */
+    struct el2q_gop_mode many[EL2Q_GOP_MODES + 8];
+    for (unsigned i = 0; i < EL2Q_GOP_MODES + 8; i++)
+        many[i] = (struct el2q_gop_mode){100 + i, 100, 1, 1};
+    n = el2q_gop_order(many, EL2Q_GOP_MODES + 8, 0, order);
+    CHECK(n == EL2Q_GOP_MODES - 1 && order[0] == EL2Q_GOP_MODES - 1);
+    for (unsigned i = 0; i < n; i++) CHECK(order[i] < EL2Q_GOP_MODES);
+    CHECK(el2q_gop_order(many, 0, 0, order) == 0);
+
+    /* The report records the mode it is drawn on, and a switch. */
+    base_run();
+    run.fb_first_mode = 7;
+    run.fb_mode = 0;
+    run.fb_base = 0x80000000ull;
+    el2q_report(&run, &text);
+    check_widths();
+    CHECK(has_line("SCREEN GOP MODE 0  FB 0000000080000000  FROM MODE 7"));
+    run.fb_first_mode = 0;
+    el2q_report(&run, &text);
+    CHECK(has_line("SCREEN GOP MODE 0  FB 0000000080000000") && !has_line("FROM MODE"));
+    run.fb_base = 0;
+    run.fb_mode = run.fb_first_mode = 7;
+    el2q_report(&run, &text);
+    CHECK(has_line("SCREEN GOP MODE 7  NO FRAMEBUFFER ADDRESS"));
+}
+
 int main(void)
 {
     test_acpi();
     test_fdt();
     test_verdicts();
     test_report();
+    test_gop_order();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

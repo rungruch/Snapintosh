@@ -89,6 +89,8 @@ struct el2q_run {
     struct el2q_acpi acpi;
     int64_t psci_version;            /* -1 when PSCI was not reachable */
     uint32_t fb_width, fb_height, fb_stride, fb_format;
+    uint32_t fb_mode, fb_first_mode; /* GOP mode drawn on; the one firmware left */
+    uint64_t fb_base;                /* 0: no mode had a framebuffer address */
     uint64_t start_id[EL2Q_ID_COUNT];/* ID registers at the starting EL */
     uint32_t cpu_count;              /* slots used; slot 0 is the boot CPU */
     struct el2q_cpu cpu[EL2Q_MAX_CPUS];
@@ -107,6 +109,17 @@ struct el2q_text {
  * declare. */
 int el2q_acpi_parse(const void *rsdp, struct el2q_acpi *out);
 enum el2q_dt_state el2q_fdt_zap_state(const void *fdt, size_t limit);
+
+/* A GOP mode as QueryMode describes it. valid is 0 when QueryMode failed. */
+#define EL2Q_GOP_MODES 32
+struct el2q_gop_mode { uint32_t width, height, format, valid; };
+
+/* The modes to try, in order, when the current one has no framebuffer
+ * address: valid 32 bpp RGB or BGR modes other than `current`, the largest
+ * area first and, among equal areas, the lower mode number. Writes at most
+ * EL2Q_GOP_MODES entries to order[] and returns how many. */
+unsigned el2q_gop_order(const struct el2q_gop_mode *modes, unsigned count, unsigned current,
+                        unsigned order[EL2Q_GOP_MODES]);
 
 /* Verdicts, shared by the report and the tests. */
 enum el2q_verdict { EL2Q_NOT_RUN, EL2Q_YES, EL2Q_NO, EL2Q_INCONCLUSIVE };
