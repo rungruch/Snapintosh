@@ -201,9 +201,12 @@ a breadcrumb on screen, so a hang or reset leaves the step that caused it
 visible; `nopac` and `nosmp` remove those steps. Without either option the
 run ends in a WFE loop, and holding the power button ends it.
 
-Status: QEMU runs pass on all seven configurations (TCG, 4 CPUs). Two runs
-on the gaokun3 (2026-10-23) drew nothing and measured nothing: the first
-had no screen at all, the second found no GOP mode with an address and
-stopped before ExitBootServices. See "The screen" in the supervised plan,
+Status: QEMU runs pass on all seven configurations (TCG, 4 CPUs). On the
+gaokun3 (2026-10-23), after two runs that could show nothing, stage 1b drew
+on the device tree's framebuffer and stage 2 reached EL2 on all 8 cores:
+PAuth works on every core, the 16K granule walks on every core, and NV2,
+ECV, FGT and RNDR are absent. (The first 16K walks there were
+inconclusive until `tgran16.c` cleaned its table to the point of
+coherency before each walk.) The run log is in the supervised plan,
 [GAOKUN3-QUALIFICATION.md](GAOKUN3-QUALIFICATION.md), which all gaokun3 runs
 follow; `tools/el2qual-usb.py` assembles its USB stick layouts.

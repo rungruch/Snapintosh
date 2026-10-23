@@ -11,14 +11,15 @@
  * regime and reports the outcome in PAR_EL1, without ever entering EL1 and
  * without dereferencing the result.
  *
- * Three trials, in this order, because the first two are what make the third
+ * Four trials, in this order, because the first three are what make the last
  * mean anything:
  *   A  4K granule, valid table    -> must resolve. Proves the harness works.
  *   B  4K granule, empty table    -> must fault. Proves SCTLR_EL1.M really took
  *                                    effect; with M=0 a walk is bypassed and
  *                                    PAR reports success with PA==VA, which
- *                                    would make trial C a false pass.
- *   C  16K granule, valid table   -> the question.
+ *                                    would make trial D a false pass.
+ *   C  4K granule, entry 1 only   -> must fault (see "The discriminator").
+ *   D  16K granule, entry 1 only  -> the question.
  *
  * Both granules share one table. With T0SZ=28 (36-bit VA) the 4K regime starts
  * at level 1 (1GB blocks, index VA[35:30]) and the 16K regime starts at level 2
@@ -85,11 +86,31 @@ typedef unsigned long long u64;
 #define FAR_BLOCK 0x4000000ULL         /* 32MB-aligned, nothing else maps here */
 #define EXPECT_16K (FAR_BLOCK | 0x1000ULL)
 
+/* The walks run with SCTLR_EL1.C clear (SCTLR_ON), and with C clear the
+ * EL1&0 stage 1 table walk is Non-cacheable whatever TCR's IRGN/ORGN say: it
+ * reads memory. The stores that built the table went through the caller's
+ * regime, which may have its caches on (UEFI's EL2 does, after slbounce), so
+ * the walker can read whatever memory held before. On the gaokun3 that made
+ * control A fault on every core and trial D fault differently from run to
+ * run (el2qual stage 2, 2026-10-23). Cleaning the table to the point of
+ * coherency before each walk makes memory hold what was written, under any
+ * caller. Inline: probes/run.py ships this file's .text with the entry at
+ * offset 0, so no helper may land in front of tgran16_probe. */
+__attribute__((always_inline)) static inline void clean_table(u64 table)
+{
+    u64 line = 4ULL << ((RD("ctr_el0") >> 16) & 15);       /* CTR_EL0.DminLine */
+    __asm__ volatile("dsb sy" ::: "memory");
+    for (u64 p = table; p < table + 16384; p += line)
+        __asm__ volatile("dc civac, %0" :: "r"(p) : "memory");
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
 static u64 walk(u64 tcr, u64 table, int valid)
 {
     u64 *entry = (u64 *)table;
     for (unsigned n = 0; n < 16384 / 8; n++) entry[n] = 0;
     if (valid) entry[0] = BLOCK;
+    clean_table(table);
 
     WR(REG_MAIR, 0xffULL);         /* attr0 = Normal write-back */
     WR(REG_TTBR0, table);
@@ -109,6 +130,7 @@ static u64 walk_far(u64 tcr, u64 table)
     u64 *entry = (u64 *)table;
     for (unsigned n = 0; n < 16384 / 8; n++) entry[n] = 0;
     entry[1] = FAR_BLOCK | BLOCK;
+    clean_table(table);
 
     WR(REG_MAIR, 0xffULL);
     WR(REG_TTBR0, table);

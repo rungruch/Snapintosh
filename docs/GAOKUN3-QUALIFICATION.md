@@ -242,9 +242,10 @@ it starts any other core: if `CPU_ON` hung in a combined run, the PAuth
 answer already taken would never reach the screen.
 
 The last line before the switch is `... CALLING EXITBOOTSERVICES`. Expected
-after it: `START EL1  AFTER EBS EL2`, and an `ENTRY HCR_EL2` with E2H (bit
-34) and TGE (bit 27) set. The porting plan reads that from slbounce's
-`trans.s`; it is not re-verified, and el2qual handles either state.
+after it: `START EL1  AFTER EBS EL2`, and `ENTRY HCR_EL2 0000000488000000`:
+E2H (bit 34), RW (bit 31, which these cores fix at 1) and TGE (bit 27),
+as slbounce's `trans.s` sets them (VERIFIED, runs 4 to 7). el2qual
+handles either E2H state.
 
 Reading run 1: the `16K WALK (TRIAL D)` line and its controls (want
 `OK FAULT FAULT`); `NV2`, `ECV`, `FGT` and `RNDR`, each with its ID field and
@@ -296,6 +297,16 @@ them yet (read it in the firmware setup at the next run).
 | 1 | 2026-10-23 | not recorded | not recorded (before `96e3d2c`) | only the firmware console's `... CALLING EXITBOOTSERVICES`; nothing drawn, nothing measured ("The screen") |
 | 2 | 2026-10-23 | 1 | `3323c2e8` (`96e3d2c`) | `NO GOP MODE HAS A FRAMEBUFFER ADDRESS (MODE 7)`, stopped before `ExitBootServices`; nothing measured |
 | 3 | 2026-10-23 | 1b, entry not recorded | `df1644c4` (`a83d95b`) | PASS: full report drawn on the DT framebuffer after `ExitBootServices`; `SLBOUNCE GATE: ZAP-SHADER DISABLED: OPEN` |
+| 4 | 2026-10-23 | 2, entry 1 (`nopac nosmp`) | `df1644c4` (`a83d95b`) | EL2 reached; NV2, ECV, FGT, RNDR absent; 16K walk INCONCLUSIVE (control A faulted; D `PAR 0x80D`) |
+| 5 | 2026-10-23 | 2, entry 2 (`nosmp`) | `df1644c4` (`a83d95b`) | PAuth signs (4/4), keys, round trip and `PACGA` OK on the boot CPU; 16K INCONCLUSIVE (D `0x805`) |
+| 6 | 2026-10-23 | 2, entry 3 (`nopac`) | `df1644c4` (`a83d95b`) | all 8 CPUs `DONE` at EL2 through PSCI; 16K INCONCLUSIVE on every core (boot CPU D `0x805`) |
+| 7 | 2026-10-23 | 2, entry 4 (no options) | `df1644c4` (`a83d95b`) | PAuth signs on all 8 cores; 16K INCONCLUSIVE (boot CPU D `0x80D`) |
+| 8 | 2026-10-23 | 2, entry 3 (`nopac`) | `15dfd800`, with the `tgran16.c` table cleaning | 16K WALKS on all 8 cores: controls `A OK  B FAULT  C FAULT`, boot CPU D `PAR 0x4001B00` (PA `0x4001000`, the address only a 16K walk reaches) |
+
+Runs 4 to 7 were matched to their entries by what the photographs show
+(CPU count, and whether PAuth ran); the order they were run in was not
+recorded. Every one ended in a complete report: no hang, no reboot, no
+unexpected exception.
 
 Full SHA-256 of run 3's `el2qual.efi`:
 `df1644c4e47f515d39cf92dee4c584819b75784d6b20d7261c08ead4681ca6b9`; it
@@ -327,6 +338,32 @@ show ones the hardware lacks, and `ID_AA64MMFR0` differs from what Windows
 caches (`0x0000011100101022`, which marks big-endian and the stage-2
 granules unsupported). Stage 2 reads the same registers at EL2 and
 measures the behaviour behind them.
+
+Runs 4 to 8, at EL2 after Secure Launch (VERIFIED for this machine; the
+firmware version is still to be recorded):
+
+| Question | Answer | Evidence |
+| --- | --- | --- |
+| EL2 entry | reached on every run; `HCR_EL2 0x0000000488000000` (E2H, RW, TGE), `SCTLR_EL2 0x30C5183D` (MMU and caches on) | `START EL1  AFTER EBS EL2`, `ENTRY HCR_EL2` |
+| ID registers at EL2 | identical to run 3's EL1 view, every register | the two columns of the register table |
+| Cores | slots 0 to 3 Cortex-A78C r0p0 (`MIDR 0x410FD4B0`), 4 to 7 Cortex-X1C r0p0 (`0x410FD4C0`), MPIDR affinities `0x000` to `0x700`; MIDR is the only ID register that differs | CPU table, `OTHER CPUS` list |
+| Secondaries | PSCI 1.1; `CPU_ON` returned 0 for slots 1 to 7, each ran el2qual at EL2, and `AFFINITY_INFO` reported it off afterwards | `PSCI 0 AFF 1` per slot |
+| PAuth | works on all 8 cores: `PACIA1716` changed 4/4 pointers, the key registers exist, sign then authenticate returned the pointer, `PACGA` runs; no step trapped to EL3 | runs 5 and 7 |
+| NV2, ECV, FGT, RNDR | absent: ID field 0 and the probe instruction undefined (`VNCR_EL2`, `CNTPOFF_EL2`, `HFGRTR_EL2`, `RNDR`) | runs 4 to 7 |
+| 16 KiB walk | walks on all 8 cores at stage 1: trial D resolved to `0x4001000` and the controls behaved, on every core (run 8). Runs 4 to 7 could not tell: their control A faulted (below) | run 8's `16K WALK (TRIAL D) ... WALKS` and its CPU table |
+
+Why runs 4 to 7 could not measure the walk: `probes/tgran16.c` runs its
+walks with `SCTLR_EL1.C` clear, which makes the EL1&0 stage 1 table walk
+Non-cacheable, while the stores that built the table went into the cache
+of UEFI's EL2 regime. The walker then read stale memory, which fits trial
+D's fault code changing between runs (level 2 translation fault `0x80D`,
+level 2 address size fault `0x805`) and QEMU, which models no caches,
+passing. That is INFERRED; what is VERIFIED is that cleaning the table to
+the point of coherency before each walk, as `tgran16.c` now does, made
+every control behave on every core (run 8).
+
+Phase 0A's CPU questions are answered. The firmware version these answers
+hold for is the one thing still to record.
 
 ## Recording results
 
