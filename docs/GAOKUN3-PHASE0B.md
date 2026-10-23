@@ -9,9 +9,9 @@ written choice between the two routes below.
 Status, 2026-10-23: **STARTED.** A first pass used the working Mac's own
 macOS 27.2 (26B118) kernels. The pinned 26A428 IPSW then arrived, and every
 figure was rerun on its J700 and VirtualMac2,1 kernelcaches: the kernels'
-own counts are identical (see "Findings"). B1, B2 and B4 are answered, and
-B3 from the device tree the IPSW ships. A1 to A3, A5 and A7 have an answer,
-and A4, A6, B5, B6 and B7 a partial one. B8, B3's cross-check against a
+own counts are identical (see "Findings"). B1, B2, B4 and B8 are answered,
+and B3 from the device tree the IPSW ships. A1 to A3, A5 and A7 have an
+answer, and A4, A6, B5, B6 and B7 a partial one. B3's cross-check against a
 booted virtual machine and the Phase 0C table are open. B0 is no longer
 needed for 26A428. `tools/kc-census.py` and its host test exist.
 
@@ -433,9 +433,9 @@ they are the kernelcache's 216 fileset entries.
 - None of the J700's hardest models is needed: no SEP, exclaves, ANS2,
   DART, AIC or SPTM.
 - Graphics is the open problem. The only display driver here is the
-  paravirtual GPU, which expects Apple's ParavirtualizedGraphics host.
-  Whether the kernel runs usefully on a boot framebuffer without it, or
-  with a Snapintosh-owned display kext instead, is UNKNOWN (B8).
+  paravirtual GPU, which expects Apple's ParavirtualizedGraphics host. A
+  console can run on the boot framebuffer, but a desktop needs a Metal
+  device (B8).
 
 ### 26A428 against 26B118
 
@@ -577,8 +577,9 @@ hold for both builds; 26A428's kexts add one `HVC`.
   The other 11, at 1 to 5 sites each, are unknown to it. On the gaokun3's
   Cortex cores these encodings are either undefined or Arm's own
   IMPLEMENTATION DEFINED registers. `HCR_EL2.TIDCP` traps EL1 accesses to
-  CRn 11 and 15 to EL2, so the monitor can intercept each one (INFERRED;
-  not measured).
+  CRn 11 and 15 to EL2, and the monitor already traps Apple's registers
+  that way on the A16 ([BOOT-CHAIN.md](BOOT-CHAIN.md#3-exception-levels-xnu-at-el1-believing-it-is-el2)).
+  On the gaokun3 this is not measured.
 - OBSERVED (26A428, a one-off scan of every executable word): the
   VirtualMac kernelcache writes no PAuth key register at all.
   - It touches none of the Apple key registers the monitor models:
@@ -588,10 +589,8 @@ hold for both builds; 26A428's kexts add one `HVC`.
   - The J700 kernelcache, by contrast, writes `KERNKey` lo and hi 6 times
     each, and `APIBKey` and `APDBKey` lo and hi 4 times each.
 
-  INFERRED: in a virtual machine something outside the kernel's code sets
-  the keys, most likely the hypervisor through the CPU-service calls below.
-  aquarat's notes tie `0xc1000000` to PAuth set-up. A Route B monitor would
-  have to serve those calls.
+  The hypervisor sets the keys, through the PAC hypercalls below (VERIFIED
+  in published source, INFERRED for 26A428).
 - B7 (26A428 and 26B118 alike): the counter.
   - The kernel reads `CNTVCT_EL0` at 891 sites and never reads an Apple
     counter alias or `CNTFRQ_EL0`.
@@ -617,38 +616,145 @@ hold for both builds; 26A428's kexts add one `HVC`.
   46 `HVC` sites, 21 put a constant in `x0` within their own basic block,
   12 distinct values. 11 load `x0` from memory, and 14 take it from their
   caller (13 in the kernel, plus `AppleVirtualPlatform`'s `_smc_call`).
-  Read as Arm SMCCC function IDs (Arm DEN 0028: bit 31 a fast call, bit 30
-  the 64-bit convention, bits 29:24 the owning service), all 12 are fast
-  calls:
+  All 12 are Arm SMCCC fast calls (Arm DEN 0028), and published XNU names
+  every one (`osfmk/arm64/hv_hvc.h` at `xnu-12377.121.6`):
 
-  | Owning service | Function IDs | Sites |
+  | Function ID | Name | Sites |
   | --- | --- | --- |
-  | 1, CPU service | `0xc1000000`, `0xc1000001`, `0xc10000f0` | 1, 8, 1 |
-  | 3, OEM service | `0xc3000003` to `0xc3000006`; `0x8300ff01` and `0x8300ff03` (32-bit), SMCCC's call-UID and revision queries | 1 each; 1, 1 |
-  | 6, vendor-specific hypervisor service | `0xc6000015`, `0xc6000016`, `0xc6000017` | 2, 2, 1 |
+  | `0xc1000000` | `VMAPPLE_PAC_SET_INITIAL_STATE` | 1 |
+  | `0xc1000001` | `VMAPPLE_PAC_GET_DEFAULT_KEYS` | 8 |
+  | `0xc10000f0` | `VMAPPLE_PAC_NOP` | 1 |
+  | `0xc3000003` to `0xc3000006` | `VMAPPLE_GET_MABS_OFFSET`, `VMAPPLE_GET_BOOTSESSIONUUID`, `VMAPPLE_VCPU_WFK`, `VMAPPLE_VCPU_KICK` | 1 each |
+  | `0x8300ff01`, `0x8300ff03` | the OEM range's call-UID and revision queries (UID `3B878185-AA62-4E1F-9DC9-D6799CBB6EBB`, revision 1.0) | 1, 1 |
+  | `0xc6000015` to `0xc6000017` | `VMAPPLE_NESTED_SPACE_MAP`, `VMAPPLE_NESTED_SPACE_UNMAP`, `VMAPPLE_NESTED_SPACE_PROTECT` | 2, 2, 1 |
 
-  `0xc1000000` is the value aquarat's notes give for `SET_INITIAL_STATE`
-  (documentation only); no other function is named here. Method: a one-off
-  scan back from each `HVC` to the start of its basic block, following
-  register moves, on `llvm-mc` disassembly (`build/phase0b/hvc-x0.py`,
-  output `hvc-x0-vma2macosap-26A428.txt`). The 25 sites without a local
-  constant need real data flow (B6 still partly open). The sites span the
-  whole text rather than sitting behind one wrapper, though 17 adjacent
-  pairs are under 256 bytes apart, so some come in small groups.
+  What published source says about them (VERIFIED in that source, INFERRED
+  for 26A428):
+  - The PAC range also has `SET_A_KEYS`, `SET_B_KEYS`,
+    `SET_EL0_DIVERSIFIER`, `SET_EL0_DIVERSIFIER_AT_EL1` and `SET_G_KEY`
+    (`0xc1000002` to `0xc1000006`). None is a local constant here.
+  - Under `HAS_PARAVIRTUALIZED_PAC`, `osfmk/arm64/pac_asm.h` issues
+    `SET_INITIAL_STATE`, `SET_B_KEYS` and `SET_EL0_DIVERSIFIER` with
+    `hvc #0`. After each one, `cbnz x0, .` spins forever if the call
+    failed, so a Route B monitor must implement the PAC calls or the guest
+    hangs at the first.
+  - The OEM calls are optional. `hvg_is_hcall_available`
+    (`osfmk/arm64/arm64_hypercall.c`) uses them only once `PAC_NOP`
+    succeeds, the OEM UID matches and the revision's major number is 1.
+  - The nested calls serve virtual machines run inside the guest.
+    `VMAPPLE_NESTED_CAPABILITIES` (`0xc6000000`) reports what is offered.
+
+  Method: a one-off scan back from each `HVC` to the start of its basic
+  block, following register moves, on `llvm-mc` disassembly
+  (`build/phase0b/hvc-x0.py`, output `hvc-x0-vma2macosap-26A428.txt`). The
+  25 sites without a local constant need real data flow (B6 still partly
+  open). The sites span the whole text rather than sitting behind one
+  wrapper, though 17 adjacent pairs are under 256 bytes apart, so some come
+  in small groups.
 - INFERRED, not a decision: this kernel needs none of the register classes
   Route A must rewrite, and its `HVC` interface is the paravirtual surface
   a Route B monitor would serve.
+
+### B8: the VirtualMac2,1 entry and boot handoff (26A428)
+
+**Entry.**
+- VERIFIED, binary: the kernelcache's `LC_UNIXTHREAD` entry is
+  `0xfffffe0009eb4480`, in `com.apple.kernel`'s `__TEXT_EXEC` at page
+  offset `0x480`.
+  - Its first instruction branches `0x3bf0` ahead.
+  - That code writes `OSLAR_EL1`, `DAIFSet`, `VBAR_EL1`, `TPIDRRO_EL0`,
+    `TPIDR_EL0` and `SPSel`.
+  - It loads from the boot-args register at offsets 8, 16, 24 and `0x470`.
+
+  The J700's entry is instead the first word of `__TEXT_BOOT_EXEC`, the
+  SPTM path ([BOOT-CHAIN.md](BOOT-CHAIN.md#6-boot-structures-and-the-device-tree)).
+- VERIFIED, published source: `osfmk/arm64/start.s` (`xnu-12377.121.6`,
+  which has `VMAPPLE` conditionals) describes this classic entry: `_start`
+  branches to `start_first_cpu`.
+  - The contract: EL1, `x0` the physical address of `boot_args`, MMU and
+    caches off.
+  - The kernel builds its own bootstrap page tables, then enables caches,
+    the MMU and PAC itself.
+  - The binary's four loads are the source's `BA_VIRT_BASE`,
+    `BA_PHYS_BASE`, `BA_MEM_SIZE` and `BA_BOOT_FLAGS`.
+
+  Beyond those first instructions, the match is INFERRED for 26A428.
+
+**What the loader hands over.**
+- `boot_args` is the same revision-2 structure the J700 takes
+  (`pexpert/pexpert/arm64/boot.h`):
+  - memory bases and size, and the top of kernel data;
+  - `Video` (base, display mode, row bytes, width, height, depth);
+  - the device-tree pointer and length at `+0x60`/`+0x68`;
+  - the 1,024-byte command line at `+0x6c`;
+  - `bootFlags` at `+0x470`.
+- A Route B loader therefore hands over `boot_args` and a completed device
+  tree. There is no SPTM boot structure, frame table or loader-built
+  kernel page tables, all of which the J700 path needs.
+- The device tree is the B3 template, completed as iBoot would. Unlike the
+  J700's tree, whose six `cpu` nodes all ship `waiting`, this one ships
+  `cpu0` `running` and the other 31 `waiting`.
+- INFERRED, for either route: the gaokun3 walks the 16 KiB granule natively
+  (Phase 0A), so the kernel's own 16 KiB tables run directly at stage 1.
+  The shadow layer's 16 KiB-on-4 KiB translation
+  ([BOOT-CHAIN.md](BOOT-CHAIN.md#5-page-tables-a-16-kib-guest-on-a-4-kib-mmu))
+  would not be needed, leaving the monitor a stage 2 only.
+
+**Snapintosh's own kexts.**
+- VERIFIED, source and string search: classic XNU picks up an AuxKC the
+  booter placed in memory from two `/chosen/memory-map` ranges, `AuxKC`
+  and `AuxKC-mach_header`.
+  - The collection must sit below the kernel's lowest segment, or the
+    kernel panics (`osfmk/arm64/arm_vm_init.c`, near line 1363);
+    `OSKext.cpp` then consumes it.
+  - The VirtualMac kernelcache contains both property names and the panic
+    text.
+  - The J700 kernelcache contains neither, because Snapintosh hands it the
+    AuxKC through the SPTM structure (`probes/xnuboot.py:1435`).
+- UNKNOWN: whether `OSKext` and `AppleVPBootPolicy`, the virtual machine's
+  boot-policy kext in place of the J700's `BootPolicy`, accept a Snapintosh
+  collection.
+- VERIFIED: every `OSBundleLibraries` entry of `SnapintoshBootFramebuffer`,
+  `AdrenoX2`, `SnapI2CHID` and `SnapintoshQCC2072` is in the VirtualMac
+  kernelcache.
+- VERIFIED: 198 of the 199 fileset entries both kernelcaches carry have the
+  same `LC_UUID`, all but `com.apple.kernel`. They include
+  `IOMobileGraphicsFamily`, `IOGPUFamily`, `IOSurface`, `IOGraphicsFamily`
+  and `IOPCIFamily`.
+- INFERRED: the ABI headers Snapintosh reconstructs from the J700
+  kernelcache hold for these shared families. The kexts' personalities
+  match J700 or Snapintosh device nodes (`disp0,t8140`, `snapintosh,...`),
+  which a loader would add to the VirtualMac tree.
+
+**Graphics without the paravirtual GPU.**
+- Console: `boot_args.Video` gives the kernel a boot framebuffer, and
+  `IOBootFramebuffer`, the class `SnapintoshBootFramebuffer` binds, is in
+  `IOGraphicsFamily`, present here. On the gaokun3 the device tree's
+  simple-framebuffer at `0xc6200000` (VERIFIED in Phase 0A) could back it
+  (INFERRED).
+- Desktop: on the A16, WindowServer waits 30 s for a Metal device and
+  aborts, and a boot framebuffer cannot substitute
+  ([GUI-BOOT-ROADMAP.md](GUI-BOOT-ROADMAP.md), section 6; OBSERVED there).
+  - In a VirtualMac the Metal device is the paravirtual GPU, which needs
+    Apple's ParavirtualizedGraphics host.
+  - The gaokun3's GPU is an Adreno 690 (`vulkaninfo` under Linux in
+    gaokun-android's `docs/hw-inventory.md`), not the X2 Elite's GPU, which
+    `gpu/adreno-kext` and `gpu/air2ir3` target.
+
+  INFERRED: a desktop on the gaokun3 needs a Metal driver for the Adreno
+  690 whichever route is taken, so graphics does not separate the routes.
 
 ### Still open
 
 - B3's cross-check: the as-booted tree from `ioreg` inside a macOS virtual
   machine, which needs one.
-- B8: entry and boot handoff, including whether graphics can do without
-  the paravirtual GPU.
+- B8: whether `OSKext` and `AppleVPBootPolicy` accept a Snapintosh AuxKC.
 - B5: what the 11 implementation-defined registers the monitor does not
   know are, and what each needs.
-- B6: the 25 `HVC` sites without a local constant; what each function
-  does, especially how PAuth keys reach the guest.
+- B6: which calls the 25 `HVC` sites without a local constant make, and the
+  exact semantics of each PAC call a monitor must serve.
+- Port-wide, not a route question: a Metal driver for the gaokun3's
+  Adreno 690.
 - B7: tick constants outside `timebase-frequency`, and the gaokun3's own
   `CNTFRQ_EL0`.
 - A4: the `SPSR` constants.
