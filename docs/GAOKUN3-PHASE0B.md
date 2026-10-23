@@ -859,6 +859,28 @@ collapsed-key-domain design on the gaokun3's QARMA5 implementation, or any
 platform device model. The Phase 0C QEMU check stays failed until the guest
 reaches a serial console or a more specific platform failure.
 
+**The TIDCP access set, measured (B5).** The stub's first version RAZ/WIed
+every implementation-defined system-register access silently, which left open
+whether that stand-in caused the panic. It now records each trap,
+deduplicated by register and direction, prints each register the first time
+it appears, and keeps counts in guest memory for the harness to read back.
+Verified on the synthetic guest: its one probe of `s3_4_c15_c0_4` is logged
+and decoded.
+
+On the stock 26A428 kernel the log reads back valid and **empty**: 0 distinct
+registers, 0 accesses, 0 dropped. So the kernel reaches its stopping point
+without a single implementation-defined register access, and:
+
+- the stub's RAZ/WI stand-in is **not** what stops this boot, because it
+  never ran;
+- this run says nothing about the 11 registers B5 still owes, because the
+  guest stops before reaching any of them. B5 stays open and needs a run
+  that gets past the panic, or offline work.
+
+That is the evidence for treating the stop as a QEMU or minimal-platform
+limitation rather than a missing Snapintosh register contract. It is not
+proof of where the fault lies, only that one candidate is excluded.
+
 **Next for this check:** identify why the generic QEMU model presents debug
 exceptions unmasked to XNU after the recorded PAC calls. A direct QEMU
 `vmapple` comparison is **not available for this 26A428 kernel**: installed
@@ -878,7 +900,9 @@ fabricated success or patching the stock kernel.
   QEMU's `vmapple` model is not a 26A428 control: QEMU 11.1.2 lacks it and
   upstream supports only macOS 12.x guests for that model.
 - B5: what the 11 implementation-defined registers the monitor does not
-  know are, and what each needs.
+  know are, and what each needs. The QEMU smoke test now logs every
+  TIDCP-trapped access, but the stock kernel takes none before it stops, so
+  it cannot characterise them yet.
 - B6: every site is named. Open: the nested hypervisor's semantics (not
   in published source), and whether the owner accepts collapsed PAC key
   domains on the gaokun3.

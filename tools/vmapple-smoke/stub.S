@@ -73,6 +73,14 @@ _start:
 	ldr	x20, [x19, #PARAM_ENTRY]
 	ldr	x21, [x19, #PARAM_X0]
 
+	// Start the TIDCP log empty, so a stale page cannot look like data.
+	ldr	x0, =TIDCP_LOG_PA
+	ldr	x1, =TIDCP_LOG_MAGIC
+	str	x1, [x0, #TIDCP_MAGIC]
+	str	xzr, [x0, #TIDCP_USED]
+	str	xzr, [x0, #TIDCP_TOTAL]
+	str	xzr, [x0, #TIDCP_DROPPED]
+
 	ldr	x0, =msg_enter
 	bl	uart_puts
 	// The harness checks the device tree's timebase against this.
@@ -360,6 +368,7 @@ pac_install_keys:
 /* Trapped system register: Apple IMPDEF via TIDCP (and any other EC 0x18).
  * Reads read as zero, writes are ignored, and the instruction is skipped. */
 do_sysreg:
+	bl	tidcp_record		// B5: note the register, then RAZ/WI below
 	tbz	x25, #0, 1f		// ISS bit0: 0 = write (MSR), 1 = read (MRS)
 	ubfx	x0, x25, #5, #5		// Rt
 	cmp	x0, #31			// xzr target: nothing to write
@@ -371,6 +380,67 @@ do_sysreg:
 	msr	ELR_EL2, x0
 	RESTORE_FRAME
 	eret
+
+/* Record one TIDCP-trapped system-register access, deduplicated by register
+ * and direction, and print each register the first time it is seen (with
+ * tracing on) so the serial log carries the set in first-seen order even if
+ * the guest later wedges. x25 holds ESR_EL2. Everything except x24, x25 and
+ * x29 is dead here: the guest's copy is in the frame. */
+tidcp_record:
+	mov	x28, x30
+
+	and	x19, x25, #TIDCP_ISS_MASK
+	mov	x0, #TIDCP_RT_MASK
+	bic	x19, x19, x0			// key: the register and direction
+
+	ldr	x20, =TIDCP_LOG_PA
+	ldr	x0, [x20, #TIDCP_TOTAL]
+	add	x0, x0, #1
+	str	x0, [x20, #TIDCP_TOTAL]
+
+	ldr	x21, [x20, #TIDCP_USED]
+	add	x22, x20, #TIDCP_ENTRIES
+	mov	x23, xzr
+1:	cmp	x23, x21
+	b.hs	2f
+	ldr	x0, [x22]
+	cmp	x0, x19
+	b.eq	4f
+	add	x22, x22, #TIDCP_ENTRY_SIZE
+	add	x23, x23, #1
+	b	1b
+
+2:	cmp	x21, #TIDCP_MAX
+	b.hs	5f				// full: keep counting, stop listing
+	str	x19, [x22]
+	mov	x0, #1
+	str	x0, [x22, #8]
+	mrs	x0, ELR_EL2
+	str	x0, [x22, #16]
+	add	x21, x21, #1
+	str	x21, [x20, #TIDCP_USED]
+
+	ldr	x0, =PARAMS_PA
+	ldr	x0, [x0, #PARAM_FLAGS]
+	tbz	x0, #0, 3f
+	ldr	x0, =msg_tidcp
+	bl	uart_puts
+	mov	x0, x25
+	bl	uart_hex
+3:	mov	x30, x28
+	ret
+
+4:	ldr	x0, [x22, #8]			// seen before: just count it
+	add	x0, x0, #1
+	str	x0, [x22, #8]
+	mov	x30, x28
+	ret
+
+5:	ldr	x0, [x20, #TIDCP_DROPPED]
+	add	x0, x0, #1
+	str	x0, [x20, #TIDCP_DROPPED]
+	mov	x30, x28
+	ret
 
 /* Angel semihosting SYS_EXIT (ApplicationExit). x1 from the guest is the
  * exit code; QEMU with -semihosting stops cleanly. */
@@ -432,6 +502,7 @@ msg_cntfrq:	.asciz "EL2: cntfrq "
 msg_noparam:	.asciz "EL2: bad params magic\n"
 msg_hvc:	.asciz "EL2: hvc "
 msg_spsr:	.asciz "EL2: guest spsr "
+msg_tidcp:	.asciz "EL2: tidcp "
 msg_fault:	.asciz "EL2: unexpected exception esr/elr\n"
 
 .section .bss

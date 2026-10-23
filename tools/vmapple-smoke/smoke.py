@@ -42,6 +42,8 @@ STUB_PA = 0x40200000
 PARAMS_PA = 0x43000000
 FAULT_PA = 0x43001000
 MINIKERNEL_PA = 0x45000000
+TIDCP_LOG_PA = 0x43002000
+TIDCP_MAX = 64
 SMOKE_PARAMS_MAGIC = 0x564D41504C450001
 SMOKE_FAULT_MAGIC = 0x5641554C54
 PARAM_FLAG_TRACE = 1
@@ -163,6 +165,8 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, trace, 
             monitor_text = _monitor_ask(mon, [
                 'info registers',
                 'x/4i $pc',
+                f'xp/4gx {TIDCP_LOG_PA:#x}',
+                f'xp/{4 * TIDCP_MAX}gx {TIDCP_LOG_PA + 0x20:#x}',
             ])
             proc.kill()
             break
@@ -233,6 +237,7 @@ def boot(args):
         kcload.disasm_around(kc, pc)
     if monitor_text:
         (out / 'monitor.txt').write_text(monitor_text)
+    kcload.report_tidcp(text, monitor_text, out)
     return kcload.report(text, out)
 
 

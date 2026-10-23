@@ -284,3 +284,136 @@ def report(text, out):
         return 1
     print('RESULT: PASS (early boot reached the kernel banner under the EL2 stub)')
     return 0
+
+
+# ---- B5: implementation-defined registers the guest actually touches -----
+#
+# HCR_EL2.TIDCP traps EL1 accesses to the CRn 11 and 15 system-register space
+# to EL2. The smoke stub RAZ/WIs them and records each one; these helpers turn
+# that record into names. The ISS layout for EC 0x18 (trapped MSR/MRS) is from
+# the Arm ARM: bit 0 direction (0 write, 1 read), 4:1 CRm, 9:5 Rt, 13:10 CRn,
+# 16:14 Op1, 19:17 Op2, 21:20 Op0.
+
+# The two encodings docs/GAOKUN3-PHASE0B.md (B5) records the monitor as already
+# knowing, so a run can separate "new to the monitor" from "already handled".
+KNOWN_IMPDEF = {
+    's3_4_c15_c1_3': 'AMX_STATE_T_EL1 (compat/fast-trap.h)',
+    's3_4_c15_c1_4': 'answered 0 (probes/sysregzero.py)',
+}
+
+TIDCP_LINE = 'EL2: tidcp '
+
+
+def decode_tidcp(esr):
+    """(name, direction, rt) for a TIDCP-trapped access from its ESR or key."""
+    iss = esr & 0x3fffff
+    crm = (iss >> 1) & 0xf
+    rt = (iss >> 5) & 0x1f
+    crn = (iss >> 10) & 0xf
+    op1 = (iss >> 14) & 0x7
+    op2 = (iss >> 17) & 0x7
+    op0 = (iss >> 20) & 0x3
+    return f's{op0}_{op1}_c{crn}_c{crm}_{op2}', 'read' if iss & 1 else 'write', rt
+
+
+def tidcp_from_serial(text):
+    """(name, direction) pairs in the order the stub first saw them."""
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith(TIDCP_LINE):
+            continue
+        try:
+            esr = int(line[len(TIDCP_LINE):].split()[0], 16)
+        except (ValueError, IndexError):
+            continue
+        name, direction, _rt = decode_tidcp(esr)
+        if (name, direction) not in out:
+            out.append((name, direction))
+    return out
+
+
+def parse_monitor_words(monitor_text, base):
+    """The 64-bit words QEMU's `xp` printed, keyed by physical address. The
+    human monitor echoes typed characters, so only address-prefixed lines are
+    read, and each is `<addr>: 0x.. 0x..`."""
+    words = {}
+    for line in monitor_text.splitlines():
+        line = line.strip()
+        if ':' not in line:
+            continue
+        addr, _, rest = line.partition(':')
+        addr = addr.strip()
+        if not addr or any(c not in '0123456789abcdefABCDEF' for c in addr):
+            continue
+        values = [v for v in rest.split() if v.startswith('0x')]
+        if not values:
+            continue
+        try:
+            at = int(addr, 16)
+        except ValueError:
+            continue
+        for i, v in enumerate(values):
+            try:
+                words[at + 8 * i] = int(v, 16)
+            except ValueError:
+                pass
+    return words
+
+
+TIDCP_LOG_PA = 0x43002000
+TIDCP_LOG_MAGIC = 0x54494443504C4F47
+TIDCP_MAX = 64
+
+
+def tidcp_log(monitor_text):
+    """(totals, entries) from the stub's log, or (None, []) if it is absent.
+    entries are (name, direction, count, first_elr), busiest first."""
+    words = parse_monitor_words(monitor_text, TIDCP_LOG_PA)
+    if words.get(TIDCP_LOG_PA) != TIDCP_LOG_MAGIC:
+        return None, []
+    used = min(words.get(TIDCP_LOG_PA + 0x08, 0), TIDCP_MAX)
+    totals = {'used': used,
+              'total': words.get(TIDCP_LOG_PA + 0x10, 0),
+              'dropped': words.get(TIDCP_LOG_PA + 0x18, 0)}
+    entries = []
+    for i in range(used):
+        at = TIDCP_LOG_PA + 0x20 + i * 32
+        key = words.get(at)
+        if key is None:
+            continue
+        name, direction, _rt = decode_tidcp(key)
+        entries.append((name, direction, words.get(at + 8, 0), words.get(at + 16, 0)))
+    entries.sort(key=lambda e: -e[2])
+    return totals, entries
+
+
+def report_tidcp(text, monitor_text, out=None):
+    """Print the run's implementation-defined register set, and save it."""
+    seen = tidcp_from_serial(text)
+    totals, entries = tidcp_log(monitor_text or '')
+    print('--- implementation-defined registers trapped at EL2 (B5) ---')
+    if totals is None and not seen:
+        # Without the log we cannot tell "no trap" from "not read back", and
+        # the difference decides whether this run says anything about B5.
+        print('  UNKNOWN: the stub\'s log was not read back, so this run'
+              ' measured nothing')
+        return
+    if totals is not None:
+        print(f"  {totals['used']} distinct, {totals['total']} accesses"
+              + (f", {totals['dropped']} past the table" if totals['dropped'] else ''))
+        if not totals['total']:
+            print('  none: the guest reached its stopping point without one,'
+                  ' so the stub\'s RAZ/WI never ran')
+            return
+    elif not entries:
+        print(f'  {len(seen)} seen on the serial line; the log was not read back')
+    rows = entries or [(n, d, 0, 0) for n, d in seen]
+    for name, direction, count, elr in rows:
+        note = KNOWN_IMPDEF.get(name, 'NEW to the monitor')
+        where = f'  first at {elr:#x}' if elr else ''
+        tally = f'{count:>7}' if count else '      ?'
+        print(f'  {tally}  {name:<18} {direction:<5}  {note}{where}')
+    if out is not None:
+        lines = [f'{n}\t{d}\t{c}\t{e:#x}' for n, d, c, e in rows]
+        (out / 'tidcp.tsv').write_text('\n'.join(lines) + '\n')

@@ -95,10 +95,73 @@ def test_layout_alignment():
           'loader ranges ordered')
 
 
+def test_tidcp_decoder():
+    # s3_4_c15_c10_6, the Apple counter alias the A16 monitor emulates, read.
+    iss = (3 << 20) | (6 << 17) | (4 << 14) | (15 << 10) | (9 << 5) | (10 << 1) | 1
+    name, direction, rt = kcload.decode_tidcp(0x18 << 26 | iss)
+    check(name == 's3_4_c15_c10_6', f'decoded name, got {name}')
+    check(direction == 'read', 'decoded direction')
+    check(rt == 9, 'decoded Rt')
+    # The same register written, with a different Rt, is the same register.
+    iss_w = (3 << 20) | (6 << 17) | (4 << 14) | (15 << 10) | (2 << 5) | (10 << 1)
+    name_w, direction_w, rt_w = kcload.decode_tidcp(iss_w)
+    check(name_w == name and direction_w == 'write' and rt_w == 2, 'write form')
+    # Serial lines are deduplicated by register and direction, order kept.
+    serial = ('EL2: tidcp %016x\n' % (0x18 << 26 | iss)) * 2 + \
+             'EL2: tidcp %016x\n' % iss_w + 'EL2: hvc 00000000c1000000\n'
+    check(kcload.tidcp_from_serial(serial) == [('s3_4_c15_c10_6', 'read'),
+                                               ('s3_4_c15_c10_6', 'write')],
+          'serial set in first-seen order')
+    check(kcload.tidcp_from_serial('EL2: tidcp zz\n') == [], 'a bad line is ignored')
+
+
+def test_tidcp_log_parse():
+    base = kcload.TIDCP_LOG_PA
+    iss = (3 << 20) | (6 << 17) | (4 << 14) | (15 << 10) | (10 << 1) | 1
+    other = (3 << 20) | (3 << 14) | (15 << 10) | (1 << 1) | 1
+    mon = (
+        f'(qemu) xp/4gx {base:#x}\n'
+        f'{base:016x}: {kcload.TIDCP_LOG_MAGIC:#018x} 0x0000000000000002\n'
+        f'{base + 0x10:016x}: 0x0000000000000407 0x0000000000000000\n'
+        f'{base + 0x20:016x}: {iss:#018x} 0x0000000000000400\n'
+        f'{base + 0x30:016x}: 0xfffffe0009eb0000 0x0000000000000000\n'
+        f'{base + 0x40:016x}: {other:#018x} 0x0000000000000007\n'
+        f'{base + 0x50:016x}: 0xfffffe0009ec0000 0x0000000000000000\n')
+    totals, entries = kcload.tidcp_log(mon)
+    check(totals == {'used': 2, 'total': 0x407, 'dropped': 0}, f'log totals, got {totals}')
+    check([e[0] for e in entries] == ['s3_4_c15_c10_6', 's3_3_c15_c1_0'],
+          f'busiest first, got {[e[0] for e in entries]}')
+    check(entries[0][2] == 0x400 and entries[0][3] == 0xfffffe0009eb0000, 'count and ELR')
+    check(kcload.tidcp_log('no log here') == (None, []), 'absent log reported as absent')
+    check('s3_4_c15_c1_3' in kcload.KNOWN_IMPDEF, 'known-register table is populated')
+
+
+def test_tidcp_report_distinguishes_empty_from_unreadable(capsys=None):
+    import io
+    import contextlib
+    base = kcload.TIDCP_LOG_PA
+    empty = (f'{base:016x}: {kcload.TIDCP_LOG_MAGIC:#018x} 0x0000000000000000\n'
+             f'{base + 0x10:016x}: 0x0000000000000000 0x0000000000000000\n')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        kcload.report_tidcp('', empty)
+    out = buf.getvalue()
+    check('none:' in out and 'RAZ/WI never ran' in out, f'empty log is stated as empty: {out!r}')
+    check('UNKNOWN' not in out, 'a readable empty log is not reported as unknown')
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        kcload.report_tidcp('', 'nothing here')
+    out = buf.getvalue()
+    check('UNKNOWN' in out, f'an unreadable log is stated as unknown: {out!r}')
+
+
 def main():
     test_dt_completion()
     test_boot_args()
     test_layout_alignment()
+    test_tidcp_decoder()
+    test_tidcp_log_parse()
+    test_tidcp_report_distinguishes_empty_from_unreadable()
     print(f'PASS test-vmapple-smoke: {checks} checks')
 
 

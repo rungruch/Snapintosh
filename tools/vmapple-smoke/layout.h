@@ -66,4 +66,24 @@
 #define SMOKE_DEFAULT_ROP_COOKIE  0x524f50abcdef0001ull
 #define SMOKE_DEFAULT_JOP_COOKIE  0x4a4f50abcdef0001ull
 
+/* The TIDCP access log (Phase 0B task B5). HCR_EL2.TIDCP traps the guest's
+ * implementation-defined system-register accesses to EL2; the stub RAZ/WIs
+ * them, which is a diagnostic stand-in and not a monitor contract. To learn
+ * which registers the stock kernel actually touches, every trap is recorded
+ * here, deduplicated by register and direction so a register read in a loop
+ * takes one slot. Rt is masked out of the key because it is incidental.
+ *   +0x00 magic  +0x08 entries used  +0x10 total traps  +0x18 dropped
+ *   +0x20 entries[]: key (ESR ISS without Rt), count, first ELR, reserved */
+#define TIDCP_LOG_PA     0x43002000ull
+#define TIDCP_LOG_MAGIC  0x54494443504c4f47ull   /* "TIDCPLOG" */
+#define TIDCP_MAGIC      0x00
+#define TIDCP_USED       0x08
+#define TIDCP_TOTAL      0x10
+#define TIDCP_DROPPED    0x18
+#define TIDCP_ENTRIES    0x20
+#define TIDCP_ENTRY_SIZE 32
+#define TIDCP_MAX        64
+#define TIDCP_ISS_MASK   0x3fffff                /* ESR ISS for EC 0x18 */
+#define TIDCP_RT_MASK    0x3e0                   /* ISS bits 9:5, the Rt field */
+
 #endif
