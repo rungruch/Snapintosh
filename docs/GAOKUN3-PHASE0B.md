@@ -11,8 +11,9 @@ macOS 27.2 (26B118) kernels. The pinned 26A428 IPSW then arrived, and every
 figure was rerun on its J700 and VirtualMac2,1 kernelcaches: the kernels'
 own counts are identical (see "Findings"). B1, B2, B4 and B8 are answered,
 and B3 from the device tree the IPSW ships. A1 to A3, A5 and A7 have an
-answer, and A4, A6, B5, B6 and B7 a partial one. B3's cross-check against a
-booted virtual machine and the Phase 0C table are open. B0 is no longer
+answer, and A4, A6, B5, B6 and B7 a partial one. The Phase 0C comparison
+is drafted ([below](#phase-0c-comparison-draft)); B3's cross-check against
+a booted virtual machine is open. B0 is no longer
 needed for 26A428. `tools/kc-census.py` and its host test exist.
 
 ## Where things stand
@@ -760,6 +761,46 @@ hold for both builds; 26A428's kexts add one `HVC`.
 - A4: the `SPSR` constants.
 - A6: hot paths, including whether the FGT and SME sites can run. This
   needs the 26A428 KDK, because `com.apple.kernel` has no symbols.
-- The Route A rewrite judgement and the Phase 0C comparison table.
+- The Route A rewrite judgement, which waits on A6, and Phase 0C's
+  decision record.
 
 Everything except A6 needs only the extracted sets.
+
+## Phase 0C comparison (draft)
+
+Drafted 2026-10-23 from the findings above; each cell keeps the evidence
+class of the finding it rests on. It is the input to Phase 0C's decision
+record, not the decision.
+
+| | Route A: J700 kernel (`j700ap`) | Route B: VirtualMac2,1 kernel (`vma2macosap`) |
+| --- | --- | --- |
+| Where the kernel runs | EL1, while it believes it is at EL2 under VHE | EL1, as it expects |
+| CPU fit | PAuth and 16 KiB fit. NV2, ECV, FGT and RNDR, which the A16 path rests on, are absent (VERIFIED, Phase 0A) | PAuth and 16 KiB are all an EL1 arm64e guest needs (VERIFIED, Phase 0A). The kernel uses no EL2 feature (OBSERVED, census) |
+| Kernel changes | 146 sites in `com.apple.kernel`: 97 EL2 register moves, 36 `_EL12` aliases, 12 `CurrentEL` reads and the one `ERET`, which returns with an EL2 mode (OBSERVED). None of them can trap without NV or FGT, so they must be rewritten (INFERRED), beyond what [KERNEL-PATCHES.md](KERNEL-PATCHES.md#policy) allows today. `AppleProcessorTrace` adds 44 more if it loads. Which sites are hot is UNKNOWN (A6) | None found. The stock kernelcache runs, with Snapintosh's kexts handed in as an AuxKC through `/chosen/memory-map` (mechanism VERIFIED; acceptance by `AppleVPBootPolicy` UNKNOWN) |
+| Boot handoff | The A16's SPTM entry, reused: MMU on, loader-built tables, the SPTM boot structure, the AuxKC handed through it | The classic entry: EL1, MMU off, `boot_args` and the completed tree. No SPTM structure, frame table or loader-built tables (VERIFIED, B8). New loader path |
+| SPTM and TXM | Required: 348 call words, served by `compat/sptm*.c` and `compat/txm*.c` (reused) | None (VERIFIED, B2) |
+| Page tables | The kernel's 16 KiB tables can run natively at stage 1, so the shadow layer is not needed (INFERRED) | Same (INFERRED) |
+| Counter and timer | All 1,060 Apple alias reads trapped through `HCR_EL2.TIDCP` and served in software, as on the A16. The 24 MHz guest rate stays, since the WD1 watchdog forces it ([BOOT-CHAIN.md](BOOT-CHAIN.md#9-timers)). Without ECV, nothing stops the physical rate leaking through the architectural counter; the kernel itself never reads one (INFERRED) | 891 `CNTVCT_EL0` reads at the device tree's rate: put 19.2 MHz in the tree and no ECV or trap is needed (INFERRED, B7). No WD1 watchdog driver or node (VERIFIED). Other 24 MHz assumptions UNKNOWN |
+| Pointer authentication | The kernel sets its own keys (28 key-register writes, OBSERVED). The monitor's PAuth handling (`compat/pauth*.c`) applies (reused) | The hypervisor holds the keys. The PAC hypercalls must be served, or the guest spins at the first (VERIFIED in source). New service, with a call on each user-key switch (INFERRED from `pac_asm.h`) |
+| Hypercalls | None: 0 `HVC`, 0 `SMC` (OBSERVED) | 46 `hvc #0` sites (B6). The PAC calls are required; the OEM calls (clock offset, boot-session UUID, vCPU wait and kick) and the nested calls are optional (VERIFIED in source). 25 sites' calls are not yet traced |
+| Interrupts | A virtual AIC on the GIC (`compat/aic.c`, `compat/irq-forward.c`, reused) | A GICv3 for the guest; the gaokun3 has GICv3 system registers (OBSERVED). New, whether as a model or through the GIC's virtualization interface, which is not measured |
+| Device models | The J700 set the A16 uses: AIC, ANS2 storage on the NVMe host, DART, SEP, PMGR and the rest (reused, re-targeted to the gaokun3's hardware) | A small virtual platform (B3, B4): PL011, PL031 and `avp,rtc`, PL061, pvpanic, `aes,s8000` version 3 (a variant of `compat/aes-engine.c`), `avp,ctrr`, `avp,sealed-registers`, and a PCIe host bridge with virtio devices backed by the monitor's own drivers (the disk through `compat/nvme-host.c`). Almost all new |
+| IMPDEF registers | 1,881 accesses across 188 registers, trapped through TIDCP as on the A16 (reused) | 56 accesses across 13 registers: 2 known to the monitor, 11 new (B5) |
+| Graphics | Console on the boot framebuffer, as on the A16. A desktop needs a Metal driver for the Adreno 690 | The same. The paravirtual GPU needs Apple's ParavirtualizedGraphics host, so a desktop also needs a Metal driver for the Adreno 690 |
+| Main risks | The breadth of the rewrite, and its cost on hot paths (the `ERET` on every exception return, INFERRED); the policy change it needs; A6 cannot be sized without the KDK | The exact semantics of the PAC calls (B6); AuxKC acceptance; which virtio types each driver takes; the as-booted tree (B3 cross-check); the 11 IMPDEF registers |
+| Evidence still missing | A4 (`SPSR` constants), A6 (hot paths, needs the KDK) | B3 cross-check, B5 and B6 remainders, `AppleVPBootPolicy`'s AuxKC rules |
+
+**Reading the table** (INFERRED, not a decision):
+
+- Route B fits the gaokun3's CPU as it stands, and no kernel change has
+  been found for it. It drops the SPTM, TXM, SEP, ANS2, DART and AIC
+  models. Its cost is new work: a classic loader, a small virtual platform
+  with virtio, and the PAC hypercall service.
+- Route A keeps most of the existing monitor. But it needs at least 146
+  kernel sites rewritten, which the current policy does not allow,
+  including the exception-return `ERET`, and its cost cannot be sized
+  until A6 has the KDK.
+- Graphics is the same problem on both routes.
+- Phase 0C decides, including whether to measure Route B's unknowns first.
+  Candidates are a GICv3 virtualization check in el2qual, and the
+  as-booted VirtualMac tree from a macOS virtual machine on this Mac.
