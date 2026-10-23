@@ -9,10 +9,11 @@ written choice between the two routes below.
 Status, 2026-10-23: **STARTED.** A first pass used the working Mac's own
 macOS 27.2 (26B118) kernels. The pinned 26A428 IPSW then arrived, and every
 figure was rerun on its J700 and VirtualMac2,1 kernelcaches: the kernels'
-own counts are identical (see "Findings"). B1 and B2 are answered; A1 to A3
-and A5 have an answer; A4, A6, A7, B5, B6 and B7 a partial one. B3, B4, B8
-and the Phase 0C table are open, and B0 is no longer needed for 26A428.
-`tools/kc-census.py` and its host test exist.
+own counts are identical (see "Findings"). B1, B2 and B4 are answered, and
+B3 from the device tree the IPSW ships. A1 to A3 and A5 have an answer, and
+A4, A6, A7, B5, B6 and B7 a partial one. B8, B3's cross-check against a
+booted virtual machine and the Phase 0C table are open. B0 is no longer
+needed for 26A428. `tools/kc-census.py` and its host test exist.
 
 ## Where things stand
 
@@ -322,6 +323,115 @@ without evidence.
   `compat/txm*.c`, the shadow layer's SPTM side or a SEP model; what the
   shadow layer's translation side must still do is B8's question.
 
+### B3: the VirtualMac2,1 device model (26A428)
+
+`python3 probes/appledt.py downloads/extracted/vma2macosap/DeviceTree.vma2macosap`
+reads 139 nodes in 61,208 bytes. A one-off script drove the same parser to
+list every node (`build/phase0b/dt-nodes-vma2macosap-26A428.tsv`), and the
+tree re-serialises to the identical bytes. VERIFIED from the tree unless
+marked otherwise:
+
+- The root is `model VirtualMac2,1`, with `compatible` including
+  `AppleVirtualPlatformARM` and `target-type VMA2MACOS`.
+- It is a template:
+  - 25 properties carry the placeholder flag, 8 of them the root's
+    identity fields (`syscfg/...` recipes);
+  - the root `clock-frequency` and `/memory`'s `reg` are 0;
+  - `/chosen/memory-map` holds 16 all-zero `MemoryMapReserved-*` slots.
+
+  INFERRED: the virtual machine's boot firmware completes it, as iBoot
+  completes the J700's.
+- Every device is under `/arm-io` (`arm-io,vmapple1`, `soc-generation
+  VMApple2`). Its `ranges` maps child address 0 to physical `0x10000000`
+  (`0x70000000` bytes); the offsets below are child addresses.
+- `/cpus` holds 32 `cpu` nodes (`ARM,v8`), each with `timebase-frequency`
+  and `clock-frequency` 24,000,000.
+- There is no timer node, and no storage, network, input, NVRAM or
+  SEP-like device node. Those devices sit behind PCIe (B4).
+
+| Group | Node (`compatible`) | Offset, size; first interrupt cell | Driver (kext: class) | In Snapintosh today |
+| --- | --- | --- | --- | --- |
+| Interrupt controller | `gic` (`gic,vmapple1`, `ARM,gicv3`) | `0x0` 64 KiB, `0x10000` 4 MiB, `0xfff0000` 64 KiB | `AppleARMGIC`: `AppleARMGICv3` | No; `compat/aic.c` is the J700's AIC. The gaokun3 has GICv3 system registers (`ID_AA64PFR0_EL1.GIC` 1, firmware `GIC V3`; [GAOKUN3-QUALIFICATION.md](GAOKUN3-QUALIFICATION.md#runs-so-far)) |
+| Power and reset | `pmgr` (`ARM,psci`) | none | `AppleVirtualPlatform`: `ApplePSCI` | No; the gaokun3's firmware has PSCI 1.1 (VERIFIED, Phase 0A) |
+| Console | `uart0` (`arm,pl011`) | `0x10010000` 64 KiB; none | `AppleSerialShim` (matched by the name `uart0`) | No; the J700's UARTs are `uart-1,samsung` |
+| Clocks | `pl031-rtc` (`ARM,pl031`); `avp-rtc` (`avp,rtc`) | `0x10050000` 4 KiB; `0x20240000` 4 KiB, 51 | `AppleVirtualPlatform`: `ApplePL031RTC`, `AppleVirtualPlatformRTC` | No |
+| Buttons | `pl061-buttons` (`ARM,pl061`); `/buttons` | `0x10060000` 4 KiB, 37 | `AppleVirtualPlatformButtons`; `AppleM68Buttons` | No |
+| Panic | `pvpanic` (`qemu,pvpanic-mmio`) | `0x10070000` 64 KiB | `ApplePVPanic`: `ApplePVPanicMMIO` | No |
+| Crypto | `aes` (`aes,s8000`, `aes-version` 3) | `0x20220000` and `0x20230000`, 16 KiB each, 50 | `AppleS8000AES`: `AppleS8000AESAccelerator` | In part: `compat/aes-engine.c` models the J700's `aes,s8000`, which is `aes-version` 5 with three regions and an IOMMU parent |
+| Graphics | `gfx` (`paravirtualizedgraphics,gpu`); `iosurface-mapper` (`paravirtualizedgraphics,iosurface`) | `0x20200000` 64 KiB, 49; `0x20210000` 64 KiB, 48 | `AppleParavirtGPUIOGPUFamily`: `AppleParavirtGPU`; `AppleParavirtIOSurface` | No |
+| Platform security | `avp-ctrr` (`avp,ctrr`); `avp-sealed-registers` | `0x20260000` 64 KiB; `0x20270000` 64 KiB | CTRR: no kext matches it, and the string is in `com.apple.kernel`'s own `__TEXT` (INFERRED: the kernel programs it); `AppleVirtualPlatformSealedRegisters` | No |
+| PCIe | `pcie` (`pcie,vmapple1`) | `0x30000000` 256 MiB configuration space, buses 0 to 8; interrupts from 64, MSI frame 2 | `AppleVirtualPlatform`: `AppleVirtualPlatformPCIE` | No |
+| Other | `cpu-debug-interface`; `port-virtual-1` | none | `AppleARMLightEmUp`; `AppleVirtualUSBPort` | No |
+
+Two more readings, both INFERRED:
+
+- The first interrupt cell is a GIC interrupt ID in the SPI range (32 and
+  up); the second cell's meaning is UNKNOWN.
+- The PCIe `ranges` (Apple's little-endian cells) give one 32-bit memory
+  window of `0x2fff0000` bytes at child offset `0x40000000`.
+
+The as-booted tree, from `ioreg` inside a macOS virtual machine, is not
+checked: NOT RUN, since none is available here.
+
+### B4: the VirtualMac2,1 drivers (26A428)
+
+A one-off parse of the kernelcache's `__PRELINK_INFO` resolves its
+`ID`/`IDREF` deduplication, which `plistlib` alone would lose
+(`build/phase0b/prelink.py`, output `prelink-vma2macosap-26A428.json`). It
+finds 236 kexts with 1,122 IOKit personalities in 161 of them. 215 of the
+kexts carry code; with `com.apple.kernel`, which has no prelink entry,
+they are the kernelcache's 216 fileset entries.
+
+- **Device-tree nodes.** Each node's `compatible`, `name` and
+  `device_type` were matched against the personalities' `IONameMatch`.
+  Every device node in the table above has a driver except `avp-ctrr`.
+  The platform nodes match too: the root `AppleVirtualPlatformARMPE`,
+  `cpu` `AppleARMCPU`, `defaults` `AppleImage4`, `Image4` and
+  `AppleMobileApNonce`.
+- **PCIe.** Storage, network, input and the rest have no device-tree node.
+  They match `IOPCIDevice` by `IOPCIPrimaryMatch` (device ID << 16 |
+  vendor ID):
+  - Standard virtio (vendor `0x1af4`, any device) goes to `AppleVirtIO`'s
+    transport. Its drivers cover block storage, network, console, entropy,
+    input (keyboard, mouse, trackpad), balloon, 9P, virtiofs, sockets,
+    sound and an IOMMU.
+  - Apple-vendor (`0x106b`) devices:
+
+    | Device | Driver |
+    | --- | --- |
+    | `0x1a00` | `AppleVirtIOStorage` |
+    | `0x1a0d` | `AppleVirtIO` |
+    | `0x1a01`, `0x1a04`, `0x1a07`, `0x1a0c`, `0x1a11` | `AppleVirtualPlatform`: a virtual USB device controller, a HID bridge, a power source, identity and provisioning messengers |
+    | `0x1a03` | VideoToolbox paravirtualisation |
+    | `0x1a08` | FairPlay |
+
+  - Class matches: a generic xHCI driver (`0x0c0330`) and a generic
+    Ethernet one (`AppleUIOPCI`, `0x020000`).
+
+  Which virtio device type selects which driver is decided in the
+  transport's probe, not in these keys, so it is UNKNOWN beyond the class
+  names.
+
+**What this means for Route B on the gaokun3** (INFERRED, not a decision):
+
+- This kernel would see none of the gaokun3's real devices. A monitor would
+  present the virtual set above instead:
+  - a GICv3, which the gaokun3 has; injecting through its virtualization
+    interface is not measured;
+  - PSCI, forwarded to the firmware;
+  - a PL011 and the two RTCs;
+  - AES, a variant of `compat/aes-engine.c`;
+  - a PCIe host bridge with virtio devices backed by the monitor's own
+    drivers. The gaokun3's disk is NVMe (`nvme0n1` in gaokun-android's
+    `docs/hw-inventory.md`), and `compat/nvme-host.c` already drives an
+    NVMe controller on the A16.
+- None of the J700's hardest models is needed: no SEP, exclaves, ANS2,
+  DART, AIC or SPTM.
+- Graphics is the open problem. The only display driver here is the
+  paravirtual GPU, which expects Apple's ParavirtualizedGraphics host.
+  Whether the kernel runs usefully on a boot framebuffer without it, or
+  with a Snapintosh-owned display kext instead, is UNKNOWN (B8).
+
 ### 26A428 against 26B118
 
 The kernels' own sites are identical: every `com.apple.kernel` site class,
@@ -472,7 +582,10 @@ hold for both builds; 26A428's kexts add one `HVC`.
 
 ### Still open
 
-- B3, B4 and B8, whose inputs are now extracted.
+- B3's cross-check: the as-booted tree from `ioreg` inside a macOS virtual
+  machine, which needs one.
+- B8: entry and boot handoff, including whether graphics can do without
+  the paravirtual GPU.
 - B6: the 25 `HVC` sites without a local constant, and what each function
   does.
 - B7: where the VirtualMac kernel takes its counter frequency.
