@@ -99,6 +99,18 @@ LLVM_NAMED = (
     (0xD53D12C0, (1, 3, 5, 1, 2, 6), 'el12-reg', 'SMCR_EL12'),
     (0xD51DD0E0, (0, 3, 5, 13, 0, 7), 'el12-reg', 'SCXTNUM_EL12'),
     (0xD51D1020, (0, 3, 5, 1, 0, 1), 'el12-reg', 'ACTLR_EL12'),
+    (0xD53BE000, (1, 3, 3, 14, 0, 0), 'counter-reg', 'CNTFRQ_EL0'),
+    (0xD53BE020, (1, 3, 3, 14, 0, 1), 'counter-reg', 'CNTPCT_EL0'),
+    (0xD53BE040, (1, 3, 3, 14, 0, 2), 'counter-reg', 'CNTVCT_EL0'),
+    (0xD53BE0A0, (1, 3, 3, 14, 0, 5), 'counter-reg', 'CNTPCTSS_EL0'),
+    (0xD53BE0C0, (1, 3, 3, 14, 0, 6), 'counter-reg', 'CNTVCTSS_EL0'),
+    (0xD51BE200, (0, 3, 3, 14, 2, 0), 'counter-reg', 'CNTP_TVAL_EL0'),
+    (0xD51BE220, (0, 3, 3, 14, 2, 1), 'counter-reg', 'CNTP_CTL_EL0'),
+    (0xD51BE240, (0, 3, 3, 14, 2, 2), 'counter-reg', 'CNTP_CVAL_EL0'),
+    (0xD51BE300, (0, 3, 3, 14, 3, 0), 'counter-reg', 'CNTV_TVAL_EL0'),
+    (0xD51BE320, (0, 3, 3, 14, 3, 1), 'counter-reg', 'CNTV_CTL_EL0'),
+    (0xD51BE340, (0, 3, 3, 14, 3, 2), 'counter-reg', 'CNTV_CVAL_EL0'),
+    (0xD518E100, (0, 3, 0, 14, 1, 0), 'counter-reg', 'CNTKCTL_EL1'),
 )
 for word, fields, kind, name in LLVM_NAMED:
     rw = 'R' if fields[0] else 'W'
@@ -125,6 +137,10 @@ check(c(0x00200820) is None, '0x00200820 is outside the 0x00201xxx block')
 check(c(0x00202000) is None, 'first word past the Apple block')
 check(c(0xD4E00001) is None, 'alt-call with a low bit set')
 check(c(0xFFFFFFFF) is None and c(0) is None, 'all-ones and zero')
+check(c(sysword(1, 3, 4, 14, 1, 0)) == ('el2-reg', 'CNTHCTL_EL2', 'R'), 'CNTHCTL_EL2 stays an EL2 register, not a counter one')
+check(c(sysword(0, 3, 5, 14, 2, 1))[0] == 'el12-reg', 'CNTP_CTL_EL02 stays an _EL02 alias, not a counter one')
+check(c(sysword(1, 3, 1, 14, 0, 0)) is None, 'CRn 14 at op1 1 is not a counter register')
+check(c(sysword(1, 3, 3, 13, 0, 2)) is None, 'TPIDR_EL0 (CRn 13, op1 3) is not a counter register')
 
 # -- images ------------------------------------------------------------------
 

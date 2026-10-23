@@ -7,7 +7,9 @@ B5-B6) asks how many places in an XNU kernel depend on EL2 semantics the
 Snapdragon 8cx Gen 3 cannot provide (no FEAT_NV/NV2, no FEAT_FGT): EL2
 register moves, EL2 TLBI/AT, `mrs CurrentEL`, `eret`, hypervisor/secure
 monitor calls, Apple's guarded-execution words and Apple's IMPLEMENTATION
-DEFINED registers.
+DEFINED registers. It also counts the architectural counter and timer
+registers, which decide whether a guest can run on the gaokun3's 19.2 MHz
+counter without FEAT_ECV (A7, B7).
 
     tools/kc-census.py /System/Library/Kernels/kernel.release.t8140
     tools/kc-census.py <kernelcache> --sites build/phase0b/sites.tsv
@@ -47,9 +49,9 @@ MRS_CURRENTEL = (0xD5384240, 0xFFFFFFE0)   # mrs Xt, CurrentEL (op0 3 op1 0 c4 c
 IMPDEF_CRN = (11, 15)
 
 # (op0, op1, CRn, CRm, op2). Only encodings checked against the Arm ARM
-# register index; the ones a census first printed unnamed (the FGT, SME and
-# GIC list registers, ACTLR_EL12, SCXTNUM_EL12) are also anchored to LLVM's
-# encodings in tools/test-kc-census.py. Anything else prints in the generic
+# register index; the ones added after the first census (the FGT, SME, GIC
+# list, counter and timer registers, ACTLR_EL12, SCXTNUM_EL12) are also
+# anchored to LLVM's encodings in tools/test-kc-census.py. Anything else prints in the generic
 # s<op0>_<op1>_c<n>_c<m>_<op2> form that LLVM and lldb use for unnamed registers.
 SYSREG_NAMES = {
     (3, 4, 0, 0, 0): 'VPIDR_EL2', (3, 4, 0, 0, 5): 'VMPIDR_EL2',
@@ -97,6 +99,14 @@ SYSREG_NAMES = {
     (3, 5, 14, 2, 0): 'CNTP_TVAL_EL02', (3, 5, 14, 2, 1): 'CNTP_CTL_EL02',
     (3, 5, 14, 2, 2): 'CNTP_CVAL_EL02', (3, 5, 14, 3, 0): 'CNTV_TVAL_EL02',
     (3, 5, 14, 3, 1): 'CNTV_CTL_EL02', (3, 5, 14, 3, 2): 'CNTV_CVAL_EL02',
+    # The EL0/EL1 counter and timer registers.
+    (3, 3, 14, 0, 0): 'CNTFRQ_EL0', (3, 3, 14, 0, 1): 'CNTPCT_EL0',
+    (3, 3, 14, 0, 2): 'CNTVCT_EL0', (3, 3, 14, 0, 5): 'CNTPCTSS_EL0',
+    (3, 3, 14, 0, 6): 'CNTVCTSS_EL0',
+    (3, 3, 14, 2, 0): 'CNTP_TVAL_EL0', (3, 3, 14, 2, 1): 'CNTP_CTL_EL0',
+    (3, 3, 14, 2, 2): 'CNTP_CVAL_EL0', (3, 3, 14, 3, 0): 'CNTV_TVAL_EL0',
+    (3, 3, 14, 3, 1): 'CNTV_CTL_EL0', (3, 3, 14, 3, 2): 'CNTV_CVAL_EL0',
+    (3, 0, 14, 1, 0): 'CNTKCTL_EL1',
 }
 for _n in range(4):
     SYSREG_NAMES[(3, 4, 12, 8, _n)] = f'ICH_AP0R{_n}_EL2'
@@ -179,6 +189,10 @@ def classify(word):
             return 'el2-reg', sysreg_name(key), rw
         if f['op1'] == 5:
             return 'el12-reg', sysreg_name(key), rw
+        # Generic timer registers: CRn 14 at op1 3, and CNTKCTL_EL1 at op1 0.
+        # The EL2 and _EL02 ones are already counted above.
+        if f['crn'] == 14 and f['op1'] in (0, 3):
+            return 'counter-reg', sysreg_name(key), rw
         return None
     if f['crn'] in IMPDEF_CRN:
         return 'impdef-sys', 'sys #%d,c%d,c%d,#%d' % (f['op1'], f['crn'], f['crm'], f['op2']), rw
@@ -199,6 +213,7 @@ KINDS = (
     ('genter', 'A5  genter'),
     ('alt-call', 'A5  alt-call 0xd4e00000'),
     ('gexit', 'A5  gexit'),
+    ('counter-reg', 'A7  counter and timer MRS/MSR (CRn 14, op1 0/3)'),
     ('apple-block', 'B5  other 0x00201xxx words (AMX and kin)'),
     ('impdef-reg', 'B5  IMPLEMENTATION DEFINED MRS/MSR (CRn 11/15)'),
     ('impdef-sys', 'B5  IMPLEMENTATION DEFINED SYS/SYSL (CRn 11/15)'),
