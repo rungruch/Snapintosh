@@ -363,7 +363,9 @@ the point of coherency before each walk, as `tgran16.c` now does, made
 every control behave on every core (run 8).
 
 Phase 0A's CPU questions are answered. The firmware version these answers
-hold for is the one thing still to record.
+hold for is the one thing still to record. Phase 0B, the offline
+kernelcache study that decides the route, is handed over in
+[GAOKUN3-PHASE0B.md](GAOKUN3-PHASE0B.md).
 
 ## Recording results
 
