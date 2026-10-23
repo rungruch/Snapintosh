@@ -11,7 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define EL2Q_VERSION      1
+#define EL2Q_VERSION      2     /* 2: counter rate, GICv3 virtualization, SMBIOS */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4
@@ -36,8 +36,16 @@ enum el2q_probe {
     EL2Q_PROBE_HFGRTR,     /* MRS HFGRTR_EL2: FEAT_FGT */
     EL2Q_PROBE_APIAKEY,    /* MRS APIAKeyLo_EL1: FEAT_PAuth key storage */
     EL2Q_PROBE_PACGA,      /* PACGA: FEAT_PACQARMA5/3 or IMPDEF generic auth */
+    EL2Q_PROBE_ICC_SRE,    /* MRS ICC_SRE_EL2: GICv3 system registers at EL2 */
+    EL2Q_PROBE_ICH_VTR,    /* MRS ICH_VTR_EL2: the GICv3 virtual CPU interface */
+    EL2Q_PROBE_ICH_HCR,    /* MRS ICH_HCR_EL2: whether that interface is in use */
     EL2Q_PROBES
 };
+
+/* What the list-register test writes to ICH_LR0_EL2 before restoring it:
+ * State 0 (invalid), Group 0, not HW, priority 0xa0, vINTID 42. An invalid
+ * entry never signals, and the test runs only with ICH_HCR_EL2.En clear. */
+#define EL2Q_LR_PATTERN 0x00a000000000002aull
 
 enum el2q_cpu_state {
     EL2Q_CPU_UNTESTED,     /* not attempted (no EL2, no PSCI, or slots full) */
@@ -61,6 +69,9 @@ struct el2q_cpu {
     uint64_t pac_rt_esr, pac_rt_ran;
     uint64_t pac_rt[3];              /* PACIA, AUTIA of it, XPACI of it */
     uint64_t tgran[7];               /* probes/tgran16.c's out[] */
+    uint64_t cntfrq;                 /* CNTFRQ_EL0 as this core reads it */
+    uint64_t lr_ran, lr_esr;         /* list-register test; lr_ran 0: skipped */
+    uint64_t lr_saved, lr_back;      /* ICH_LR0_EL2 before it; the pattern read back */
     uint64_t fault_esr, fault_elr, fault_far, fault_vector;
 };
 
@@ -80,6 +91,24 @@ struct el2q_acpi {
     uint64_t uart_base;
 };
 
+/* The firmware, from the SMBIOS table (DMTF DSP0134): the BIOS Information
+ * structure (type 0) and the System Information structure's maker and
+ * product (type 1). Type 1's serial number, UUID and SKU are never copied,
+ * so no report can carry them. Strings are cut to EL2Q_FW_TEXT printable
+ * ASCII characters; any other byte becomes '?'. */
+#define EL2Q_FW_TEXT 32
+enum el2q_smbios_state {
+    EL2Q_SMBIOS_NONE,      /* no SMBIOS configuration table */
+    EL2Q_SMBIOS_BAD,       /* an entry point or structure table that does not parse */
+    EL2Q_SMBIOS_NO_BIOS,   /* a valid table without a type 0 structure */
+    EL2Q_SMBIOS_OK
+};
+struct el2q_firmware {
+    uint32_t state, major, minor;    /* SMBIOS version, from the entry point */
+    char vendor[EL2Q_FW_TEXT + 1], version[EL2Q_FW_TEXT + 1], date[EL2Q_FW_TEXT + 1];
+    char maker[EL2Q_FW_TEXT + 1], product[EL2Q_FW_TEXT + 1];
+};
+
 struct el2q_run {
     uint64_t start_el, end_el;       /* CurrentEL>>2 at entry and after EBS */
     uint64_t ebs_status, ebs_tries;
@@ -93,6 +122,7 @@ struct el2q_run {
     uint64_t fb_base;                /* 0: nothing to draw on */
     uint32_t fb_source;              /* enum el2q_fb_source */
     uint32_t fb_dt;                  /* enum el2q_sfb_state of the DT fallback */
+    struct el2q_firmware fw;
     uint64_t start_id[EL2Q_ID_COUNT];/* ID registers at the starting EL */
     uint32_t cpu_count;              /* slots used; slot 0 is the boot CPU */
     struct el2q_cpu cpu[EL2Q_MAX_CPUS];
@@ -111,6 +141,12 @@ struct el2q_text {
  * declare. */
 int el2q_acpi_parse(const void *rsdp, struct el2q_acpi *out);
 enum el2q_dt_state el2q_fdt_zap_state(const void *fdt, size_t limit);
+
+/* An SMBIOS 3 ("_SM3_") or 2.1 ("_SM_") entry point and the structure table
+ * it names. Both checksums are checked, the walk stays inside the length the
+ * entry point declares (at most 1 MiB), and an unterminated structure or
+ * string set is BAD. *out is always set; its strings only on OK. */
+enum el2q_smbios_state el2q_smbios_parse(const void *entry, struct el2q_firmware *out);
 
 /* A GOP mode as QueryMode describes it. valid is 0 when QueryMode failed. */
 #define EL2Q_GOP_MODES 32
@@ -164,6 +200,11 @@ enum el2q_verdict { EL2Q_NOT_RUN, EL2Q_YES, EL2Q_NO, EL2Q_INCONCLUSIVE };
 enum el2q_verdict el2q_pauth_signs(const struct el2q_cpu *cpu);
 enum el2q_verdict el2q_walks_16k(const struct el2q_cpu *cpu);
 
+/* The list-register test's outcome: "-" not run, "UD" (or "EX") the access
+ * raised an exception, "RW" the pattern read back whole, "RAZ" it read back
+ * as zero, "DIFF" anything else. */
+const char *el2q_lr_word(const struct el2q_cpu *cpu);
+
 /* The screen report, and one line per raw register for a serial log. */
 void el2q_report(const struct el2q_run *run, struct el2q_text *text);
 void el2q_raw_line(const struct el2q_run *run, unsigned slot, unsigned index,
@@ -176,6 +217,13 @@ void el2q_raw_line(const struct el2q_run *run, unsigned slot, unsigned index,
  * instruction. A slot that did not finish stops after <state>. */
 void el2q_summary_line(const struct el2q_run *run, unsigned slot,
                        char out[EL2Q_TEXT_COLS + 1]);
+
+/* The second fixed-format line per finished slot, kept apart because SUM is
+ * already full:
+ *   GIC <slot> FRQ=<hz> SRE=<hex>/<p> VTR=<hex>/<p> LR=<word> HCR=<hex>/<p>
+ * <hex> without leading zeros, <p> as above, <word> el2q_lr_word's. Empty for
+ * a slot that did not finish. */
+void el2q_gic_line(const struct el2q_run *run, unsigned slot, char out[EL2Q_TEXT_COLS + 1]);
 
 /* Draws the report into a 32 bpp framebuffer (stride in pixels), at the
  * largest integer scale of a 6x9 cell that fits every line. bgr selects

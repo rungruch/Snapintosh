@@ -844,6 +844,330 @@ static void test_memmap(void)
     CHECK(!has_line("SCREEN GOP MODE"));
 }
 
+/* ---- SMBIOS -------------------------------------------------------------------- */
+
+/* A serial number no report may ever carry. */
+#define SERIAL "SN-SECRET-0123"
+
+static _Alignas(16) uint8_t smbios_entry[32], smbios_table[512];
+
+static int contains(const void *hay, size_t n, const char *needle)
+{
+    size_t k = strlen(needle);
+    for (size_t i = 0; i + k <= n; i++)
+        if (!memcmp((const uint8_t *)hay + i, needle, k)) return 1;
+    return 0;
+}
+
+/* The byte that makes the n bytes at p sum to zero, with p's own slot 0. */
+static uint8_t zero_sum(const uint8_t *p, unsigned n)
+{
+    uint8_t s = 0;
+    while (n--) s = (uint8_t)(s + *p++);
+    return (uint8_t)-s;
+}
+
+/* One structure at `at`: a formatted area of `length` bytes with string
+ * numbers set by fields[] as (offset, number), then the strings, then the
+ * terminating NUL (two when there are none). Returns the end. */
+static unsigned put_structure(unsigned at, uint8_t type, uint8_t length,
+                              const uint8_t (*fields)[2], unsigned nfields,
+                              const char *const *strings, unsigned nstrings)
+{
+    uint8_t *t = smbios_table;
+    memset(t + at, 0, length);
+    t[at] = type;
+    t[at + 1] = length;
+    t[at + 2] = (uint8_t)at;                                   /* handle */
+    for (unsigned i = 0; i < nfields; i++) t[at + fields[i][0]] = fields[i][1];
+    unsigned p = at + length;
+    for (unsigned i = 0; i < nstrings; i++) {
+        size_t n = strlen(strings[i]) + 1;
+        memcpy(t + p, strings[i], n);
+        p += (unsigned)n;
+    }
+    if (!nstrings) t[p++] = 0;
+    t[p++] = 0;
+    return p;
+}
+
+static const uint8_t bios_fields[][2] = {{4, 1}, {5, 2}, {8, 3}};
+static const uint8_t system_fields[][2] = {{4, 1}, {5, 2}, {6, 3}, {7, 4}};
+
+/* Type 0, type 1 with a serial number, type 127; as a firmware lays it out. */
+static unsigned build_smbios_table(void)
+{
+    static const char *const bios[] = {"Test Vendor", "2.10 (gk3)", "05/06/2024"};
+    static const char *const system[] = {"Maker", "Product X", "1.0", SERIAL};
+    memset(smbios_table, 0xee, sizeof smbios_table);
+    unsigned at = put_structure(0, 0, 0x1a, bios_fields, 3, bios, 3);
+    at = put_structure(at, 1, 0x1b, system_fields, 4, system, 4);
+    return put_structure(at, 127, 4, NULL, 0, NULL, 0);
+}
+
+static void seal_smbios3(void)
+{
+    smbios_entry[5] = 0;
+    smbios_entry[5] = zero_sum(smbios_entry, smbios_entry[6]);
+}
+
+static void build_smbios3(uint32_t size, uint64_t address)
+{
+    memset(smbios_entry, 0, sizeof smbios_entry);
+    memcpy(smbios_entry, "_SM3_", 5);
+    smbios_entry[6] = 0x18;
+    smbios_entry[7] = 3;
+    smbios_entry[8] = 3;
+    smbios_entry[10] = 1;
+    put32(smbios_entry + 0x0c, size);
+    put64(smbios_entry + 0x10, address);
+    seal_smbios3();
+}
+
+static void seal_smbios2(void)
+{
+    smbios_entry[0x15] = 0;
+    smbios_entry[0x15] = zero_sum(smbios_entry + 0x10, 0x0f);
+    smbios_entry[4] = 0;
+    smbios_entry[4] = zero_sum(smbios_entry, 0x1f);
+}
+
+static void build_smbios2(uint16_t length, uint32_t address)
+{
+    memset(smbios_entry, 0, sizeof smbios_entry);
+    memcpy(smbios_entry, "_SM_", 4);
+    smbios_entry[5] = 0x1f;
+    smbios_entry[6] = 2;
+    smbios_entry[7] = 8;
+    memcpy(smbios_entry + 0x10, "_DMI_", 5);
+    smbios_entry[0x16] = (uint8_t)length;
+    smbios_entry[0x17] = (uint8_t)(length >> 8);
+    put32(smbios_entry + 0x18, address);
+    seal_smbios2();
+}
+
+static void test_smbios(void)
+{
+    struct el2q_firmware fw;
+    uint64_t table = (uint64_t)(uintptr_t)smbios_table;
+    unsigned size = build_smbios_table();
+
+    build_smbios3(size, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_OK);
+    CHECK(fw.state == EL2Q_SMBIOS_OK && fw.major == 3 && fw.minor == 3);
+    CHECK(!strcmp(fw.vendor, "Test Vendor"));
+    CHECK(!strcmp(fw.version, "2.10 (gk3)"));
+    CHECK(!strcmp(fw.date, "05/06/2024"));
+    CHECK(!strcmp(fw.maker, "Maker"));
+    CHECK(!strcmp(fw.product, "Product X"));
+    CHECK(!contains(&fw, sizeof fw, SERIAL));
+    /* SMBIOS 3 gives a maximum size; the walk ends at type 127, not there. */
+    build_smbios3(sizeof smbios_table, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_OK);
+
+    /* The report names the firmware and never the serial number. */
+    base_run();
+    run.cpu_count = 1;
+    gaokun3_cpu(&run.cpu[0], 0x410fd4b0);
+    CHECK(el2q_smbios_parse(smbios_entry, &run.fw) == EL2Q_SMBIOS_OK);
+    el2q_report(&run, &text);
+    check_widths();
+    CHECK(has_line("FIRMWARE 2.10 (gk3)  05/06/2024"));
+    CHECK(has_line("VENDOR Test Vendor  SMBIOS 3.3"));
+    CHECK(has_line("PRODUCT Maker  Product X"));
+    for (unsigned i = 0; i < text.count; i++) CHECK(!strstr(text.line[i], SERIAL));
+    run.fw.state = EL2Q_SMBIOS_NONE;
+    el2q_report(&run, &text);
+    CHECK(has_line("FIRMWARE: NO SMBIOS TABLE"));
+    run.fw.state = EL2Q_SMBIOS_BAD;
+    el2q_report(&run, &text);
+    CHECK(has_line("FIRMWARE: SMBIOS TABLE DOES NOT PARSE"));
+
+    /* Entry points that must be refused. */
+    CHECK(el2q_smbios_parse(NULL, &fw) == EL2Q_SMBIOS_NONE && fw.state == EL2Q_SMBIOS_NONE);
+    build_smbios3(size, table);
+    smbios_entry[4] = '4';
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* anchor */
+    build_smbios3(size, table);
+    smbios_entry[0x0c] ^= 1;
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* checksum */
+    CHECK(fw.vendor[0] == 0);
+    build_smbios3(size, table);
+    smbios_entry[6] = 0x10;
+    seal_smbios3();
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* entry too short */
+    build_smbios3(size, 0);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* no address */
+    build_smbios3((1u << 20) + 1, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* over 1 MiB */
+    build_smbios3(3, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* under a header */
+
+    /* Structure tables that must be refused. */
+    build_smbios3(0x10, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* type 0 past the end */
+    build_smbios3(0x1a + 5, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* strings unterminated */
+    build_smbios3(size, table);
+    smbios_table[1] = 3;
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* length under 4 */
+    smbios_table[1] = 0x1a;
+
+    /* A valid table without type 0, two type 0s, and odd strings. */
+    static const char *const system[] = {"Maker", "Product X", "1.0", SERIAL};
+    static const char *const first[] = {"First", "v1", "01/01/2001"};
+    static const char *const second[] = {"Second", "v2", "02/02/2002"};
+    memset(smbios_table, 0xee, sizeof smbios_table);
+    unsigned at = put_structure(0, 1, 0x1b, system_fields, 4, system, 4);
+    at = put_structure(at, 127, 4, NULL, 0, NULL, 0);
+    build_smbios3(at, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_NO_BIOS);
+    at = put_structure(0, 0, 0x1a, bios_fields, 3, first, 3);
+    at = put_structure(at, 0, 0x1a, bios_fields, 3, second, 3);
+    at = put_structure(at, 127, 4, NULL, 0, NULL, 0);
+    build_smbios3(at, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_OK && !strcmp(fw.vendor, "First"));
+    static const uint8_t odd_fields[][2] = {{4, 0}, {5, 9}, {8, 1}};
+    static const char *const odd[] = {"A\x01" "B\xff" "C0123456789012345678901234567890123456789"};
+    at = put_structure(0, 0, 0x1a, odd_fields, 3, odd, 1);
+    at = put_structure(at, 127, 4, NULL, 0, NULL, 0);
+    build_smbios3(at, table);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_OK);
+    CHECK(fw.vendor[0] == 0);                                  /* string 0: none */
+    CHECK(fw.version[0] == 0);                                 /* past the last string */
+    CHECK(strlen(fw.date) == EL2Q_FW_TEXT && !strncmp(fw.date, "A?B?C012", 8));
+
+    /* SMBIOS 2.1: the entry point and its "_DMI_" part are both checked. */
+    size = build_smbios_table();
+    build_smbios2((uint16_t)size, 0);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* no address */
+    build_smbios2((uint16_t)size, 0x1000);
+    smbios_entry[0x14] = 'X';
+    seal_smbios2();
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* "_DMI_" anchor */
+    build_smbios2((uint16_t)size, 0x1000);
+    smbios_entry[0x15] ^= 1;
+    smbios_entry[4] = 0;
+    smbios_entry[4] = zero_sum(smbios_entry, 0x1f);
+    CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_BAD);   /* "_DMI_" checksum */
+    /* The 2.1 table address is 32 bits; the walk itself is the one SMBIOS 3
+     * uses above, so it is exercised only where the fixture sits that low. */
+    if (table <= UINT32_MAX) {
+        build_smbios2((uint16_t)size, (uint32_t)table);
+        CHECK(el2q_smbios_parse(smbios_entry, &fw) == EL2Q_SMBIOS_OK && fw.major == 2 && fw.minor == 8);
+    } else {
+        printf("test-el2qual: SKIP SMBIOS 2.1 walk: fixture above 4 GiB\n");
+    }
+}
+
+/* ---- GICv3 and the counter --------------------------------------------------- */
+
+static void gic_cpu(struct el2q_cpu *c, uint64_t midr)
+{
+    gaokun3_cpu(c, midr);
+    c->cntfrq = 19200000;
+    c->probe_value[EL2Q_PROBE_ICC_SRE] = 0x7;                 /* SRE, DFB, DIB */
+    c->probe_value[EL2Q_PROBE_ICH_VTR] = 0x90000003;          /* 4 LRs, 5 PRI, 5 PRE, 16 ID */
+    c->lr_ran = 1;
+    c->lr_back = EL2Q_LR_PATTERN;
+}
+
+static void test_gic(void)
+{
+    char line[EL2Q_TEXT_COLS + 1];
+    struct el2q_cpu c;
+    good_cpu(&c);
+    CHECK(!strcmp(el2q_lr_word(&c), "-"));
+    c.lr_ran = 1;
+    c.lr_back = EL2Q_LR_PATTERN;
+    CHECK(!strcmp(el2q_lr_word(&c), "RW"));
+    c.lr_back = 0;
+    CHECK(!strcmp(el2q_lr_word(&c), "RAZ"));
+    c.lr_back = EL2Q_LR_PATTERN & ~0xffull;
+    CHECK(!strcmp(el2q_lr_word(&c), "DIFF"));
+    c.lr_esr = 0x02000000;
+    CHECK(!strcmp(el2q_lr_word(&c), "UD"));
+    c.lr_esr = 0x5e000000;
+    CHECK(!strcmp(el2q_lr_word(&c), "EX"));
+
+    base_run();
+    run.cpu_count = 2;
+    gic_cpu(&run.cpu[0], 0x410fd4b0);
+    gic_cpu(&run.cpu[1], 0x410fd4c0);
+    el2q_report(&run, &text);
+    check_widths();
+    CHECK(has_line("COUNTER (CNTFRQ_EL0) .... 19200000 HZ"));
+    CHECK(has_line("GIC SYSREGS AT EL2 ...... YES  ICC_SRE_EL2 07"));
+    CHECK(has_line("GIC VIRTUAL INTERFACE ... YES  4 LRS  PRI 5  ID 16  LR0 RW"));
+    CHECK(!has_line("1  CNTFRQ_EL0") && !has_line("LR0 TEST") && !has_line("ICH_VTR "));
+    el2q_gic_line(&run, 0, line);
+    CHECK(!strcmp(line, "GIC 0 FRQ=19200000 SRE=7/OK VTR=90000003/OK LR=RW HCR=0/OK"));
+
+    /* A core that reads another rate, interface or test result is named. */
+    run.cpu[1].cntfrq = 24000000;
+    run.cpu[1].probe_value[EL2Q_PROBE_ICH_VTR] = 0x90000001;
+    run.cpu[1].lr_back = 0;
+    el2q_report(&run, &text);
+    check_widths();
+    CHECK(has_line("1  CNTFRQ_EL0 24000000"));
+    CHECK(has_line("1  ICH_VTR    0000000090000001"));
+    CHECK(has_line("1  LR0 TEST   RAZ"));
+
+    /* No virtual interface: NO, and no list-register claim. */
+    gic_cpu(&run.cpu[0], 0x410fd4b0);
+    run.cpu[0].probe_esr[EL2Q_PROBE_ICH_VTR] = 0x02000000;
+    run.cpu[0].probe_value[EL2Q_PROBE_ICH_VTR] = 0;
+    run.cpu[0].lr_ran = 0;
+    el2q_report(&run, &text);
+    CHECK(has_line("GIC VIRTUAL INTERFACE ... NO  ICH_VTR_EL2 UNDEF"));
+    el2q_gic_line(&run, 0, line);
+    CHECK(!strcmp(line, "GIC 0 FRQ=19200000 SRE=7/OK VTR=0/UD LR=- HCR=0/OK"));
+    /* Present, but the list registers not shown to hold state: not YES. */
+    gic_cpu(&run.cpu[0], 0x410fd4b0);
+    run.cpu[0].lr_ran = 0;
+    el2q_report(&run, &text);
+    CHECK(has_line("GIC VIRTUAL INTERFACE ... ?  4 LRS  PRI 5  ID 16  LR0 -"));
+    run.cpu[0].lr_ran = 1;
+    run.cpu[0].lr_back = 0;
+    el2q_report(&run, &text);
+    CHECK(has_line("GIC VIRTUAL INTERFACE ... ?  4 LRS  PRI 5  ID 16  LR0 RAZ"));
+    /* System registers off at EL2, or undefined there. */
+    gic_cpu(&run.cpu[0], 0x410fd4b0);
+    run.cpu[0].probe_value[EL2Q_PROBE_ICC_SRE] = 0x6;
+    el2q_report(&run, &text);
+    CHECK(has_line("GIC SYSREGS AT EL2 ...... OFF  ICC_SRE_EL2 06"));
+    run.cpu[0].probe_esr[EL2Q_PROBE_ICC_SRE] = 0x02000000;
+    el2q_report(&run, &text);
+    CHECK(has_line("GIC SYSREGS AT EL2 ...... ICC_SRE_EL2 UNDEF"));
+    /* 24-bit IDs, 16 list registers and 8 priority bits decode. */
+    gic_cpu(&run.cpu[0], 0x410fd4b0);
+    run.cpu[0].probe_value[EL2Q_PROBE_ICH_VTR] = 7u << 29 | 1u << 23 | 15;
+    el2q_report(&run, &text);
+    CHECK(has_line("GIC VIRTUAL INTERFACE ... YES  16 LRS  PRI 8  ID 24  LR0 RW"));
+    /* A missing counter rate is shown as such. */
+    run.cpu[0].cntfrq = 0;
+    el2q_report(&run, &text);
+    CHECK(has_line("COUNTER (CNTFRQ_EL0) .... 0 HZ"));
+
+    /* The widest GIC line still fits, HCR last so a cut loses only it. ICC_SRE
+     * has four defined bits and ICH_VTR thirty-two; ICH_HCR can use all 64. */
+    static const char widest[] = "GIC 0 FRQ=1000000000 SRE=F/OK VTR=FFFFFFFF/OK LR=DIFF HCR=";
+    run.cpu[0].cntfrq = 1000000000;
+    run.cpu[0].probe_value[EL2Q_PROBE_ICC_SRE] = 0xf;
+    run.cpu[0].probe_value[EL2Q_PROBE_ICH_VTR] = UINT32_MAX;
+    run.cpu[0].probe_value[EL2Q_PROBE_ICH_HCR] = UINT64_MAX;
+    run.cpu[0].lr_back = 1;
+    el2q_gic_line(&run, 0, line);
+    CHECK(strlen(line) == EL2Q_TEXT_COLS);
+    CHECK(!strncmp(line, widest, sizeof widest - 1));
+    /* Unfinished and absent slots give no line. */
+    run.cpu[1].state = EL2Q_CPU_FAULT;
+    el2q_gic_line(&run, 1, line);
+    CHECK(line[0] == 0);
+    el2q_gic_line(&run, 5, line);
+    CHECK(line[0] == 0);
+}
+
 int main(void)
 {
     test_acpi();
@@ -853,6 +1177,8 @@ int main(void)
     test_gop_order();
     test_simplefb();
     test_memmap();
+    test_smbios();
+    test_gic();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

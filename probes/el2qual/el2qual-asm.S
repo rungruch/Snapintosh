@@ -41,7 +41,34 @@ TRY el2q_try_vncr,    mrs x10, s3_4_c2_c2_0     /* VNCR_EL2: FEAT_NV2 */
 TRY el2q_try_cntpoff, mrs x10, s3_4_c14_c0_6    /* CNTPOFF_EL2: FEAT_ECV */
 TRY el2q_try_hfgrtr,  mrs x10, s3_4_c1_c1_4     /* HFGRTR_EL2: FEAT_FGT */
 TRY el2q_try_apiakey, mrs x10, s3_0_c2_c1_0     /* APIAKeyLo_EL1 */
+TRY el2q_try_icc_sre, mrs x10, s3_4_c12_c9_5    /* ICC_SRE_EL2 */
+TRY el2q_try_ich_vtr, mrs x10, s3_4_c12_c11_1   /* ICH_VTR_EL2 */
+TRY el2q_try_ich_hcr, mrs x10, s3_4_c12_c11_0   /* ICH_HCR_EL2 */
 TRY el2q_try_pacga,   pacga x10, x2, x3
+
+/* x0 ctx, x1 out[2], x2 the pattern (EL2Q_LR_PATTERN).
+ *
+ * ICH_LR0_EL2 is saved, written with the pattern, read back and restored;
+ * out[0] is the saved value and out[1] what the write left. The caller runs
+ * this only with ICH_HCR_EL2.En clear, so the virtual CPU interface is off,
+ * and the pattern's state is invalid, so it could not signal even if it were
+ * on. If the first read faults, nothing has been written. */
+.global el2q_try_ich_lr0
+.p2align 2
+el2q_try_ich_lr0:
+    adr     x9, 1f
+    str     xzr, [x0, #CTX_FIXUP_ESR]
+    str     x9, [x0, #CTX_FIXUP]
+    mrs     x11, s3_4_c12_c12_0
+    msr     s3_4_c12_c12_0, x2
+    isb
+    mrs     x10, s3_4_c12_c12_0
+    msr     s3_4_c12_c12_0, x11
+    isb
+    stp     x11, x10, [x1]
+1:  str     xzr, [x0, #CTX_FIXUP]
+    ldr     x0, [x0, #CTX_FIXUP_ESR]
+    ret
 
 /* x0 ctx, x1 in[n], x2 modifier[n], x3 out[n], x4 rt[3], x5 n.
  *

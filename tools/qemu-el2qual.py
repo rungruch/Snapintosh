@@ -95,6 +95,38 @@ def check_stop(log):
 
 SUM = re.compile(r'^SUM (\d+) EL(\d) (.+?)(?: PAC=(\S) 16K=(\S) NV2=(\d+)/(\w+) ECV=(\d+)/(\w+)'
                  r' FGT=(\d+)/(\w+) RNDR=(\d+)/(\w+))?$')
+GIC = re.compile(r'^GIC (\d+) FRQ=(\d+) SRE=([0-9A-F]+)/(\w+) VTR=([0-9A-F]+)/(\w+) LR=(\S+)'
+                 r' HCR=([0-9A-F]+)/(\w+)$')
+
+
+def check_gic(lines, smp):
+    """QEMU's virt machine with virtualization=on has a GICv3 with the
+    virtual CPU interface, and its EDK2 publishes SMBIOS 3: every slot must
+    show both, at one counter rate, with list register 0 holding the pattern
+    and the interface left off."""
+    problems = []
+    gics = {int(m[1]): m for line in lines for m in [GIC.match(line)] if m}
+    if sorted(gics) != list(range(smp)):
+        problems.append(f'expected GIC lines for slots 0..{smp - 1}, got {sorted(gics)}')
+    rates = {int(m[2]) for m in gics.values()}
+    if len(rates) > 1 or 0 in rates:
+        problems.append(f'CNTFRQ_EL0 rates {sorted(rates)}, wanted one non-zero rate')
+    for slot, m in sorted(gics.items()):
+        if m[4] != 'OK' or not int(m[3], 16) & 1:
+            problems.append(f'slot {slot}: ICC_SRE_EL2 {m[3]}/{m[4]}, wanted SRE set')
+        if m[6] != 'OK':
+            problems.append(f'slot {slot}: ICH_VTR_EL2 probe {m[6]}, wanted OK')
+        if m[7] != 'RW':
+            problems.append(f'slot {slot}: list register test {m[7]}, wanted RW')
+        if m[9] != 'OK' or int(m[8], 16) & 1:
+            problems.append(f'slot {slot}: ICH_HCR_EL2 {m[8]}/{m[9]}, wanted En clear')
+    if not any(line.startswith('GIC VIRTUAL INTERFACE ... YES') for line in lines):
+        problems.append('no "GIC VIRTUAL INTERFACE ... YES" verdict')
+    if not any(re.match(r'FIRMWARE [^:]', line) for line in lines):
+        problems.append('no FIRMWARE line read from SMBIOS')
+    if not any(line.startswith('VENDOR ') and ' SMBIOS 3.' in line for line in lines):
+        problems.append('no VENDOR line with an SMBIOS 3 version')
+    return problems
 
 
 def report_lines(log):
@@ -181,6 +213,7 @@ def check(log, expect, smp=SMP):
             problems.append(f'VHE emulation reported but HCR_EL2 {hcr:#x} lacks E2H|TGE')
     elif vhe or (hcr >> 34) & 1:
         problems.append('E2H set on a run that did not ask for VHE emulation')
+    problems += check_gic(lines, smp)
     return problems
 
 
@@ -201,13 +234,17 @@ def synthetic(expect, smp=SMP):
     else:
         screen = 'SCREEN GOP MODE 1  FB 0000000080000000' + ('  FROM MODE 0' if expect.get('moved') else '')
     lines = ['junk before', 'EL2QUAL BEGIN', screen,
+             'FIRMWARE 0.0.0  02/06/2015', 'VENDOR EFI Development Kit II / OVMF  SMBIOS 3.0',
              f'ENTRY HCR_EL2 {hcr:016X} SCTLR 0000000030C5183D']
     if expect.get('vhe'):
         lines.append('TEST ONLY: SLBOUNCE E2H STATE EMULATED')
-    lines += ['  CONTROLS A OK  B FAULT  C FAULT  (WANT OK FAULT FAULT)',
+    lines += ['GIC VIRTUAL INTERFACE ... YES  4 LRS  PRI 5  ID 16  LR0 RW',
+              '  CONTROLS A OK  B FAULT  C FAULT  (WANT OK FAULT FAULT)',
               f'J700 ROUTE (AS ON A16) .. {expect["routes"][0]}',
               f'VIRTUALMAC ROUTE (EL1) .. {expect["routes"][1]}']
-    lines += [f'SUM {s} EL2 DONE PAC={expect["pac"]} 16K={expect["walk"]} {feats}' for s in range(smp)]
+    for s in range(smp):
+        lines.append(f'SUM {s} EL2 DONE PAC={expect["pac"]} 16K={expect["walk"]} {feats}')
+        lines.append(f'GIC {s} FRQ=62500000 SRE=7/OK VTR=90000003/OK LR=RW HCR=0/OK')
     return '\n'.join(lines + ['EL2QUAL END', ''])
 
 
@@ -260,6 +297,23 @@ def self_test():
         bad = re.sub(r'RNDR=(\d)/(OK|UD)', lambda m: f'RNDR={m[1]}/{"UD" if m[2] == "OK" else "OK"}',
                      good, count=1)
         expect_result(f'{name} RNDR field/probe disagree', bad, expect, False)
+        # The counter, GIC and firmware lines must each be there and right.
+        expect_result(f'{name} missing GIC slot', good.replace('GIC 3 ', 'XIC 3 '), expect, False)
+        expect_result(f'{name} rates differ', good.replace('GIC 2 FRQ=62500000', 'GIC 2 FRQ=19200000'),
+                      expect, False)
+        expect_result(f'{name} rate zero', good.replace('FRQ=62500000', 'FRQ=0'), expect, False)
+        expect_result(f'{name} SRE clear', good.replace('GIC 1 FRQ=62500000 SRE=7',
+                                                        'GIC 1 FRQ=62500000 SRE=6'), expect, False)
+        expect_result(f'{name} VTR undefined', good.replace('VTR=90000003/OK', 'VTR=0/UD', 1),
+                      expect, False)
+        expect_result(f'{name} LR reads zero', good.replace('LR=RW', 'LR=RAZ', 1), expect, False)
+        expect_result(f'{name} interface left on', good.replace('HCR=0/OK', 'HCR=1/OK', 1),
+                      expect, False)
+        expect_result(f'{name} no GIC verdict', good.replace('GIC VIRTUAL INTERFACE ... YES',
+                                                             'GIC VIRTUAL INTERFACE ... ?'), expect, False)
+        expect_result(f'{name} no firmware', good.replace('FIRMWARE 0.0.0  02/06/2015',
+                                                          'FIRMWARE: NO SMBIOS TABLE'), expect, False)
+        expect_result(f'{name} SMBIOS 2', good.replace('SMBIOS 3.0', 'SMBIOS 2.8'), expect, False)
         expect_result(f'{name} probe other exception', good.replace('/UD', '/EX', 1).replace(
             '/OK', '/EX', 1), expect, False)
         expect_result(f'{name} route text', good.replace(expect['routes'][0], 'CPU MAYBE'),

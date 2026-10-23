@@ -87,6 +87,10 @@ uint64_t el2q_try_vncr(struct el2q_ctx *ctx, uint64_t *value);
 uint64_t el2q_try_cntpoff(struct el2q_ctx *ctx, uint64_t *value);
 uint64_t el2q_try_hfgrtr(struct el2q_ctx *ctx, uint64_t *value);
 uint64_t el2q_try_apiakey(struct el2q_ctx *ctx, uint64_t *value);
+uint64_t el2q_try_icc_sre(struct el2q_ctx *ctx, uint64_t *value);
+uint64_t el2q_try_ich_vtr(struct el2q_ctx *ctx, uint64_t *value);
+uint64_t el2q_try_ich_hcr(struct el2q_ctx *ctx, uint64_t *value);
+uint64_t el2q_try_ich_lr0(struct el2q_ctx *ctx, uint64_t out[2], uint64_t pattern);
 uint64_t el2q_try_pacga(struct el2q_ctx *ctx, uint64_t *value, uint64_t pointer, uint64_t modifier);
 uint64_t el2q_try_pac(struct el2q_ctx *ctx, const uint64_t *in, const uint64_t *modifier,
                       uint64_t *out, uint64_t *round_trip, uint64_t count);
@@ -198,6 +202,11 @@ static const struct efi_guid gop_guid =
     {0x9042a9de, 0x23dc, 0x4a38, {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}};
 static const struct efi_guid loaded_image_guid =
     {0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}};
+/* SMBIOS3_TABLE_GUID and SMBIOS_TABLE_GUID (UEFI 2.10, section 4.6). */
+static const struct efi_guid smbios3_guid =
+    {0xf2fd1544, 0x9794, 0x4a2c, {0x99, 0x2e, 0xe5, 0xbb, 0xcf, 0x20, 0xe3, 0x94}};
+static const struct efi_guid smbios_guid =
+    {0xeb9d2d31, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}};
 
 /* ---- Freestanding runtime ------------------------------------------------
  * The compiler may emit calls to these for structure copies and clears. */
@@ -390,6 +399,8 @@ static void serial_report(void)
     for (unsigned s = 0; s < run.cpu_count; s++) {
         el2q_summary_line(&run, s, line);
         uart_line(u, line);
+        el2q_gic_line(&run, s, line);
+        if (line[0]) uart_line(u, line);
     }
     static const char digits[] = "0123456789";
     char dt[] = "DT STATE ?";
@@ -462,6 +473,31 @@ static void measure_pac(unsigned slot)
     c->pac_ran = 1;
 }
 
+/* The GICv3 virtual CPU interface, read only, then list register 0 written
+ * and restored. The write runs only where it cannot be seen: EL2 reaches the
+ * system registers (ICC_SRE_EL2.SRE), the interface exists, and it is off
+ * (ICH_HCR_EL2.En clear). The pattern's state is invalid, so it could not
+ * signal even if the interface were on. */
+static void measure_gic(unsigned slot)
+{
+    struct el2q_cpu *c = &run.cpu[slot];
+    struct el2q_ctx *x = &ctx[slot];
+    if (!slot) progress("GIC: READING ICH_*_EL2. A HANG OR RESET HERE IS EL3");
+    c->probe_esr[EL2Q_PROBE_ICC_SRE] = el2q_try_icc_sre(x, &c->probe_value[EL2Q_PROBE_ICC_SRE]);
+    c->probe_esr[EL2Q_PROBE_ICH_VTR] = el2q_try_ich_vtr(x, &c->probe_value[EL2Q_PROBE_ICH_VTR]);
+    c->probe_esr[EL2Q_PROBE_ICH_HCR] = el2q_try_ich_hcr(x, &c->probe_value[EL2Q_PROBE_ICH_HCR]);
+    if (c->probe_esr[EL2Q_PROBE_ICC_SRE] || !(c->probe_value[EL2Q_PROBE_ICC_SRE] & 1) ||
+        c->probe_esr[EL2Q_PROBE_ICH_VTR] || c->probe_esr[EL2Q_PROBE_ICH_HCR] ||
+        (c->probe_value[EL2Q_PROBE_ICH_HCR] & 1))
+        return;
+    uint64_t lr[2] = {0, 0};
+    if (!slot) progress("GIC: WRITING, RESTORING ICH_LR0_EL2 (INVALID ENTRY)");
+    c->lr_esr = el2q_try_ich_lr0(x, lr, EL2Q_LR_PATTERN);
+    c->lr_saved = lr[0];
+    c->lr_back = lr[1];
+    c->lr_ran = 1;
+}
+
 /* Everything one CPU contributes, run on that CPU at EL2. */
 static void measure(unsigned slot)
 {
@@ -470,6 +506,7 @@ static void measure(unsigned slot)
     c->current_el = current_el();
     c->mpidr = RD("mpidr_el1");
     c->hcr = RD("hcr_el2");
+    c->cntfrq = RD("cntfrq_el0");
     for (unsigned i = 0; i < EL2Q_ID_COUNT; i++)
         c->id[i] = id_register(el2q_idregs[i].crm, el2q_idregs[i].op2);
     if (!slot) progress("PROBING RNDR, VNCR_EL2, CNTPOFF_EL2, HFGRTR_EL2");
@@ -482,6 +519,7 @@ static void measure(unsigned slot)
     if (!slot) progress("16K WALK (PROBES/TGRAN16.C)");
     if (c->hcr & HCR_E2H) tgran16_probe_el12(c->tgran, table);
     else tgran16_probe(c->tgran, table);
+    measure_gic(slot);
     if (!opt.nopac) measure_pac(slot);
 }
 
@@ -609,12 +647,17 @@ static void parse_options(const char16 *o, uint32_t bytes)
 
 static void find_tables(struct efi_system_table *st)
 {
-    void *rsdp = 0, *fdt = 0;
+    void *rsdp = 0, *fdt = 0, *smbios3 = 0, *smbios = 0;
     for (uint64_t i = 0; i < st->table_count; i++) {
         if (guid_eq(&st->tables[i].guid, &acpi20_guid)) rsdp = st->tables[i].table;
         if (guid_eq(&st->tables[i].guid, &dtb_guid)) fdt = st->tables[i].table;
+        if (guid_eq(&st->tables[i].guid, &smbios3_guid)) smbios3 = st->tables[i].table;
+        if (guid_eq(&st->tables[i].guid, &smbios_guid)) smbios = st->tables[i].table;
     }
     if (rsdp) el2q_acpi_parse(rsdp, &run.acpi);
+    /* Read now, before ExitBootServices, while the tables are still the
+     * firmware's to describe; SMBIOS 3 when the firmware offers both. */
+    el2q_smbios_parse(smbios3 ? smbios3 : smbios, &run.fw);
     /* The FDT header's totalsize bounds the parse; 64 MiB is a ceiling on a
      * corrupt one, not a size any real tree approaches. */
     run.dt_state = el2q_fdt_zap_state(fdt, 64u << 20);

@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* el2qual's readers of what the firmware hands over: the ACPI tables, the
- * device tree, the GOP modes and the memory map. See report.h;
+ * device tree, the GOP modes, the memory map and SMBIOS. See report.h;
  * tools/test-el2qual.c exercises all of it on the host. */
 #include "report.h"
 
@@ -346,4 +346,97 @@ const char *el2q_sfb_words(uint32_t state)
         [EL2Q_SFB_OK] = "OK",
     };
     return state < sizeof words / sizeof words[0] ? words[state] : "?";
+}
+
+/* ---- SMBIOS (DMTF DSP0134) ------------------------------------------------
+ * The SMBIOS 3 entry point ("_SM3_") gives its length at 6, the version at 7
+ * and 8, the maximum structure table size at 0x0c and the table's address at
+ * 0x10. The 2.1 one ("_SM_") gives its length at 5 and the version at 6 and
+ * 7, then embeds a "_DMI_" entry at 0x10 with its own checksum over 15 bytes,
+ * the table length at 0x16 and its address at 0x18. Each structure is a
+ * header (type, formatted length, handle), the formatted area, then a set of
+ * NUL-terminated strings ended by a second NUL; string 1 is the first, and 0
+ * means none. Like the ACPI tables, everything is read byte by byte. */
+
+#define SMBIOS_TABLE_MAX (1u << 20)
+
+static int sums_to_zero(const uint8_t *p, unsigned n)
+{
+    uint8_t s = 0;
+    while (n--) s = (uint8_t)(s + *p++);
+    return s == 0;
+}
+
+/* String `index` of a structure's set [set, end), where end is just past the
+ * set's last NUL. Only printable ASCII is copied, at most EL2Q_FW_TEXT. */
+static void fw_string(const uint8_t *set, const uint8_t *end, unsigned index,
+                      char out[EL2Q_FW_TEXT + 1])
+{
+    unsigned n = 0;
+    for (unsigned i = 1; index && set < end && *set; i++) {
+        const uint8_t *s = set;
+        while (set < end && *set) set++;
+        if (i == index) {
+            for (; s < set && n < EL2Q_FW_TEXT; s++)
+                out[n++] = *s >= 0x20 && *s < 0x7f ? (char)*s : '?';
+            break;
+        }
+        set++;
+    }
+    out[n] = 0;
+}
+
+enum el2q_smbios_state el2q_smbios_parse(const void *entry, struct el2q_firmware *o)
+{
+    const uint8_t *e = entry;
+    uint64_t address;
+    uint32_t size;
+    o->state = EL2Q_SMBIOS_NONE;
+    o->major = o->minor = 0;
+    o->vendor[0] = o->version[0] = o->date[0] = o->maker[0] = o->product[0] = 0;
+    if (!e) return EL2Q_SMBIOS_NONE;
+    o->state = EL2Q_SMBIOS_BAD;
+    if (same(e, "_SM3_", 5)) {
+        if (e[6] < 0x18 || !sums_to_zero(e, e[6])) return EL2Q_SMBIOS_BAD;
+        o->major = e[7];
+        o->minor = e[8];
+        size = le32(e + 0x0c);
+        address = le64(e + 0x10);
+    } else if (same(e, "_SM_", 4)) {
+        if (e[5] < 0x1f || !sums_to_zero(e, e[5]) || !same(e + 0x10, "_DMI_", 5) ||
+            !sums_to_zero(e + 0x10, 0x0f))
+            return EL2Q_SMBIOS_BAD;
+        o->major = e[6];
+        o->minor = e[7];
+        size = (uint32_t)e[0x16] | (uint32_t)e[0x17] << 8;
+        address = le32(e + 0x18);
+    } else {
+        return EL2Q_SMBIOS_BAD;
+    }
+    if (!address || size < 4 || size > SMBIOS_TABLE_MAX) return EL2Q_SMBIOS_BAD;
+
+    const uint8_t *p = (const uint8_t *)(uintptr_t)address, *end = p + size;
+    int bios = 0, system = 0;
+    while (end - p >= 4) {
+        unsigned type = p[0], length = p[1];
+        if (length < 4 || length > (size_t)(end - p)) return EL2Q_SMBIOS_BAD;
+        const uint8_t *set = p + length, *q = set;
+        while (end - q >= 2 && (q[0] || q[1])) q++;
+        if (end - q < 2) return EL2Q_SMBIOS_BAD;
+        if (type == 0 && length >= 0x09 && !bios) {
+            fw_string(set, q + 1, p[4], o->vendor);
+            fw_string(set, q + 1, p[5], o->version);
+            fw_string(set, q + 1, p[8], o->date);
+            bios = 1;
+        } else if (type == 1 && length >= 0x08 && !system) {
+            /* Manufacturer and Product Name only; 07h is the serial number. */
+            fw_string(set, q + 1, p[4], o->maker);
+            fw_string(set, q + 1, p[5], o->product);
+            system = 1;
+        }
+        if (type == 127) break;
+        p = q + 2;
+    }
+    o->state = bios ? EL2Q_SMBIOS_OK : EL2Q_SMBIOS_NO_BIOS;
+    return o->state;
 }

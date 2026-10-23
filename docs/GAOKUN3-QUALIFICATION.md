@@ -28,14 +28,20 @@ a fault handler, calls PSCI to start and stop CPUs, draws on a GOP
 framebuffer or, on this machine, the device tree's framebuffer in reserved
 memory (see "The screen"), and stops in a WFE loop. It writes no other
 memory it does not own, issues no storage I/O and touches no clock,
-regulator, GPU or interrupt controller. Holding the power button ends any
-run.
+regulator or GPU. Since el2qual 2 (stage 3) it reads each core's GICv3 CPU
+interface registers at EL2 (`ICC_SRE_EL2`, `ICH_VTR_EL2`, `ICH_HCR_EL2`).
+Where that interface is off (`ICH_HCR_EL2.En` clear), it also writes list
+register 0 with an invalid entry and restores it at once. An invalid entry
+cannot signal, and the distributor and redistributors are never touched.
+Holding the power button ends any run.
 
-It cannot catch two things:
+It cannot catch three things:
 
 - A PAuth key access or PAC instruction that EL3 firmware traps
   (`SCR_EL3.{API,APK}` clear). The exception goes to EL3, not to el2qual;
   the firmware may hang or reset.
+- A GIC system-register access that EL3 traps (`ICC_SRE_EL3.Enable`
+  clear), with the same consequence.
 - A secondary CPU that PSCI starts but that never comes back.
 
 Before each of those steps el2qual draws a breadcrumb line, so after a hang
@@ -91,7 +97,7 @@ So el2qual now has a second source. When no GOP mode has an address, it
 draws on the device tree's `/chosen` simple-framebuffer, the record Linux
 uses for the same buffer: the gaokun3 EL2 DTB has
 `/chosen/framebuffer@c6200000`, 1600x2560, stride 6400 bytes, `a8r8g8b8`,
-size `0xfa0000` (VERIFIED by parsing the DTB with `probes/el2qual/report.c`).
+size `0xfa0000` (VERIFIED by parsing the DTB with `probes/el2qual/firmware.c`).
 It draws there only if the node is self-consistent and lies inside one
 `Reserved` region of the firmware's memory map; the recorded map has
 `Reserved 0xc6200000-0xc85fffff` (OBSERVED, gk3probe). It cleans every draw
@@ -264,6 +270,42 @@ EL2 (the low bits of the mark are its `CurrentEL`).
 Reading run 4: the PAC column of the CPU table, which should agree across
 the A78C and X1C cores.
 
+## Stage 3: counter, GIC and firmware (el2qual 2)
+
+Phase 0C's checks ([GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md#checks-before-phase-1))
+need three answers that stages 1 to 2 did not record:
+- `CNTFRQ_EL0`, the counter rate a VirtualMac guest's device tree must
+  state;
+- the firmware version all the answers hold for, read from SMBIOS before
+  `ExitBootServices`;
+- whether the GICv3 virtual CPU interface is usable at EL2.
+
+el2qual 2 adds them; its report's first line reads `SNAPINTOSH EL2QUAL 2`.
+
+Exposure is the same as stage 2, plus the GIC registers above. It takes
+one run: write the stage 2 layout with el2qual 2 (`python3
+tools/el2qual-usb.py stage2 ...`, as in "Building a stick") and
+boot entry 3 (`nopac`, all CPUs), from a cold boot, photographed.
+PAuth is already measured, so it stays out of this run.
+
+Expected:
+- **Header:** `FIRMWARE <version>  <date>`, `VENDOR <vendor>  SMBIOS 3.x`
+  and `PRODUCT <maker>  <product>`. el2qual never copies SMBIOS's serial
+  number or UUID.
+- **Boot CPU verdicts:**
+  - `COUNTER (CNTFRQ_EL0) .... 19200000 HZ` (expected, INFERRED);
+  - `GIC SYSREGS AT EL2 ...... YES  ICC_SRE_EL2 ..`;
+  - `GIC VIRTUAL INTERFACE ... YES  <n> LRS  PRI <p>  ID <i>  LR0 RW`.
+- **Other cores:** no `CNTFRQ_EL0`, `ICH_VTR` or `LR0 TEST` line under
+  `OTHER CPUS: WHAT DIFFERS FROM SLOT 0`; a line there names the core that
+  differs.
+
+The breadcrumbs `GIC: READING ICH_*_EL2. A HANG OR RESET HERE IS EL3` and
+`GIC: WRITING, RESTORING ICH_LR0_EL2 (INVALID ENTRY)` precede the two GIC
+steps on the boot CPU. A hang or reset after the first means EL3 traps
+the GIC registers. Record it and do not repeat the run; Route B would
+then need a full GICv3 model.
+
 ## When something goes wrong
 
 | What you see | Likely meaning | Then |
@@ -290,7 +332,7 @@ BitLocker asks, enter the recovery key.
 ## Runs so far
 
 All on one MateBook E Go 2023; firmware version not recorded for any of
-them yet (read it in the firmware setup at the next run).
+them yet (stage 3 reads it from SMBIOS).
 
 | # | Date | Stage | `el2qual.efi` (commit) | Result |
 | --- | --- | --- | --- | --- |
@@ -363,9 +405,10 @@ the point of coherency before each walk, as `tgran16.c` now does, made
 every control behave on every core (run 8).
 
 Phase 0A's CPU questions are answered. The firmware version these answers
-hold for is the one thing still to record. Phase 0B, the offline
-kernelcache study that decides the route, is handed over in
-[GAOKUN3-PHASE0B.md](GAOKUN3-PHASE0B.md).
+hold for is still to be recorded; stage 3 records it, together with
+`CNTFRQ_EL0` and the GICv3 virtual interface Route B needs. Phase 0B, the
+offline kernelcache study, is in [GAOKUN3-PHASE0B.md](GAOKUN3-PHASE0B.md),
+and the route decision it feeds in [GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md).
 
 ## Recording results
 
@@ -386,6 +429,11 @@ UNKNOWN entries are replaced, not kept beside them. What they decide:
   needs the shadow layer.
 - NV2, ECV, RNG absent as expected: the J700 route needs the Phase 0B
   kernelcache census before it can be judged.
+- `CNTFRQ_EL0` (stage 3): the `timebase-frequency` a VirtualMac guest's
+  device tree must carry.
+- `GIC VIRTUAL INTERFACE ... YES` (stage 3): a Route B monitor can deliver
+  the guest's interrupts through the list registers. `NO`, `?` or a hang:
+  it needs a full GICv3 model.
 
 ## Afterwards
 

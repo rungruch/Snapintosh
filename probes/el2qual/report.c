@@ -43,6 +43,22 @@ static unsigned field(uint64_t value, unsigned lsb) { return (unsigned)(value >>
 
 /* ---- Verdicts ------------------------------------------------------------ */
 
+enum { LR_NOT_RUN, LR_UNDEF, LR_EXCEPTION, LR_RW, LR_RAZ, LR_DIFF };
+
+static unsigned lr_code(const struct el2q_cpu *c)
+{
+    if (!c->lr_ran) return LR_NOT_RUN;
+    if (c->lr_esr) return (c->lr_esr >> 26) == 0 ? LR_UNDEF : LR_EXCEPTION;
+    if (c->lr_back == EL2Q_LR_PATTERN) return LR_RW;
+    return c->lr_back ? LR_DIFF : LR_RAZ;
+}
+
+const char *el2q_lr_word(const struct el2q_cpu *c)
+{
+    static const char *const words[] = {"-", "UD", "EX", "RW", "RAZ", "DIFF"};
+    return words[lr_code(c)];
+}
+
 enum el2q_verdict el2q_pauth_signs(const struct el2q_cpu *c)
 {
     if (c->current_el != 2 || c->state != EL2Q_CPU_DONE || !c->pac_ran) return EL2Q_NOT_RUN;
@@ -169,6 +185,41 @@ static void put_midr(struct lb *b, uint64_t midr)
     put_s(b, core_name(midr));
 }
 
+/* The firmware every other line was measured under; until this, no run
+ * recorded it. */
+static void firmware(const struct el2q_firmware *f, struct el2q_text *t)
+{
+    static const char *const words[] = {
+        [EL2Q_SMBIOS_NONE] = "NO SMBIOS TABLE",
+        [EL2Q_SMBIOS_BAD] = "SMBIOS TABLE DOES NOT PARSE",
+        [EL2Q_SMBIOS_NO_BIOS] = "SMBIOS HAS NO BIOS ENTRY",
+    };
+    struct lb b;
+    if (f->state != EL2Q_SMBIOS_OK) {
+        b = new_line(t, EL2Q_YELLOW);
+        put_s(&b, "FIRMWARE: ");
+        put_s(&b, f->state < EL2Q_SMBIOS_OK ? words[f->state] : "?");
+        return;
+    }
+    b = new_line(t, EL2Q_WHITE);
+    put_s(&b, "FIRMWARE ");
+    put_s(&b, f->version[0] ? f->version : "-");
+    put_s(&b, "  ");
+    put_s(&b, f->date[0] ? f->date : "-");
+    b = new_line(t, EL2Q_WHITE);
+    put_s(&b, "VENDOR ");
+    put_s(&b, f->vendor[0] ? f->vendor : "-");
+    put_s(&b, "  SMBIOS ");
+    put_dec(&b, f->major);
+    put_c(&b, '.');
+    put_dec(&b, f->minor);
+    b = new_line(t, EL2Q_WHITE);
+    put_s(&b, "PRODUCT ");
+    put_s(&b, f->maker[0] ? f->maker : "-");
+    put_s(&b, "  ");
+    put_s(&b, f->product[0] ? f->product : "-");
+}
+
 static const char *const dt_words[] = {
     [EL2Q_DT_NONE] = "NO DEVICE TREE: WILL NOT SWITCH",
     [EL2Q_DT_BAD] = "DEVICE TREE UNREADABLE",
@@ -226,6 +277,8 @@ static void header(const struct el2q_run *r, struct el2q_text *t)
     put_dec(&b, r->fb_width);
     put_c(&b, 'X');
     put_dec(&b, r->fb_height);
+
+    firmware(&r->fw, t);
 
     /* What the report is drawn on, so a photo records it: the device tree's
      * framebuffer, or a GOP mode, and a switch away from the firmware's. */
@@ -295,6 +348,45 @@ static void routes(const struct el2q_cpu *c, struct el2q_text *t)
         requirement(&b, "PAUTH", signs);
         requirement(&b, "16K", walks);
     }
+}
+
+/* Whether a guest's interrupts could be delivered through the GICv3 list
+ * registers rather than a fully modelled controller: EL2 must reach the
+ * system registers (ICC_SRE_EL2.SRE), the virtual CPU interface must exist
+ * (ICH_VTR_EL2) and its list registers must keep what is written. */
+static void gic_virt(const struct el2q_cpu *c, struct el2q_text *t)
+{
+    const uint64_t *esr = c->probe_esr, *v = c->probe_value;
+    uint64_t sre = v[EL2Q_PROBE_ICC_SRE], vtr = v[EL2Q_PROBE_ICH_VTR];
+    int sre_ok = !esr[EL2Q_PROBE_ICC_SRE] && (sre & 1);
+    struct lb b = new_line(t, sre_ok ? EL2Q_WHITE : EL2Q_YELLOW);
+    label(&b, "GIC SYSREGS AT EL2");
+    if (esr[EL2Q_PROBE_ICC_SRE]) {
+        put_s(&b, "ICC_SRE_EL2 ");
+        put_esr(&b, esr[EL2Q_PROBE_ICC_SRE]);
+    } else {
+        put_s(&b, sre_ok ? "YES  ICC_SRE_EL2 " : "OFF  ICC_SRE_EL2 ");
+        put_hex(&b, sre, 2);
+    }
+
+    unsigned lr = lr_code(c);
+    int vtr_ok = !esr[EL2Q_PROBE_ICH_VTR];
+    enum el2q_verdict verdict = !vtr_ok ? EL2Q_NO : lr == LR_RW ? EL2Q_YES : EL2Q_INCONCLUSIVE;
+    b = new_line(t, verdict_color(verdict));
+    label(&b, "GIC VIRTUAL INTERFACE");
+    if (!vtr_ok) {
+        put_s(&b, "NO  ICH_VTR_EL2 ");
+        put_esr(&b, esr[EL2Q_PROBE_ICH_VTR]);
+        return;
+    }
+    put_s(&b, verdict == EL2Q_YES ? "YES  " : "?  ");
+    put_dec(&b, (vtr & 0x1f) + 1);
+    put_s(&b, " LRS  PRI ");
+    put_dec(&b, ((vtr >> 29) & 7) + 1);
+    put_s(&b, "  ID ");
+    put_dec(&b, (vtr >> 23) & 7 ? 24 : 16);
+    put_s(&b, "  LR0 ");
+    put_s(&b, el2q_lr_word(c));
 }
 
 static void verdicts(const struct el2q_cpu *c, struct el2q_text *t)
@@ -409,6 +501,14 @@ static void verdicts(const struct el2q_cpu *c, struct el2q_text *t)
     put_s(&b, ", ");
     put_dec(&b, field(pfr0, 24));
 
+    /* The rate a VirtualMac guest's device tree must state, since without
+     * ECV the counter cannot be shown at any other. */
+    b = new_line(t, c->cntfrq ? EL2Q_WHITE : EL2Q_YELLOW);
+    label(&b, "COUNTER (CNTFRQ_EL0)");
+    put_dec(&b, c->cntfrq);
+    put_s(&b, " HZ");
+
+    gic_virt(c, t);
     routes(c, t);
 }
 
@@ -496,7 +596,7 @@ static void differences(const struct el2q_run *r, struct el2q_text *t)
     const struct el2q_cpu *boot = &r->cpu[0];
     if (boot->state != EL2Q_CPU_DONE) return;
     struct lb b = new_line(t, EL2Q_CYAN);
-    put_s(&b, "OTHER CPUS: ID REGISTERS DIFFERING FROM SLOT 0");
+    put_s(&b, "OTHER CPUS: WHAT DIFFERS FROM SLOT 0");
     unsigned shown = 0;
     for (unsigned s = 1; s < r->cpu_count; s++) {
         const struct el2q_cpu *c = &r->cpu[s];
@@ -509,6 +609,37 @@ static void differences(const struct el2q_run *r, struct el2q_text *t)
             put_s(&b, el2q_idregs[i].name);
             pad(&b, 14, ' ');
             put_hex(&b, c->id[i], 16);
+            shown++;
+        }
+        /* The counter rate and the GIC interface are per core too. */
+        if (c->cntfrq != boot->cntfrq) {
+            b = new_line(t, EL2Q_YELLOW);
+            put_dec(&b, s);
+            pad(&b, 3, ' ');
+            put_s(&b, "CNTFRQ_EL0");
+            pad(&b, 14, ' ');
+            put_dec(&b, c->cntfrq);
+            shown++;
+        }
+        const unsigned vtr = EL2Q_PROBE_ICH_VTR;
+        if (c->probe_esr[vtr] != boot->probe_esr[vtr] ||
+            c->probe_value[vtr] != boot->probe_value[vtr]) {
+            b = new_line(t, EL2Q_YELLOW);
+            put_dec(&b, s);
+            pad(&b, 3, ' ');
+            put_s(&b, "ICH_VTR");
+            pad(&b, 14, ' ');
+            if (c->probe_esr[vtr]) put_esr(&b, c->probe_esr[vtr]);
+            else put_hex(&b, c->probe_value[vtr], 16);
+            shown++;
+        }
+        if (lr_code(c) != lr_code(boot)) {
+            b = new_line(t, EL2Q_YELLOW);
+            put_dec(&b, s);
+            pad(&b, 3, ' ');
+            put_s(&b, "LR0 TEST");
+            pad(&b, 14, ' ');
+            put_s(&b, el2q_lr_word(c));
             shown++;
         }
     }
@@ -590,6 +721,43 @@ void el2q_summary_line(const struct el2q_run *r, unsigned slot, char out[EL2Q_TE
         put_c(&b, '/');
         put_s(&b, probe_word(c->probe_esr[feats[i].probe]));
     }
+}
+
+static void put_hex_short(struct lb *b, uint64_t v)
+{
+    unsigned digits = 1;
+    while (digits < 16 && v >> (digits * 4)) digits++;
+    put_hex(b, v, digits);
+}
+
+/* HCR goes last: it is the one field that can grow to 16 digits, and a cut
+ * line then loses only it. */
+void el2q_gic_line(const struct el2q_run *r, unsigned slot, char out[EL2Q_TEXT_COLS + 1])
+{
+    struct lb b = {out, 0};
+    out[0] = 0;
+    if (slot >= r->cpu_count || slot >= EL2Q_MAX_CPUS) return;
+    const struct el2q_cpu *c = &r->cpu[slot];
+    if (c->state != EL2Q_CPU_DONE) return;
+    put_s(&b, "GIC ");
+    put_dec(&b, slot);
+    put_s(&b, " FRQ=");
+    put_dec(&b, c->cntfrq);
+    static const struct { const char *name; unsigned probe; } regs[] = {
+        {" SRE=", EL2Q_PROBE_ICC_SRE}, {" VTR=", EL2Q_PROBE_ICH_VTR},
+    };
+    for (unsigned i = 0; i < sizeof regs / sizeof regs[0]; i++) {
+        put_s(&b, regs[i].name);
+        put_hex_short(&b, c->probe_value[regs[i].probe]);
+        put_c(&b, '/');
+        put_s(&b, probe_word(c->probe_esr[regs[i].probe]));
+    }
+    put_s(&b, " LR=");
+    put_s(&b, el2q_lr_word(c));
+    put_s(&b, " HCR=");
+    put_hex_short(&b, c->probe_value[EL2Q_PROBE_ICH_HCR]);
+    put_c(&b, '/');
+    put_s(&b, probe_word(c->probe_esr[EL2Q_PROBE_ICH_HCR]));
 }
 
 /* ---- Font ----------------------------------------------------------------
