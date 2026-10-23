@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
-/* Host tests for probes/el2qual/report.c: the ACPI and FDT readers against
- * well-formed and corrupt tables, the PAuth and 16K verdicts against
- * consistent and deliberately inconsistent measurements, the report text and
- * summary lines, and the renderer's bounds. Built and run by
+/* Host tests for probes/el2qual/report.c and firmware.c: the ACPI and FDT
+ * readers against well-formed and corrupt tables, the PAuth and 16K verdicts
+ * against consistent and deliberately inconsistent measurements, the report
+ * text and summary lines, and the renderer's bounds. Built and run by
  * tools/test-el2qual.py.
  *
  * Register fixtures: "A16" uses the field values docs/FEASIBILITY.md records

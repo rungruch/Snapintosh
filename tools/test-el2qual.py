@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Host tests for probes/el2qual's report code.
+"""Host tests for probes/el2qual's report and firmware-reader code.
 
   python3 tools/test-el2qual.py [--cc CLANG]
 
@@ -72,7 +72,7 @@ def check_tables():
 def compile_test(cc, out, sanitizers):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'), str(EL2Q / 'report.c'),
-           '-o', str(out)]
+           str(EL2Q / 'firmware.c'), '-o', str(out)]
     return cmd, subprocess.run(cmd, capture_output=True, text=True)
 
 

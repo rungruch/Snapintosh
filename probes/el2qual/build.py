@@ -35,6 +35,7 @@ CFLAGS = ['--target=aarch64-unknown-windows', '-std=gnu11', '-ffreestanding', '-
 UNITS = [
     (SRC / 'el2qual.c', 'el2qual.o', []),
     (SRC / 'report.c', 'report.o', []),
+    (SRC / 'firmware.c', 'firmware.o', []),
     (SRC / 'el2qual-asm.S', 'el2qual-asm.o', []),
     (ROOT / 'probes' / 'tgran16.c', 'tgran16.o', []),
     (ROOT / 'probes' / 'tgran16.c', 'tgran16-el12.o',
