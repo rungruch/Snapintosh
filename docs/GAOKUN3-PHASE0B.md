@@ -770,7 +770,7 @@ Everything except A6 needs only the extracted sets.
 
 Drafted 2026-10-23 from the findings above; each cell keeps the evidence
 class of the finding it rests on. It is the input to Phase 0C's decision
-record, not the decision.
+record ([GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md)), not the decision.
 
 | | Route A: J700 kernel (`j700ap`) | Route B: VirtualMac2,1 kernel (`vma2macosap`) |
 | --- | --- | --- |
