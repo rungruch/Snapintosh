@@ -49,10 +49,12 @@ Before each of those steps el2qual draws a breadcrumb line, so after a hang
 the last line on screen names the step. Stage 2 runs them last and one at a
 time (see below).
 
-**No thermal guard exists for the SC8280XP yet** (porting Phase 1). That is
-acceptable only because el2qual programs no clock or voltage and halts within
-seconds. Photograph the result and power off promptly; do not leave the
-machine halted unattended.
+**No thermal guard runs on the SC8280XP yet.** The Phase 1 policy is
+host-tested only and unpinned
+([GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md)). That is acceptable
+only because el2qual programs no clock or voltage and halts within seconds.
+Photograph the result and power off promptly; do not leave the machine
+halted unattended.
 
 ## Prerequisites
 
