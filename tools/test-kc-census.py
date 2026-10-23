@@ -193,6 +193,17 @@ check(owners.get('eret:eret') == 'com.example.a', 'fileset: first-half eret belo
 check(owners.get('eret:eretaa') == 'com.example.b', 'fileset: second-half eretaa belongs to entry b')
 check(owners.get('hvc:hvc #7') == 'com.example.b', 'fileset: hvc immediate recovered and attributed')
 
+# A symbol names only sites of its own entry: 26A428's com.apple.kernel has no
+# text symbols, so the nearest one below it is another kext's.
+img = fileset_image()
+_, entries = census.parse_header(img)
+index = census.build_owner_index(img, entries)
+syms = ([0xFFFFFE0007000000], ['_in_a'])
+check(census.symbol_at(syms, 0xFFFFFE0007000008, index) == '_in_a+0x8', 'symbol: own entry names the site')
+check(census.symbol_at(syms, 0xFFFFFE0007000018, index) == '-', "symbol: another entry's symbol does not name the site")
+check(census.symbol_at(syms, 0xFFFFFE0007000018) == '_in_a+0x18', 'symbol: a plain image keeps the nearest symbol')
+check(census.symbol_at(syms, 0xFFFFFDFFFFFFFFFC, index) == '-', 'symbol: nothing below the first symbol')
+
 # A truncated or non-Mach-O input must be refused rather than counted.
 for bad, what in ((b'\0' * 64, 'zeros'), (b'\xcf\xfa\xed\xfe', 'header cut short')):
     try:

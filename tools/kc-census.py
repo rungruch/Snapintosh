@@ -277,10 +277,16 @@ def load_symbols(path):
     return addrs, names
 
 
-def symbol_at(syms, va):
+def symbol_at(syms, va, index=None):
+    """The nearest text symbol at or below va as name+offset, or '-'.
+
+    With a fileset's owner index only a symbol of the site's own entry
+    counts: 26A428's com.apple.kernel carries no text symbols at all, and the
+    nearest one below its code belongs to whichever kext sits under it.
+    """
     addrs, names = syms
     i = bisect.bisect_right(addrs, va) - 1
-    if i < 0:
+    if i < 0 or (index and owner_of(index, addrs[i]) != owner_of(index, va)):
         return '-'
     return '%s+0x%x' % (names[i], va - addrs[i])
 
@@ -314,7 +320,7 @@ def scan_image(data):
     return segments, entries, sites
 
 
-def report(path, segments, entries, sites, syms, top):
+def report(path, segments, entries, sites, syms, index, top):
     print('Image: %s (%s)' % (path.name, 'MH_FILESET, %d entries' % len(entries) if entries else 'plain Mach-O'))
     for s in segments:
         if executable(s):
@@ -333,17 +339,17 @@ def report(path, segments, entries, sites, syms, top):
         if entries:
             print('   by owner: ' + ', '.join('%s %d' % kv for kv in Counter(s[2] for s in hits).most_common(6)))
         if syms[0] and kind in ('currentel', 'eret', 'el2-sysop'):
-            for fn, n in Counter(symbol_at(syms, s[0]).split('+')[0] for s in hits).most_common(top):
+            for fn, n in Counter(symbol_at(syms, s[0], index).split('+')[0] for s in hits).most_common(top):
                 print('   in %-42s %6d' % (fn, n))
 
 
-def write_sites(out, sites, syms):
+def write_sites(out, sites, syms, index):
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open('w') as fh:
         fh.write('va\tsegment\towner\tkind\tlabel\trw\tsymbol\n')
         for va, segment, owner, kind, label, rw in sites:
             fh.write('0x%x\t%s\t%s\t%s\t%s\t%s\t%s\n' % (
-                va, segment, owner, kind, label, rw, symbol_at(syms, va) if syms[0] else '-'))
+                va, segment, owner, kind, label, rw, symbol_at(syms, va, index) if syms[0] else '-'))
 
 
 def main():
@@ -360,9 +366,10 @@ def main():
     except (ValueError, struct.error) as e:
         sys.exit('%s: %s (IM4P input must be decompressed first)' % (args.image, e))
     syms = load_symbols(args.image)
-    report(args.image, segments, entries, sites, syms, args.top)
+    index = build_owner_index(data, entries) if entries else None
+    report(args.image, segments, entries, sites, syms, index, args.top)
     if args.sites:
-        write_sites(args.sites, sites, syms)
+        write_sites(args.sites, sites, syms, index)
 
 
 if __name__ == '__main__':
