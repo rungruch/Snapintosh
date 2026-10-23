@@ -30,8 +30,9 @@ Secure Launch, on all eight cores. The run log and evidence are in
 | FEAT_NV / NV2, FEAT_ECV, FEAT_FGT, FEAT_RNG | absent: ID fields 0 and the instructions undefined at EL2 | VERIFIED, runs 4 to 8 |
 | EL2 entry | slbounce + `tcblaunch.exe` 10.0.22621.382, `HCR_EL2 0x488000000` (E2H, RW, TGE); PSCI 1.1 starts every core at EL2 | VERIFIED, stage 2 |
 | Screen | only the device tree's `/chosen` simple-framebuffer at `0xc6200000` (1600x2560); no GOP mode reports an address | VERIFIED, stage 1b |
-| Counter | 19.2 MHz expected, like the A16's; not measured on the gaokun3 (el2qual does not print `CNTFRQ_EL0`); no ECV to rescale it | INFERRED (Qualcomm's usual 19.2 MHz crystal); ECV above |
-| Firmware version | not recorded yet | |
+| Counter | `CNTFRQ_EL0` reads 19,200,000 on all 8 cores, as on the A16; no ECV to rescale it | VERIFIED, run 9 (el2qual 2); the tick rate itself is not timed |
+| GIC virtualization | GICv3 system registers at EL2 (`ICC_SRE_EL2 0x09`); a virtual CPU interface on all 8 cores with 4 list registers, 5 priority bits and 16-bit IDs; `ICH_LR0_EL2` reads back what is written | VERIFIED, run 9 |
+| Firmware | Huawei 2.18, 06/30/2023 (SMBIOS 3.3, product `GK-W7X`) | VERIFIED, run 9 |
 
 ## The two routes
 
@@ -422,8 +423,9 @@ they are the kernelcache's 216 fileset entries.
 
 - This kernel would see none of the gaokun3's real devices. A monitor would
   present the virtual set above instead:
-  - a GICv3, which the gaokun3 has; injecting through its virtualization
-    interface is not measured;
+  - a GICv3, which the gaokun3 has. Its virtual CPU interface is usable at
+    EL2, with 4 list registers (VERIFIED, run 9); the guest's distributor
+    and redistributor view is still to be designed;
   - PSCI, forwarded to the firmware;
   - a PL011 and the two RTCs;
   - AES, a variant of `compat/aes-engine.c`;
@@ -606,11 +608,11 @@ hold for both builds; 26A428's kexts add one `HVC`.
     tree gives 24 MHz. VERIFIED for the published source, INFERRED for
     26A428.
 
-  INFERRED: with 19.2 MHz in the tree, this kernel runs on the gaokun3's
-  own counter with no ECV and no trap, because `CNTVCT_EL0` reads at EL1
-  trap only if the monitor asks them to. Still open: tick constants kept
-  elsewhere (`/machine-timeouts` and the like), and the gaokun3's
-  `CNTFRQ_EL0`, which el2qual does not print.
+  The gaokun3's `CNTFRQ_EL0` reads 19,200,000 on all 8 cores (VERIFIED,
+  run 9). INFERRED: with that rate in the tree, this kernel runs on the
+  gaokun3's own counter with no ECV and no trap, because `CNTVCT_EL0`
+  reads at EL1 trap only if the monitor asks them to. Still open: tick
+  constants kept elsewhere (`/machine-timeouts` and the like).
 - OBSERVED: 163 words in the `0x00201xxx` block (AMX-style), so this
   kernel also carries AMX code.
 - OBSERVED (26A428; the kernel's 45 sites give the same on 26B118): of the
@@ -756,8 +758,8 @@ hold for both builds; 26A428's kexts add one `HVC`.
   exact semantics of each PAC call a monitor must serve.
 - Port-wide, not a route question: a Metal driver for the gaokun3's
   Adreno 690.
-- B7: tick constants outside `timebase-frequency`, and the gaokun3's own
-  `CNTFRQ_EL0`.
+- B7: tick constants outside `timebase-frequency`. The gaokun3's own
+  `CNTFRQ_EL0`, 19,200,000, is measured (run 9).
 - A4: the `SPSR` constants.
 - A6: hot paths, including whether the FGT and SME sites can run. This
   needs the 26A428 KDK, because `com.apple.kernel` has no symbols.
@@ -780,10 +782,10 @@ record ([GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md)), not the decision.
 | Boot handoff | The A16's SPTM entry, reused: MMU on, loader-built tables, the SPTM boot structure, the AuxKC handed through it | The classic entry: EL1, MMU off, `boot_args` and the completed tree. No SPTM structure, frame table or loader-built tables (VERIFIED, B8). New loader path |
 | SPTM and TXM | Required: 348 call words, served by `compat/sptm*.c` and `compat/txm*.c` (reused) | None (VERIFIED, B2) |
 | Page tables | The kernel's 16 KiB tables can run natively at stage 1, so the shadow layer is not needed (INFERRED) | Same (INFERRED) |
-| Counter and timer | All 1,060 Apple alias reads trapped through `HCR_EL2.TIDCP` and served in software, as on the A16. The 24 MHz guest rate stays, since the WD1 watchdog forces it ([BOOT-CHAIN.md](BOOT-CHAIN.md#9-timers)). Without ECV, nothing stops the physical rate leaking through the architectural counter; the kernel itself never reads one (INFERRED) | 891 `CNTVCT_EL0` reads at the device tree's rate: put 19.2 MHz in the tree and no ECV or trap is needed (INFERRED, B7). No WD1 watchdog driver or node (VERIFIED). Other 24 MHz assumptions UNKNOWN |
+| Counter and timer | All 1,060 Apple alias reads trapped through `HCR_EL2.TIDCP` and served in software, as on the A16. The 24 MHz guest rate stays, since the WD1 watchdog forces it ([BOOT-CHAIN.md](BOOT-CHAIN.md#9-timers)). Without ECV, nothing stops the physical rate leaking through the architectural counter; the kernel itself never reads one (INFERRED) | 891 `CNTVCT_EL0` reads at the device tree's rate: put the gaokun3's 19,200,000 (VERIFIED, run 9) in the tree and no ECV or trap is needed (INFERRED, B7). No WD1 watchdog driver or node (VERIFIED). Other 24 MHz assumptions UNKNOWN |
 | Pointer authentication | The kernel sets its own keys (28 key-register writes, OBSERVED). The monitor's PAuth handling (`compat/pauth*.c`) applies (reused) | The hypervisor holds the keys. The PAC hypercalls must be served, or the guest spins at the first (VERIFIED in source). New service, with a call on each user-key switch (INFERRED from `pac_asm.h`) |
 | Hypercalls | None: 0 `HVC`, 0 `SMC` (OBSERVED) | 46 `hvc #0` sites (B6). The PAC calls are required; the OEM calls (clock offset, boot-session UUID, vCPU wait and kick) and the nested calls are optional (VERIFIED in source). 25 sites' calls are not yet traced |
-| Interrupts | A virtual AIC on the GIC (`compat/aic.c`, `compat/irq-forward.c`, reused) | A GICv3 for the guest; the gaokun3 has GICv3 system registers (OBSERVED). New, whether as a model or through the GIC's virtualization interface, which is not measured |
+| Interrupts | A virtual AIC on the GIC (`compat/aic.c`, `compat/irq-forward.c`, reused) | A GICv3 for the guest. The gaokun3's virtual CPU interface is usable at EL2, with 4 list registers (VERIFIED, run 9), so the CPU interface needs no model; the distributor and redistributor view is new |
 | Device models | The J700 set the A16 uses: AIC, ANS2 storage on the NVMe host, DART, SEP, PMGR and the rest (reused, re-targeted to the gaokun3's hardware) | A small virtual platform (B3, B4): PL011, PL031 and `avp,rtc`, PL061, pvpanic, `aes,s8000` version 3 (a variant of `compat/aes-engine.c`), `avp,ctrr`, `avp,sealed-registers`, and a PCIe host bridge with virtio devices backed by the monitor's own drivers (the disk through `compat/nvme-host.c`). Almost all new |
 | IMPDEF registers | 1,881 accesses across 188 registers, trapped through TIDCP as on the A16 (reused) | 56 accesses across 13 registers: 2 known to the monitor, 11 new (B5) |
 | Graphics | Console on the boot framebuffer, as on the A16. A desktop needs a Metal driver for the Adreno 690 | The same. The paravirtual GPU needs Apple's ParavirtualizedGraphics host, so a desktop also needs a Metal driver for the Adreno 690 |

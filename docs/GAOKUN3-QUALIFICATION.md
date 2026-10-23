@@ -7,7 +7,8 @@ NV2, ECV, FGT and RNG exist, and whether the other cores start at EL2.
 What el2qual measures and how it was validated under QEMU is in
 [FEASIBILITY.md](FEASIBILITY.md#qualifying-a-host-without-q1n1-el2qual).
 
-**Status: NOT RUN.** Nothing in this plan has been executed on a gaokun3.
+**Status: stages 1 to 3 run** on one gaokun3, firmware 2.18 (see "Runs so
+far"). Each new stage still needs its own go-ahead.
 
 ## Authorization
 
@@ -331,8 +332,10 @@ BitLocker asks, enter the recovery key.
 
 ## Runs so far
 
-All on one MateBook E Go 2023; firmware version not recorded for any of
-them yet (stage 3 reads it from SMBIOS).
+All on one MateBook E Go 2023. Run 9 read the firmware from SMBIOS:
+version 2.18, dated 06/30/2023. Runs 1 to 8 did not record it; they ran
+the same day on the same machine, with no firmware update recorded in
+between.
 
 | # | Date | Stage | `el2qual.efi` (commit) | Result |
 | --- | --- | --- | --- | --- |
@@ -344,6 +347,7 @@ them yet (stage 3 reads it from SMBIOS).
 | 6 | 2026-10-23 | 2, entry 3 (`nopac`) | `df1644c4` (`a83d95b`) | all 8 CPUs `DONE` at EL2 through PSCI; 16K INCONCLUSIVE on every core (boot CPU D `0x805`) |
 | 7 | 2026-10-23 | 2, entry 4 (no options) | `df1644c4` (`a83d95b`) | PAuth signs on all 8 cores; 16K INCONCLUSIVE (boot CPU D `0x80D`) |
 | 8 | 2026-10-23 | 2, entry 3 (`nopac`) | `15dfd800`, with the `tgran16.c` table cleaning | 16K WALKS on all 8 cores: controls `A OK  B FAULT  C FAULT`, boot CPU D `PAR 0x4001B00` (PA `0x4001000`, the address only a 16K walk reaches) |
+| 9 | 2026-10-23 | 3, entry 3 (`nopac`) | `2738da9b` (`c2c7122`, el2qual 2) | PASS: firmware 2.18; `CNTFRQ_EL0` 19200000 on all 8 cores; GIC system registers and virtual CPU interface usable at EL2 on all 8 (4 list registers, `LR0 RW`); no hang (stage 3 results below) |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
@@ -381,8 +385,8 @@ caches (`0x0000011100101022`, which marks big-endian and the stage-2
 granules unsupported). Stage 2 reads the same registers at EL2 and
 measures the behaviour behind them.
 
-Runs 4 to 8, at EL2 after Secure Launch (VERIFIED for this machine; the
-firmware version is still to be recorded):
+Runs 4 to 8, at EL2 after Secure Launch (VERIFIED for this machine; run 9
+repeated every answer below except PAuth on firmware 2.18):
 
 | Question | Answer | Evidence |
 | --- | --- | --- |
@@ -404,11 +408,53 @@ passing. That is INFERRED; what is VERIFIED is that cleaning the table to
 the point of coherency before each walk, as `tgran16.c` now does, made
 every control behave on every core (run 8).
 
-Phase 0A's CPU questions are answered. The firmware version these answers
-hold for is still to be recorded; stage 3 records it, together with
-`CNTFRQ_EL0` and the GICv3 virtual interface Route B needs. Phase 0B, the
-offline kernelcache study, is in [GAOKUN3-PHASE0B.md](GAOKUN3-PHASE0B.md),
-and the route decision it feeds in [GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md).
+### Stage 3 results (run 9)
+
+Run 9 booted the stage 2 layout with el2qual 2: `el2qual.efi` SHA-256
+`2738da9bb7583608b3a76a9b67bfaad5e3a6cae5d3997a74a47e247bde685db4`, built
+from `c2c7122`. Every other file on the stick had the same SHA-256 as run
+8's: systemd-boot, slbounce, `tcblaunch.exe`, the DTB and the entries. The
+report was complete, with no hang, reboot or unexpected exception; the
+whole screen was photographed (kept by the machine owner, not in this
+repository). Transcribed from the photo:
+
+| Reading | Value | Evidence |
+| --- | --- | --- |
+| Firmware (SMBIOS type 0) | version `2.18`, release date `06/30/2023`, vendor `HUAWEI`; SMBIOS 3.3 | VERIFIED |
+| Product (SMBIOS type 1) | maker `HUAWEI`, product `GK-W7X` | VERIFIED |
+| `CNTFRQ_EL0` | 19,200,000 on every core: the boot CPU's line reads `19200000 HZ` and no other core lists a different value | VERIFIED as read. el2qual reads the register the firmware programmed; it does not time the counter, so a tick rate of 19.2 MHz is INFERRED |
+| `ICC_SRE_EL2` | `0x09`: SRE 1 (EL2 uses the GIC system registers), Enable 1 (EL1 may access `ICC_SRE_EL1`), DFB and DIB 0; the access did not trap to EL3 | VERIFIED |
+| GICv3 virtual CPU interface | present on every core: `ICH_VTR_EL2` reads, giving 4 list registers, 5 virtual priority bits and 16-bit virtual INTIDs | VERIFIED |
+| `ICH_HCR_EL2` | `En` clear on every core, so the interface was off at entry: el2qual ran the list-register test only because of that | VERIFIED |
+| `ICH_LR0_EL2` | `RW` on every core: the invalid-entry pattern read back whole and was restored | VERIFIED |
+| Everything else | as run 8: `START EL1  AFTER EBS EL2`, `HCR_EL2 0x488000000`, `SCTLR 0x30C5183D`, gate open, `ACPI CPUS 8  GIC V3  PSCI 1.1`, 8 slots `DONE` at EL2, 16K `WALKS` (`PAR 004001B00`, controls `A OK  B FAULT  C FAULT`), NV2/ECV/FGT/RNDR absent, ID registers identical at EL1 and EL2, and only MIDR differs between cores | VERIFIED, unchanged |
+
+The verdict line read `GIC VIRTUAL INTERFACE ... YES  4 LRS  PRI 5  ID 16
+LR0 RW`. Only the screen recorded the run; the serial-only `GIC <slot>`
+lines, which carry the raw `ICH_VTR_EL2` value, have no output on this
+machine.
+
+What it decides:
+
+- A Route B guest's `timebase-frequency` is 19,200,000, so the VirtualMac
+  template's 24 MHz is replaced, not rescaled (there is no ECV).
+- A Route B monitor can deliver the guest's interrupts through the list
+  registers instead of a full GICv3 CPU interface model. With 4 list
+  registers, more than 4 pending interrupts need a software queue refilled
+  on maintenance interrupts, the usual practice for a hypervisor
+  (INFERRED). The distributor and redistributors were not touched, so how
+  the guest's view of them is presented is still open.
+
+A report defect this run showed: with `nopac`, the `PAUTH KEYS, ROUND TRIP`
+and `PACGA` lines still read `OK`. el2qual skips those probes then, and the
+report treats a fault code that was never written as success. On runs 6, 8
+and 9 those two lines are not measurements. PAuth on this machine rests on
+runs 5 and 7, which ran them.
+
+Phase 0A's CPU questions and the Phase 0C pre-Phase 1 check 1 are
+answered, for firmware 2.18. Phase 0B, the offline kernelcache study, is
+in [GAOKUN3-PHASE0B.md](GAOKUN3-PHASE0B.md), and the route decision it
+feeds in [GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md).
 
 ## Recording results
 

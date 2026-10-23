@@ -72,11 +72,11 @@ monitor-side devices.
 
 Each check reports PASS, FAIL, SKIP or NOT RUN, with its evidence class.
 
-| Check | Answers | Who and where |
-| --- | --- | --- |
-| el2qual on the gaokun3, with `CNTFRQ_EL0`, the firmware version and a GICv3 virtualization probe added | the counter rate Route B's device tree must carry; the firmware the Phase 0A results hold for; whether the guest's interrupts can go through the GIC's list registers rather than a full model | built and tested on the host; one supervised stick run by the owner ([GAOKUN3-QUALIFICATION.md](GAOKUN3-QUALIFICATION.md)) |
-| Route B smoke test in QEMU: the 26A428 VirtualMac kernelcache on a generic Armv8 CPU (TCG, PAuth and 16 KiB, no Apple features), with a minimal EL2 stub serving the PAC hypercalls | overturn conditions 1 and 2, as far as early boot reaches | host only |
-| Optional: the as-booted VirtualMac tree and driver matches (`ioreg`) from a macOS virtual machine on an Apple-silicon Mac | B3's cross-check, and overturn condition 3 for the device tree | host only; needs a macOS 26A428 virtual machine |
+| Check | Answers | Who and where | Result |
+| --- | --- | --- | --- |
+| el2qual on the gaokun3, with `CNTFRQ_EL0`, the firmware version and a GICv3 virtualization probe added | the counter rate Route B's device tree must carry; the firmware the Phase 0A results hold for; whether the guest's interrupts can go through the GIC's list registers rather than a full model | built and tested on the host; one supervised stick run by the owner ([GAOKUN3-QUALIFICATION.md](GAOKUN3-QUALIFICATION.md)) | PASS, 2026-10-23 (run 9, VERIFIED): firmware 2.18; `CNTFRQ_EL0` 19,200,000 on all 8 cores; the virtual CPU interface is usable at EL2, with 4 list registers ([results](GAOKUN3-QUALIFICATION.md#stage-3-results-run-9)) |
+| Route B smoke test in QEMU: the 26A428 VirtualMac kernelcache on a generic Armv8 CPU (TCG, PAuth and 16 KiB, no Apple features), with a minimal EL2 stub serving the PAC hypercalls | overturn conditions 1 and 2, as far as early boot reaches | host only | NOT RUN |
+| Optional: the as-booted VirtualMac tree and driver matches (`ioreg`) from a macOS virtual machine on an Apple-silicon Mac | B3's cross-check, and overturn condition 3 for the device tree | host only; needs a macOS 26A428 virtual machine | NOT RUN |
 
 ## Consequences if Route B is accepted
 
@@ -87,7 +87,8 @@ Each check reports PASS, FAIL, SKIP or NOT RUN, with its evidence class.
 - **Phase 3** becomes:
   - the classic loader;
   - the VirtualMac device tree completed from the template (memory,
-    `/chosen`, 19.2 MHz `timebase-frequency`, one running CPU per boot);
+    `/chosen`, a `timebase-frequency` of 19,200,000, the gaokun3's
+    `CNTFRQ_EL0` (VERIFIED, run 9), one running CPU per boot);
   - the platform devices and the PAC service.
 
   Acceptance stays a console on the framebuffer, here the device tree's
