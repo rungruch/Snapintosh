@@ -10,8 +10,8 @@ Status, 2026-10-23: **STARTED.** A first pass used the working Mac's own
 macOS 27.2 (26B118) kernels. The pinned 26A428 IPSW then arrived, and every
 figure was rerun on its J700 and VirtualMac2,1 kernelcaches: the kernels'
 own counts are identical (see "Findings"). B1, B2 and B4 are answered, and
-B3 from the device tree the IPSW ships. A1 to A3 and A5 have an answer, and
-A4, A6, A7, B5, B6 and B7 a partial one. B8, B3's cross-check against a
+B3 from the device tree the IPSW ships. A1 to A3, A5 and A7 have an answer,
+and A4, A6, B5, B6 and B7 a partial one. B8, B3's cross-check against a
 booted virtual machine and the Phase 0C table are open. B0 is no longer
 needed for 26A428. `tools/kc-census.py` and its host test exist.
 
@@ -70,7 +70,8 @@ The project
 boots VirtualMac guests under Linux KVM and QEMU's `vmapple` machine on
 M1 hosts (OBSERVED, from its documentation only). Its notes are a useful
 map of what such a guest touches: Apple's PAC key registers (`APCTL_EL1`,
-`KERNKEYLO_EL1`, `KERNKEYHI_EL1`), an `hvc #0` service with
+`KERNKEYLO_EL1`, `KERNKEYHI_EL1`, which the 26A428 kernelcache does not
+touch; see Findings), an `hvc #0` service with
 `x0 = 0xc1000000`, and paravirtual GPU, storage and network devices. Some
 of its files are unlicensed ("all rights reserved" in its `LICENSING.md`):
 read them, never copy them.
@@ -207,8 +208,10 @@ at 26B118, without kexts.
 counts, by register and direction: EL2 register moves (op1 4) and the
 `_EL12`/`_EL02` aliases (op1 5), EL2 `TLBI`/`AT` (op0 1, op1 4/5),
 `MRS CurrentEL`, `ERET`/`ERETAA`/`ERETAB`, `HVC` and `SMC` with immediates,
-`genter`/`gexit`/`0xd4e00000`, the rest of the `0x00201xxx` block, and
-IMPLEMENTATION DEFINED registers (CRn 11/15, any op1). It attributes sites
+`genter`/`gexit`/`0xd4e00000`, the rest of the `0x00201xxx` block,
+IMPLEMENTATION DEFINED registers (CRn 11/15, any op1), and the
+architectural counter and timer registers (CRn 14 at op1 3, and
+`CNTKCTL_EL1`). It attributes sites
 to fileset entries by each entry's own segments, names functions when `nm`
 has symbols (in a fileset, only with a symbol of the site's own entry), and
 writes every site with `--sites` (TSV, under `build/`).
@@ -281,13 +284,15 @@ Commands run from the repository root; raw output is in `build/phase0b/`
 (ignored; 26A428 files carry `-26A428` in their names). Counts are upper
 bounds from a linear scan.
 
-**Tooling.** `python3 -I tools/test-kc-census.py`: PASS (80 checks, 0
-FAIL). A copy of the tool with two register names swapped fails 6 of them,
-and one that lets any nearby symbol name a site fails the cross-entry
-check. Every architectural site word was also disassembled with `llvm-mc
+**Tooling.** `python3 -I tools/test-kc-census.py`: PASS (96 checks, 0
+FAIL). Three deliberately broken copies of the tool each fail:
+- with two register names swapped, 6 checks fail;
+- letting any nearby symbol name a site fails the cross-entry check;
+- counting every CRn 14 register as a counter fails the op1 1 near miss. Every architectural site word was also disassembled with `llvm-mc
 --disassemble -triple=arm64 -mattr=+all` (LLVM 23.1.4, a one-off check
-kept only in `build/phase0b/`): 2,027 in `t8140`, 103 in `vmapple`, 3,169
-in the 26A428 J700 kernelcache and 104 in the VirtualMac one. PASS: LLVM
+kept only in `build/phase0b/`): 2,037 in `t8140`, 1,012 in `vmapple`,
+3,179 in the 26A428 J700 kernelcache and 1,013 in the VirtualMac one,
+counter and timer registers included. PASS: LLVM
 gives the same register and direction for every site, and no EL2 or `_EL12`
 register is left unnamed. Implementation-defined registers print as
 `s<op0>_<op1>_c<n>_c<m>_<op2>`; no Apple register is given a name here
@@ -436,7 +441,8 @@ they are the kernelcache's 216 fileset entries.
 
 The kernels' own sites are identical: every `com.apple.kernel` site class,
 register and direction in the 26A428 kernelcaches matches the 26B118
-kernels (2,550 J700 sites, 266 VirtualMac sites). The kexts add:
+kernels (2,560 J700 sites and 1,175 VirtualMac sites, counter and timer
+registers included). The kexts add:
 
 | Class | J700 kexts | VirtualMac kexts |
 | --- | --- | --- |
@@ -472,6 +478,7 @@ above lists.
 | `genter` / `0xd4e00000` | 174 / 174 | OBSERVED, agrees with `kc-analyze.py` |
 | other `0x00201xxx` | 175 | OBSERVED, agrees with APPLE-ENCODINGS.md |
 | IMPDEF registers (CRn 11/15) | 1,881 across 188 distinct | OBSERVED |
+| Counter and timer registers | 10: `CNTKCTL_EL1` (3 reads, 3 writes), `CNTP_CTL_EL0` (4 writes); no `CNTFRQ_EL0`, `CNTPCT_EL0` or `CNTVCT_EL0` | OBSERVED |
 
 - The EL2 and `_EL12` sites are not spread through the kernel. 124 of the
   133 sit in two address clusters: 56 in `0x...7322000` to `0x...7326fff`
@@ -529,7 +536,18 @@ above lists.
   - On 26A428 both counts are unchanged and every one of these reads is in
     `com.apple.kernel`; no kext reads either alias.
 
-  A7 is partly answered; the `CNTFRQ_EL0` readers are still open.
+  A7: the kernel never reads `CNTFRQ_EL0`, and never reads an
+  architectural counter (`CNTPCT_EL0`, `CNTVCT_EL0` or their
+  self-synchronised forms). Every counter read is one of the two aliases.
+  It takes its frequency from the device tree, as the VirtualMac kernel
+  does (B7 below).
+
+  INFERRED: a 19.2 MHz J700 guest therefore needs a 19.2 MHz
+  `timebase-frequency` and all 1,060 alias reads served at that rate. On
+  the gaokun3 the alias encodings are not Apple's counter. `HCR_EL2.TIDCP`
+  (Armv8.0) traps EL1 accesses to CRn 11 and 15 to EL2, so the monitor can
+  trap and emulate the reads, or the deferred `SNAP_KERNEL_NATIVE_COUNTER`
+  rewrite can turn them into architectural reads.
 - UNKNOWN: which of these sites run on hot paths, and whether any run when
   the kernel believes it is at EL1 (A6).
 
@@ -549,9 +567,50 @@ hold for both builds; 26A428's kexts add one `HVC`.
   `s3_4_c15_c5_0` and `s3_5_c15_c5_0`. What they are, and whether the
   monitor already handles each, is UNKNOWN until compared against the
   monitor's register list and evidence.
-- OBSERVED: none of the 56 is `s3_4_c15_c10_6`, so this kernel never reads
-  the counter alias that the `t8140` kernel reads 1,017 times. B7 is partly
-  answered; where this kernel takes its counter frequency is still open.
+- B5 against the monitor (26A428). I searched `compat/`, `probes/` and
+  `shadow/` for each encoding in its name, tuple and instruction-word forms.
+  The 56 accesses touch 13 registers, and the monitor already knows two:
+  - `s3_4_c15_c1_3`, which it names `AMX_STATE_T_EL1`
+    (`compat/fast-trap.h:99`);
+  - `s3_4_c15_c1_4`, which it answers with 0 (`probes/sysregzero.py:58`).
+
+  The other 11, at 1 to 5 sites each, are unknown to it. On the gaokun3's
+  Cortex cores these encodings are either undefined or Arm's own
+  IMPLEMENTATION DEFINED registers. `HCR_EL2.TIDCP` traps EL1 accesses to
+  CRn 11 and 15 to EL2, so the monitor can intercept each one (INFERRED;
+  not measured).
+- OBSERVED (26A428, a one-off scan of every executable word): the
+  VirtualMac kernelcache writes no PAuth key register at all.
+  - It touches none of the Apple key registers the monitor models:
+    `KERNKey` lo/hi at `s3_4_c15_c1_0`/`c1_1` and `APCTL` at
+    `s3_4_c15_c0_4` (`compat/pauth-user.c:34`).
+  - It writes no architectural key register (`APIAKey` to `APGAKey`).
+  - The J700 kernelcache, by contrast, writes `KERNKey` lo and hi 6 times
+    each, and `APIBKey` and `APDBKey` lo and hi 4 times each.
+
+  INFERRED: in a virtual machine something outside the kernel's code sets
+  the keys, most likely the hypervisor through the CPU-service calls below.
+  aquarat's notes tie `0xc1000000` to PAuth set-up. A Route B monitor would
+  have to serve those calls.
+- B7 (26A428 and 26B118 alike): the counter.
+  - The kernel reads `CNTVCT_EL0` at 891 sites and never reads an Apple
+    counter alias or `CNTFRQ_EL0`.
+  - It programs the virtual timer (`CNTV_CTL_EL0`: 2 reads, 3 writes;
+    `CNTV_TVAL_EL0`: 4 writes), `CNTP_CTL_EL0` (3 writes) and
+    `CNTKCTL_EL1` (3 reads, 3 writes).
+  - Its frequency comes from the device tree. Published XNU
+    (`pexpert/arm/pe_identify_machine.c` at tag `xnu-12377.121.6`, a
+    release before macOS 27) starts from 24 MHz and takes
+    `timebase-frequency` from the first `/cpus` node whose `state` is
+    `running`. That string is in this kernel's `__TEXT`, and the VirtualMac
+    tree gives 24 MHz. VERIFIED for the published source, INFERRED for
+    26A428.
+
+  INFERRED: with 19.2 MHz in the tree, this kernel runs on the gaokun3's
+  own counter with no ECV and no trap, because `CNTVCT_EL0` reads at EL1
+  trap only if the monitor asks them to. Still open: tick constants kept
+  elsewhere (`/machine-timeouts` and the like), and the gaokun3's
+  `CNTFRQ_EL0`, which el2qual does not print.
 - OBSERVED: 163 words in the `0x00201xxx` block (AMX-style), so this
   kernel also carries AMX code.
 - OBSERVED (26A428; the kernel's 45 sites give the same on 26B118): of the
@@ -586,13 +645,15 @@ hold for both builds; 26A428's kexts add one `HVC`.
   machine, which needs one.
 - B8: entry and boot handoff, including whether graphics can do without
   the paravirtual GPU.
-- B6: the 25 `HVC` sites without a local constant, and what each function
-  does.
-- B7: where the VirtualMac kernel takes its counter frequency.
+- B5: what the 11 implementation-defined registers the monitor does not
+  know are, and what each needs.
+- B6: the 25 `HVC` sites without a local constant; what each function
+  does, especially how PAuth keys reach the guest.
+- B7: tick constants outside `timebase-frequency`, and the gaokun3's own
+  `CNTFRQ_EL0`.
 - A4: the `SPSR` constants.
 - A6: hot paths, including whether the FGT and SME sites can run. This
   needs the 26A428 KDK, because `com.apple.kernel` has no symbols.
-- A7: the `CNTFRQ_EL0` readers.
 - The Route A rewrite judgement and the Phase 0C comparison table.
 
 Everything except A6 needs only the extracted sets.
