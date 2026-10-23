@@ -449,7 +449,8 @@ A report defect this run showed: with `nopac`, the `PAUTH KEYS, ROUND TRIP`
 and `PACGA` lines still read `OK`. el2qual skips those probes then, and the
 report treats a fault code that was never written as success. On runs 6, 8
 and 9 those two lines are not measurements. PAuth on this machine rests on
-runs 5 and 7, which ran them.
+runs 5 and 7, which ran them. el2qual built after run 9 prints `NOT RUN` on
+both lines when PAuth is skipped.
 
 Phase 0A's CPU questions and the Phase 0C pre-Phase 1 check 1 are
 answered, for firmware 2.18. Phase 0B, the offline kernelcache study, is

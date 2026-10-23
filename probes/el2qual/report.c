@@ -427,10 +427,14 @@ static void verdicts(const struct el2q_cpu *c, struct el2q_text *t)
     put_dec(&b, EL2Q_PAC_TRIALS);
     if (signs == EL2Q_YES && !advertised) put_s(&b, " HIDDEN?");
 
+    /* With nopac these probes never run, and their fault codes stay at the
+     * zero that put_esr prints as OK: say NOT RUN instead, so a skipped probe
+     * cannot be read as a passed one (gaokun3 runs 6, 8 and 9 did). */
     b = new_line(t, EL2Q_WHITE);
     label(&b, "PAUTH KEYS, ROUND TRIP");
-    put_esr(&b, c->probe_esr[EL2Q_PROBE_APIAKEY]);
-    if (c->pac_rt_ran) {
+    if (!c->pac_ran) put_s(&b, verdict_word(EL2Q_NOT_RUN));
+    else put_esr(&b, c->probe_esr[EL2Q_PROBE_APIAKEY]);
+    if (c->pac_ran && c->pac_rt_ran) {
         put_s(&b, ", ");
         put_esr(&b, c->pac_rt_esr);
         if (!c->pac_rt_esr) put_s(&b, c->pac_rt[1] == c->pac_in[0] ? " AUTH OK" : " AUTH BAD");
@@ -438,7 +442,8 @@ static void verdicts(const struct el2q_cpu *c, struct el2q_text *t)
 
     b = new_line(t, EL2Q_WHITE);
     label(&b, "PACGA");
-    put_esr(&b, c->probe_esr[EL2Q_PROBE_PACGA]);
+    if (!c->pac_ran) put_s(&b, verdict_word(EL2Q_NOT_RUN));
+    else put_esr(&b, c->probe_esr[EL2Q_PROBE_PACGA]);
 
     unsigned tg16 = field(mmfr0, 20), tg16_2 = field(mmfr0, 32);
     b = new_line(t, tg16 ? EL2Q_GREEN : EL2Q_RED);

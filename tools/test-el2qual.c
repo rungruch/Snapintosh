@@ -432,6 +432,8 @@ static void test_report(void)
     CHECK(has_line("VIRTUALMAC ROUTE (EL1) .. CPU OK"));
     CHECK(has_line("SLBOUNCE GATE: ZAP-SHADER DISABLED: OPEN"));
     CHECK(has_line("NV2 ..................... NO  FIELD 0 VNCR_EL2 UNDEF"));
+    CHECK(has_line("PAUTH KEYS, ROUND TRIP .. OK, OK AUTH OK"));
+    CHECK(has_line("PACGA ................... OK"));
     /* The two cores differ in MIDR only; that is the one difference shown. */
     CHECK(has_line("1  MIDR       00000000410FD4C0"));
     el2q_summary_line(&run, 1, line);
@@ -443,6 +445,12 @@ static void test_report(void)
     CHECK(has_line("J700 ROUTE (AS ON A16) .. BLOCKED: NV2 ECV RNDR PAUTH?"));
     CHECK(has_line("VIRTUALMAC ROUTE (EL1) .. BLOCKED: PAUTH?"));
     CHECK(has_line("PAUTH SIGNS (PACIA1716) . NOT RUN"));
+    /* Nor may the probes it skipped read as passed: their fault codes are
+     * still zero, which alone would print OK (gaokun3 runs 6, 8 and 9). */
+    CHECK(has_line("PAUTH KEYS, ROUND TRIP .. NOT RUN"));
+    CHECK(!has_line("AUTH OK"));
+    CHECK(has_line("PACGA ................... NOT RUN"));
+    CHECK(!has_line("PACGA ................... OK"));
     /* Measured absent: no question mark. */
     run.cpu[0].pac_ran = 1;
     run.cpu[0].probe_esr[EL2Q_PROBE_APIAKEY] = 0x02000000;
