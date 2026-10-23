@@ -99,15 +99,18 @@ to the point of coherency, since the display reads memory, not the CPU's
 caches. The report says `SCREEN DT SIMPLE-FB  FB 00000000C6200000  NO GOP
 ADDRESS`, in portrait: rotate the tablet or the photo.
 
-Two consequences, and what is still unverified:
+Two consequences:
 
 - The device tree comes from systemd-boot, so a stage 1 stick (el2qual
   alone) can never draw. Stage 1b is the first stage that can.
-- That pixels written there appear on the panel, and that the firmware does
-  not redraw the buffer before `ExitBootServices`, are INFERRED. Before the
-  first write el2qual prints `SCREEN: DT SIMPLE-FB 1600X2560 FB
-  00000000C6200000, DRAWING` on the firmware console, so a fault on that
-  write leaves the line as the last one on screen.
+- Pixels written there appear on the panel and stay after
+  `ExitBootServices`: VERIFIED by the stage 1b run of 2026-10-23 (see
+  "Runs so far"), whose whole report was drawn there after it. Whether the
+  firmware redraws the buffer before `ExitBootServices` was not observed,
+  and does not affect the report. Before the first write el2qual still
+  prints `SCREEN: DT SIMPLE-FB 1600X2560 FB 00000000C6200000, DRAWING` on
+  the firmware console, so a fault on that write would leave the line as
+  the last one on screen.
 
 With neither source, el2qual says why on the firmware console (`DT
 FRAMEBUFFER: <reason>`) and stops before `ExitBootServices`, so no Secure
@@ -282,6 +285,48 @@ the A78C and X1C cores.
 Recovery is the same in every case: hold the power button until the machine
 is off, remove the stick, power on. Windows should start as before; if
 BitLocker asks, enter the recovery key.
+
+## Runs so far
+
+All on one MateBook E Go 2023; firmware version not recorded for any of
+them yet (read it in the firmware setup at the next run).
+
+| # | Date | Stage | `el2qual.efi` (commit) | Result |
+| --- | --- | --- | --- | --- |
+| 1 | 2026-10-23 | not recorded | not recorded (before `96e3d2c`) | only the firmware console's `... CALLING EXITBOOTSERVICES`; nothing drawn, nothing measured ("The screen") |
+| 2 | 2026-10-23 | 1 | `3323c2e8` (`96e3d2c`) | `NO GOP MODE HAS A FRAMEBUFFER ADDRESS (MODE 7)`, stopped before `ExitBootServices`; nothing measured |
+| 3 | 2026-10-23 | 1b, entry not recorded | `df1644c4` (`a83d95b`) | PASS: full report drawn on the DT framebuffer after `ExitBootServices`; `SLBOUNCE GATE: ZAP-SHADER DISABLED: OPEN` |
+
+Full SHA-256 of run 3's `el2qual.efi`:
+`df1644c4e47f515d39cf92dee4c584819b75784d6b20d7261c08ead4681ca6b9`; it
+rebuilds identically from `a83d95b`. The entry does not matter at stage
+1b: without slbounce all four stay at EL1 and measure the same.
+
+Run 3's report (photographed): `START EL1  AFTER EBS EL1  EBS OK, TRIES 1`;
+`ACPI CPUS 8  GIC V3  PSCI NONE  FB 1600X2560` (el2qual queries PSCI only
+at EL2); `SCREEN DT SIMPLE-FB  FB 00000000C6200000  NO GOP ADDRESS`. The
+ID registers as UEFI sees them at EL1, under Qualcomm's hypervisor,
+transcribed from the photo (all registers not listed read 0):
+
+| Register | Value | Decoded |
+| --- | --- | --- |
+| `MIDR_EL1` | `0x00000000410FD4B0` | Arm Cortex-A78C r0p0 (the boot CPU) |
+| `MPIDR_EL1` | `0x0000000081000000` | |
+| `REVIDR_EL1` | `0x0000000000000001` | |
+| `ID_AA64PFR0_EL1` | `0x1100000011111112` | EL2 and EL3 AArch64; GICv3 system registers; SVE 0 |
+| `ID_AA64PFR1_EL1` | `0x0000000000000010` | SSBS 1; BT (BTI) 0 |
+| `ID_AA64DFR0_EL1` | `0x0000000110305408` | |
+| `ID_AA64ISAR0_EL1` | `0x0010100010211120` | RNDR 0 |
+| `ID_AA64ISAR1_EL1` | `0x0000000001200031` | APA 3 (PAuth2, QARMA5, no FPAC), API 0, GPA 1, GPI 0; as Windows caches it |
+| `ID_AA64MMFR0_EL1` | `0x0000000000101122` | TGran16 1 (16 KiB supported), TGran4/64 supported, stage-2 fields 0 (as stage 1); PARange 40 bits; FGT 0; ECV 0 |
+| `ID_AA64MMFR1_EL1` | `0x0000000010212122` | VH 1 (VHE) |
+| `ID_AA64MMFR2_EL1` | `0x0000000100001011` | NV 0 |
+
+These are OBSERVED, not VERIFIED: a hypervisor can hide fields from EL1, or
+show ones the hardware lacks, and `ID_AA64MMFR0` differs from what Windows
+caches (`0x0000011100101022`, which marks big-endian and the stage-2
+granules unsupported). Stage 2 reads the same registers at EL2 and
+measures the behaviour behind them.
 
 ## Recording results
 
