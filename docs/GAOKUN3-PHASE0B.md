@@ -6,12 +6,13 @@ Phase 0B is offline: it studies Apple's kernelcaches and device trees on a
 Mac and needs no access to the gaokun3. Its answers feed Phase 0C, the
 written choice between the two routes below.
 
-Status, 2026-10-23: **STARTED, first pass only.** The pinned 26A428
-inputs are not on the working Mac, so everything under "Findings" comes from
-its own macOS 27.2 (26B118) kernels and must be confirmed on 26A428 before a
-decision rests on it. B2, A1 to A3 and A5 have a first answer, and A4, A7,
-B5, B6 and B7 a partial one. B0, B1, B3, B4, B8, A6 and the Phase 0C table
-are open. `tools/kc-census.py` and its host test exist.
+Status, 2026-10-23: **STARTED.** A first pass used the working Mac's own
+macOS 27.2 (26B118) kernels. The pinned 26A428 IPSW then arrived, and every
+figure was rerun on its J700 and VirtualMac2,1 kernelcaches: the kernels'
+own counts are identical (see "Findings"). B1 and B2 are answered; A1 to A3
+and A5 have an answer; A4, A6, A7, B5, B6 and B7 a partial one. B3, B4, B8
+and the Phase 0C table are open, and B0 is no longer needed for 26A428.
+`tools/kc-census.py` and its host test exist.
 
 ## Where things stand
 
@@ -80,20 +81,29 @@ Nothing here may be committed (AGENTS.md, rule 1). Keep inputs under
 
 | Input | Where | Needed for | Notes |
 | --- | --- | --- | --- |
-| This Mac's own kernels | `/System/Library/Kernels/kernel.release.vmapple` (Apple's virtual-machine kernel, which VirtualMac2,1's kernelcache is presumably built from: INFERRED, B1 checks it) and `kernel.release.t8140` (the J700's SoC) | a first pass at B2, B5 to B7 and A1 to A5 | Present now. They are macOS 27.2 build 26B118, plain arm64e Mach-O executables: one kernel each, no kexts, so not B3 or B4. Record findings from them as 26B118, and confirm on 26A428 before a decision rests on them. Read in place; never copy them into the tree. |
-| macOS 27 26A428 UniversalMac IPSW | `downloads/UniversalMac_27.0_26A428_Restore.ipsw` | everything | About 27 GB (`tools/fetch-ipsw.py`). The URL comes from the machine owner; no URL is recorded in this repository. Downloading needs the owner's go-ahead. |
-| J700 set | `downloads/extracted/j700ap/` | question A | `python3 tools/extract-firmware.py <ipsw> j700ap` |
-| VirtualMac2,1 set | `downloads/extracted/<class>/` | question B | the device class is not known yet (task B1) |
+| This Mac's own kernels | `/System/Library/Kernels/kernel.release.vmapple` (Apple's virtual-machine kernel) and `kernel.release.t8140` (the J700's SoC) | a first pass at B2, B5 to B7 and A1 to A5 | macOS 27.2 build 26B118, plain arm64e Mach-O executables: one kernel each, no kexts, so not B3 or B4. Their census matches the `com.apple.kernel` entry of the 26A428 `vma2macosap` and `j700ap` kernelcaches site for site (Findings). Read in place; never copy them into the tree. |
+| macOS 27 26A428 UniversalMac IPSW | `downloads/UniversalMac_27.0_26A428_Restore.ipsw`, or anywhere outside the tree, passed by path | everything | Present since 2026-10-23: 26,626,436,228 bytes, `BuildManifest.plist` 27.0 (26A428), 180 identities, and every member's CRC-32 passes (`zipfile.ZipFile(...).testzip()` finds no bad member). The URL comes from the machine owner; no URL is recorded in this repository. |
+| J700 set | `downloads/extracted/j700ap/` | question A | `python3 tools/extract-firmware.py <ipsw> j700ap --out downloads/extracted/j700ap`. Its `kernelcache.release.mac17p` has SHA-256 `dc9019ae39187b36936c2c513b485e513f15cd966b5c887ac88ffd2925976c62`, the image `tools/test-static-trust-contract.py` pins (VERIFIED). |
+| VirtualMac2,1 set | `downloads/extracted/vma2macosap/` | question B | `python3 tools/extract-firmware.py <ipsw> vma2macosap --out downloads/extracted/vma2macosap` (B1) |
 | KDK for 26A428 | `/Library/Developer/KDKs/KDK_27.0_26A428.kdk` | symbol names for A6 | optional; Apple developer download; `tools/kc-symbolicate.py` uses it for J700 |
 | XNU source | [apple-oss-distributions/xnu](https://github.com/apple-oss-distributions/xnu) | reading both kernels' contracts | the release matching macOS 27, if published |
 
-**Disk.** The working Mac had 39 GB free on 2026-10-23: room for the IPSW
-and two extracted sets, with little margin. The cheaper path is to read
-only the members needed straight from Apple's server. The IPSW is a zip
-archive, `tools/extract-firmware.py` opens it with `zipfile`, and
-`zipfile` needs nothing but `seek` and `read`, so a file-like object that
-serves `read` with HTTP `Range` requests lets it run on the URL unchanged.
-That is task B0; it is not written yet.
+**Extracting.** Two things to know about `tools/extract-firmware.py`:
+
+- It decompresses LZFSE payloads by running `lzfse -decode`, which the
+  working Mac does not have. A stand-in script named `lzfse` on `PATH`
+  that runs `/usr/bin/compression_tool -decode -a lzfse`, macOS's own
+  decoder, from stdin to stdout, extracted both sets. The J700 kernelcache
+  it produced matches the pinned digest.
+- Without `--out` it writes next to the IPSW (`<ipsw folder>/extracted/`),
+  not under `downloads/` in the tree.
+
+**Disk.** The IPSW takes 26.6 GB. Reading only the members needed straight
+from Apple's server would avoid that. The IPSW is a zip archive,
+`tools/extract-firmware.py` opens it with `zipfile`, and `zipfile` needs
+nothing but `seek` and `read`, so a file-like object that serves `read`
+with HTTP `Range` requests would let it run on the URL unchanged. That is
+task B0. It is not written, and 26A428 no longer needs it.
 
 ## Tasks
 
@@ -142,13 +152,13 @@ calls, against the J700's in [BOOT-CHAIN.md](BOOT-CHAIN.md#4-monitor-calls-stand
 **B3. Device model.** Dump the VirtualMac2,1 device tree with
 `python3 probes/appledt.py <devicetree> --grep <text>` (default path
 `/device-tree`) and list every device node: name, `compatible`, `reg`
-and interrupts. Whether the IPSW identity carries a device tree at all is
-UNKNOWN (B1 shows it); a virtual machine's tree may come from
-Virtualization.framework at boot instead. If so, a macOS virtual machine
-on an Apple-silicon Mac gives the same facts from inside the guest:
-`ioreg -p IODeviceTree -lw0` for the tree and `ioreg -lw0` for which
-drivers matched each node (OBSERVED evidence, for the macOS version the
-virtual machine runs). Group them: interrupt controller (GIC, or Apple's AIC as
+and interrupts. The identity carries one
+(`downloads/extracted/vma2macosap/DeviceTree.vma2macosap`, B1).
+Virtualization.framework's boot firmware may fill in or change parts of it
+at boot (UNKNOWN), so cross-check from inside a macOS virtual machine on
+an Apple-silicon Mac: `ioreg -p IODeviceTree -lw0` for the tree as booted
+and `ioreg -lw0` for which drivers matched each node (OBSERVED evidence,
+for the macOS version the virtual machine runs). Group them: interrupt controller (GIC, or Apple's AIC as
 the J700 has), timer, UART, storage, network, graphics, input, entropy or
 crypto (AES), NVRAM, power and reset, PCIe, anything SEP-like. For each,
 say whether Snapintosh already has a model (`compat/device.c`,
@@ -199,18 +209,22 @@ counts, by register and direction: EL2 register moves (op1 4) and the
 `genter`/`gexit`/`0xd4e00000`, the rest of the `0x00201xxx` block, and
 IMPLEMENTATION DEFINED registers (CRn 11/15, any op1). It attributes sites
 to fileset entries by each entry's own segments, names functions when `nm`
-has symbols, and writes every site with `--sites` (TSV, under `build/`).
+has symbols (in a fileset, only with a symbol of the site's own entry), and
+writes every site with `--sites` (TSV, under `build/`).
 Its host test, `tools/test-kc-census.py`, encodes every class by hand from
 the Arm ARM field layout, anchors the encoder and the register names a
 first census printed unnamed to LLVM-assembled words, and
 includes near misses that must not count (EL1/EL0/EL3 op1 values,
 `MSR` immediates, `TLBI` at op1 0, `SVC`, `ERET` with an Rn, a different-op2
-`CurrentEL`) and a synthetic two-entry fileset. A linear scan also matches
-data words in text, so every count is an upper bound.
+`CurrentEL`), a synthetic two-entry fileset, and a symbol of one entry that
+must not name another entry's site. A linear scan also matches data words
+in text, so every count is an upper bound.
 
 Not covered by the tool: `SPSR` constants (A4), data flow into `x0` for
-`HVC`/`SMC` (B6; a one-off backward scan for a `MOVZ` was used, see
-Findings) and the hot-path judgement (A6, which needs symbols).
+`HVC`/`SMC` (B6; a one-off scan of each site's basic block was used, see
+Findings) and the hot-path judgement (A6). 26A428's kexts carry text
+symbols but `com.apple.kernel` carries none, so the kernel's own sites
+still need the KDK.
 
 | Task | What to count |
 | --- | --- |
@@ -248,46 +262,94 @@ being the known hard case.
 - The working Mac, as of 2026-10-23: macOS 27.2 (26B118) on Apple
   silicon; Homebrew LLVM 23.1.4, lld and QEMU 11.1.2; system Python 3.9
   (`tools/test-link.py` needs 3.10 or newer, and a `../q1n1` checkout,
-  which is absent); no IPSW, no KDK; 39 GB free.
+  which is absent); the 26A428 IPSW present outside the tree; no KDK; no
+  `lzfse` (see "Extracting" above).
 - Commit titles follow AGENTS.md section 6 (`tools: ...`, `docs: ...`).
 
 ## Findings
 
-All from `/System/Library/Kernels/kernel.release.{t8140,vmapple}`, macOS
-27.2 build 26B118, read in place. Commands run from the repository root;
-raw output is in `build/phase0b/` (ignored). Counts are upper bounds from a
-linear scan. **26A428: NOT RUN.** Both kernels are stripped (`nm` lists no
-text symbols), so no site is named by function.
+Two inputs, both read in place:
 
-**Tooling.** `python3 -I tools/test-kc-census.py`: PASS (76 checks, 0
-FAIL); a copy of the tool with two register names swapped fails 6 of them.
-Every architectural site word in both kernels (2,027 in `t8140`, 103 in
-`vmapple`) was also disassembled with `llvm-mc --disassemble -triple=arm64
--mattr=+all` (LLVM 23.1.4, a one-off check not kept in the tree): PASS,
-LLVM gives the same register and direction for every site, and no EL2 or
-`_EL12` register is left unnamed. Implementation-defined registers print as
+- the working Mac's `/System/Library/Kernels/kernel.release.{t8140,vmapple}`,
+  macOS 27.2 build 26B118: plain kernels with no kexts and no text symbols;
+- the pinned 26A428 kernelcaches, `downloads/extracted/j700ap/kernelcache.release.mac17p`
+  (362 fileset entries) and `downloads/extracted/vma2macosap/kernelcache.release.vma2`
+  (216 entries). Their kexts carry text symbols, `com.apple.kernel` none.
+
+Commands run from the repository root; raw output is in `build/phase0b/`
+(ignored; 26A428 files carry `-26A428` in their names). Counts are upper
+bounds from a linear scan.
+
+**Tooling.** `python3 -I tools/test-kc-census.py`: PASS (80 checks, 0
+FAIL). A copy of the tool with two register names swapped fails 6 of them,
+and one that lets any nearby symbol name a site fails the cross-entry
+check. Every architectural site word was also disassembled with `llvm-mc
+--disassemble -triple=arm64 -mattr=+all` (LLVM 23.1.4, a one-off check
+kept only in `build/phase0b/`): 2,027 in `t8140`, 103 in `vmapple`, 3,169
+in the 26A428 J700 kernelcache and 104 in the VirtualMac one. PASS: LLVM
+gives the same register and direction for every site, and no EL2 or `_EL12`
+register is left unnamed. Implementation-defined registers print as
 `s<op0>_<op1>_c<n>_c<m>_<op2>`; no Apple register is given a name here
 without evidence.
 
+### B1: the VirtualMac2,1 identity (26A428)
+
+- VERIFIED: `BuildManifest.plist` lists `VirtualMac2,1` as the only
+  virtual product. Its device class is `vma2macosap` (2 `Erase`
+  identities, 1 `Update`): chip ID `0xFE00`, board ID `0x20`, security
+  domain `0x01`.
+- VERIFIED: its manifest names a kernelcache (`kernelcache.release.vma2`),
+  a device tree (`DeviceTree.vma2macosap`), iBoot, LLB, iBSS and iBEC, all
+  present. It names no SEP, no `Ap,TrustedExecutionMonitor` (TXM) and no
+  SPTM, and the IPSW holds no SPTM or exclave image for chip `0xFE00`
+  (`tools/extract-firmware.py` resolves both by chip and found neither).
+- Command: `python3 tools/extract-firmware.py <ipsw> vma2macosap --out
+  downloads/extracted/vma2macosap`, which extracted 4 components.
+
 ### B2: SPTM and TXM in the VirtualMac kernel
 
-- VERIFIED (26B118): `python3 tools/kc-analyze.py
-  /System/Library/Kernels/kernel.release.vmapple` prints `__DATA_SPTM
-  absent -- not an SPTM kernel` and "No monitor call sites". The census
-  agrees: 0 `genter`, 0 `0xd4e00000`, 0 `gexit`.
-- Same command on `kernel.release.t8140`: SPTM-based, 348 call sites in 3
-  pages of 16K (174 `genter` and 174 `0xd4e00000` words), matching the
+- VERIFIED: `python3 tools/kc-analyze.py
+  downloads/extracted/vma2macosap/kernelcache.release.vma2` prints
+  `__DATA_SPTM absent -- not an SPTM kernel` and "No monitor call sites".
+  The census agrees across all 216 entries: 0 `genter`, 0 `0xd4e00000`,
+  0 `gexit`. The 26B118 `kernel.release.vmapple` gives the same result.
+- Same command on the J700 kernelcache: SPTM-based, 348 call sites in 3
+  pages of 16K (174 `genter` and 174 `0xd4e00000` words), all in
+  `com.apple.kernel`; one stub calls TXM (domain 2). This matches the
   figure already in the docs.
-- UNKNOWN: whether the VirtualMac2,1 IPSW identity carries an SPTM or TXM
-  image (B1). If it carries none, Route B drops `compat/sptm*.c`,
-  `compat/txm*.c` and the shadow layer's SPTM side.
-- Caveat: this is a plain kernel, not the IPSW kernelcache; a kernelcache
-  with kexts may differ.
+- So neither the VirtualMac2,1 identity nor its kernelcache has SPTM, TXM,
+  a SEP or exclaves. INFERRED: Route B needs none of `compat/sptm*.c`,
+  `compat/txm*.c`, the shadow layer's SPTM side or a SEP model; what the
+  shadow layer's translation side must still do is B8's question.
+
+### 26A428 against 26B118
+
+The kernels' own sites are identical: every `com.apple.kernel` site class,
+register and direction in the 26A428 kernelcaches matches the 26B118
+kernels (2,550 J700 sites, 266 VirtualMac sites). The kexts add:
+
+| Class | J700 kexts | VirtualMac kexts |
+| --- | --- | --- |
+| `_EL12` alias moves | 42 `CONTEXTIDR_EL12` (21 reads, 21 writes), all `AppleProcessorTrace` | 0 |
+| EL2 `TLBI` | 2 (`tlbi alle2is`, `tlbi alle1is`), `AppleProcessorTrace` | 0 |
+| `HVC` | 0 | 1, `AppleVirtualPlatform` (`_smc_call`) |
+| IMPDEF registers | 1,098: `AppleProcessorTrace` 988, `AppleT8140CLPC` 85, `AppleEverestErrorHandler` 19, `AppleARMWatchdogTimer` 4, `AppleT8140PMGR` 2 | 0 |
+| everything else | 0 | 0 |
+
+`AppleProcessorTrace`'s alias moves are its `getContextID` and
+`setContextID` methods, one pair in each of 21 per-SoC classes, and its two
+`TLBI`s are in `startTracingOnCore` (named by the kexts' own symbols).
+INFERRED: these kexts drive Apple's trace, power and error hardware, so
+they load only where the device tree has matching nodes.
 
 ### A1 to A5: J700 kernel (`t8140`)
 
 `python3 tools/kc-census.py /System/Library/Kernels/kernel.release.t8140
---sites build/phase0b/sites-t8140.tsv`
+--sites build/phase0b/sites-t8140.tsv`, and on 26A428
+`python3 tools/kc-census.py downloads/extracted/j700ap/kernelcache.release.mac17p
+--sites build/phase0b/sites-j700ap-26A428.tsv`. Everything below is the
+kernel's own and holds for both builds; the kexts add only what the table
+above lists.
 
 | Class | Sites | Evidence |
 | --- | --- | --- |
@@ -316,7 +378,8 @@ without evidence.
   INFERRED: cluster 1 is exception entry and return, and cluster 2 is code
   that switches to and from another context's EL1 state, such as a virtual
   machine's. The clusters are a few routines, not thousands of scattered
-  sites. What they are needs symbols (A6).
+  sites. What they are needs the KDK's symbols (A6): the 26A428 kernelcache
+  names none of the kernel's own functions.
 - Only one `ERET` exists in the whole kernel, so the hard case (an `ERET`
   with an EL2 mode in `SPSR`) is a single site to patch, not a pattern. If
   cluster 1 is the exception return path (INFERRED above), every exception
@@ -348,9 +411,13 @@ without evidence.
   - The only other register of that group the kernel touches,
     `s3_4_c15_c10_4` (3 reads, 5 writes), is one the monitor answers with 0
     ([KERNEL-PATCHES.md](KERNEL-PATCHES.md)).
-  - KERNEL-PATCHES.md's "about 1,060" counter-alias sites were counted on
-    the 26A428 kernelcache with its kexts, so the two figures are
-    consistent but are not the same count.
+  - The repository's EL0 emulation test (`tools/test-fast-el0-sysreg.c:37`)
+    names `S3_4_C15_C11_7` "the other counter alias"; the kernel reads it 43
+    times. 1,017 + 43 = 1,060, KERNEL-PATCHES.md's "about 1,060"
+    counter-alias sites (INFERRED: that document does not say how it
+    counted).
+  - On 26A428 both counts are unchanged and every one of these reads is in
+    `com.apple.kernel`; no kext reads either alias.
 
   A7 is partly answered; the `CNTFRQ_EL0` readers are still open.
 - UNKNOWN: which of these sites run on hot paths, and whether any run when
@@ -359,10 +426,14 @@ without evidence.
 ### B5, B6: VirtualMac kernel (`vmapple`)
 
 `python3 tools/kc-census.py /System/Library/Kernels/kernel.release.vmapple
---sites build/phase0b/sites-vmapple.tsv`
+--sites build/phase0b/sites-vmapple.tsv`, and on 26A428
+`python3 tools/kc-census.py downloads/extracted/vma2macosap/kernelcache.release.vma2
+--sites build/phase0b/sites-vma2macosap-26A428.tsv`. The kernel's figures
+hold for both builds; 26A428's kexts add one `HVC`.
 
 - OBSERVED: 0 EL2 register moves, 0 `_EL12` aliases, 0 EL2 `TLBI`/`AT`,
-  1 `MRS CurrentEL`, 1 `ERET`, 0 `SMC`, 45 `HVC`, all `hvc #0`.
+  1 `MRS CurrentEL`, 1 `ERET`, 0 `SMC`, 45 `HVC` in the kernel and 1 in
+  `AppleVirtualPlatform`, all `hvc #0`.
 - OBSERVED: 56 IMPDEF register accesses, including `s3_4_c15_c1_4` (22),
   `s3_4_c15_c1_3` (9), `s3_6_c15_c8_3` and `s3_6_c15_c2_5` (op1 6), and
   `s3_4_c15_c5_0` and `s3_5_c15_c5_0`. What they are, and whether the
@@ -373,10 +444,26 @@ without evidence.
   answered; where this kernel takes its counter frequency is still open.
 - OBSERVED: 163 words in the `0x00201xxx` block (AMX-style), so this
   kernel also carries AMX code.
-- OBSERVED: one `HVC` site sets `x0 = 0xc1000000` (a `MOVZ` of `0xc100`
-  shifted 16), the value aquarat's notes give for `SET_INITIAL_STATE`
-  (documentation only). The other 44 sites take `x0` from their callers,
-  so naming them needs per-site data flow (B6 open). The 45 sites span the
+- OBSERVED (26A428; the kernel's 45 sites give the same on 26B118): of the
+  46 `HVC` sites, 21 put a constant in `x0` within their own basic block,
+  12 distinct values. 11 load `x0` from memory, and 14 take it from their
+  caller (13 in the kernel, plus `AppleVirtualPlatform`'s `_smc_call`).
+  Read as Arm SMCCC function IDs (Arm DEN 0028: bit 31 a fast call, bit 30
+  the 64-bit convention, bits 29:24 the owning service), all 12 are fast
+  calls:
+
+  | Owning service | Function IDs | Sites |
+  | --- | --- | --- |
+  | 1, CPU service | `0xc1000000`, `0xc1000001`, `0xc10000f0` | 1, 8, 1 |
+  | 3, OEM service | `0xc3000003` to `0xc3000006`; `0x8300ff01` and `0x8300ff03` (32-bit), SMCCC's call-UID and revision queries | 1 each; 1, 1 |
+  | 6, vendor-specific hypervisor service | `0xc6000015`, `0xc6000016`, `0xc6000017` | 2, 2, 1 |
+
+  `0xc1000000` is the value aquarat's notes give for `SET_INITIAL_STATE`
+  (documentation only); no other function is named here. Method: a one-off
+  scan back from each `HVC` to the start of its basic block, following
+  register moves, on `llvm-mc` disassembly (`build/phase0b/hvc-x0.py`,
+  output `hvc-x0-vma2macosap-26A428.txt`). The 25 sites without a local
+  constant need real data flow (B6 still partly open). The sites span the
   whole text rather than sitting behind one wrapper, though 17 adjacent
   pairs are under 256 bytes apart, so some come in small groups.
 - INFERRED, not a decision: this kernel needs none of the register classes
@@ -385,8 +472,14 @@ without evidence.
 
 ### Still open
 
-B0, B1, B3, B4, B8; B7 (where `vmapple` takes its counter frequency); A4
-(`SPSR` constants); A6 (hot paths, needs the KDK symbols, including whether
-the FGT and SME sites can run); A7 (`CNTFRQ_EL0` readers); the Route A rewrite
-judgement; the Phase 0C comparison table. These need the 26A428 IPSW (the
-owner's go-ahead for the download) or the KDK.
+- B3, B4 and B8, whose inputs are now extracted.
+- B6: the 25 `HVC` sites without a local constant, and what each function
+  does.
+- B7: where the VirtualMac kernel takes its counter frequency.
+- A4: the `SPSR` constants.
+- A6: hot paths, including whether the FGT and SME sites can run. This
+  needs the 26A428 KDK, because `com.apple.kernel` has no symbols.
+- A7: the `CNTFRQ_EL0` readers.
+- The Route A rewrite judgement and the Phase 0C comparison table.
+
+Everything except A6 needs only the extracted sets.
