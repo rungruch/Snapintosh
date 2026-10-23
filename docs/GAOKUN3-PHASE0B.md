@@ -9,9 +9,9 @@ written choice between the two routes below.
 Status, 2026-10-23: **STARTED.** A first pass used the working Mac's own
 macOS 27.2 (26B118) kernels. The pinned 26A428 IPSW then arrived, and every
 figure was rerun on its J700 and VirtualMac2,1 kernelcaches: the kernels'
-own counts are identical (see "Findings"). B1, B2, B4 and B8 are answered,
-and B3 from the device tree the IPSW ships. A1 to A3, A5 and A7 have an
-answer, and A4, A6, B5, B6 and B7 a partial one. The Phase 0C comparison
+own counts are identical (see "Findings"). B1, B2, B4, B6 and B8 are
+answered, and B3 from the device tree the IPSW ships. A1 to A3, A5 and A7
+have an answer, and A4, A6, B5 and B7 a partial one. The Phase 0C comparison
 is drafted ([below](#phase-0c-comparison-draft)); B3's cross-check against
 a booted virtual machine is open. B0 is no longer
 needed for 26A428. `tools/kc-census.py` and its host test exist.
@@ -615,48 +615,103 @@ hold for both builds; 26A428's kexts add one `HVC`.
   constants kept elsewhere (`/machine-timeouts` and the like).
 - OBSERVED: 163 words in the `0x00201xxx` block (AMX-style), so this
   kernel also carries AMX code.
-- OBSERVED (26A428; the kernel's 45 sites give the same on 26B118): of the
-  46 `HVC` sites, 21 put a constant in `x0` within their own basic block,
-  12 distinct values. 11 load `x0` from memory, and 14 take it from their
-  caller (13 in the kernel, plus `AppleVirtualPlatform`'s `_smc_call`).
-  All 12 are Arm SMCCC fast calls (Arm DEN 0028), and published XNU names
-  every one (`osfmk/arm64/hv_hvc.h` at `xnu-12377.121.6`):
-
-  | Function ID | Name | Sites |
-  | --- | --- | --- |
-  | `0xc1000000` | `VMAPPLE_PAC_SET_INITIAL_STATE` | 1 |
-  | `0xc1000001` | `VMAPPLE_PAC_GET_DEFAULT_KEYS` | 8 |
-  | `0xc10000f0` | `VMAPPLE_PAC_NOP` | 1 |
-  | `0xc3000003` to `0xc3000006` | `VMAPPLE_GET_MABS_OFFSET`, `VMAPPLE_GET_BOOTSESSIONUUID`, `VMAPPLE_VCPU_WFK`, `VMAPPLE_VCPU_KICK` | 1 each |
-  | `0x8300ff01`, `0x8300ff03` | the OEM range's call-UID and revision queries (UID `3B878185-AA62-4E1F-9DC9-D6799CBB6EBB`, revision 1.0) | 1, 1 |
-  | `0xc6000015` to `0xc6000017` | `VMAPPLE_NESTED_SPACE_MAP`, `VMAPPLE_NESTED_SPACE_UNMAP`, `VMAPPLE_NESTED_SPACE_PROTECT` | 2, 2, 1 |
-
-  What published source says about them (VERIFIED in that source, INFERRED
-  for 26A428):
-  - The PAC range also has `SET_A_KEYS`, `SET_B_KEYS`,
-    `SET_EL0_DIVERSIFIER`, `SET_EL0_DIVERSIFIER_AT_EL1` and `SET_G_KEY`
-    (`0xc1000002` to `0xc1000006`). None is a local constant here.
-  - Under `HAS_PARAVIRTUALIZED_PAC`, `osfmk/arm64/pac_asm.h` issues
-    `SET_INITIAL_STATE`, `SET_B_KEYS` and `SET_EL0_DIVERSIFIER` with
-    `hvc #0`. After each one, `cbnz x0, .` spins forever if the call
-    failed, so a Route B monitor must implement the PAC calls or the guest
-    hangs at the first.
-  - The OEM calls are optional. `hvg_is_hcall_available`
-    (`osfmk/arm64/arm64_hypercall.c`) uses them only once `PAC_NOP`
-    succeeds, the OEM UID matches and the revision's major number is 1.
-  - The nested calls serve virtual machines run inside the guest.
-    `VMAPPLE_NESTED_CAPABILITIES` (`0xc6000000`) reports what is offered.
-
-  Method: a one-off scan back from each `HVC` to the start of its basic
-  block, following register moves, on `llvm-mc` disassembly
-  (`build/phase0b/hvc-x0.py`, output `hvc-x0-vma2macosap-26A428.txt`). The
-  25 sites without a local constant need real data flow (B6 still partly
-  open). The sites span the whole text rather than sitting behind one
-  wrapper, though 17 adjacent pairs are under 256 bytes apart, so some come
-  in small groups.
+- The 46 `HVC` sites are all `hvc #0` SMCCC calls; B6 below names every
+  one and what a monitor must answer.
 - INFERRED, not a decision: this kernel needs none of the register classes
   Route A must rewrite, and its `HVC` interface is the paravirtual surface
   a Route B monitor would serve.
+
+### B6: every hypercall, and what a monitor must answer (26A428)
+
+Evidence, all local and uncommitted:
+- disassembly windows around each site, read by hand
+  (`build/phase0b/hvc-windows.py`, output `hvc-windows-26A428.txt`);
+- a count of every SMCCC function ID the kernelcache builds in a register,
+  per fileset entry (`build/phase0b/fid-census.py`, output
+  `fid-census-vma2macosap-26A428.txt`);
+- published XNU at `xnu-12377.121.6`, read for facts only:
+  `osfmk/arm64/hv_hvc.h`, `pac_asm.h`, `machine_routines_asm.s`,
+  `cswitch.s`, `arm64_hypercall.c`, `osfmk/arm/machine_routines_apple.c`,
+  `osfmk/arm/locks_arm.c` and `pexpert/pexpert/arm64/VMAPPLE.h`.
+
+**All 46 sites are now named** (OBSERVED in the binary). The first pass
+left 25 open for two reasons. 13 build `x0` with four `MOVK`s and no
+`MOVZ`, which its scanner did not read as a constant. The other 11 load
+`x0` to `x5` from one structure and store the results back.
+
+| Service | Function ID | Name | Sites | Notes |
+| --- | --- | --- | --- | --- |
+| PAC (CPU) | `0xc1000000` | `SET_INITIAL_STATE` | 1 | right after `VBAR_EL1` is set at boot |
+| | `0xc1000001` | `GET_DEFAULT_KEYS` | 8 | a run-once guard (`swpb`) on each |
+| | `0xc1000003` | `SET_B_KEYS`, `x1` the task's ROP value | 4 | context switch |
+| | `0xc1000004` | `SET_EL0_DIVERSIFIER`, `x1` the task's JOP value | 4 | context switch, paired with each `SET_B_KEYS` |
+| | `0xc1000005` | `SET_EL0_DIVERSIFIER_AT_EL1`, `x1` 1 or 0, `x2` a JOP value | 2 | `ml_enable_user_jop_key` and `ml_disable_user_jop_key` |
+| | `0xc10000f0` | `PAC_NOP` | 1 | in `hvg_is_hcall_available` |
+| OEM | `0x8300ff01`, `0x8300ff03`, `0x8300feff` | 32-bit UID, revision and features queries | 1 each | same function |
+| | `0xc3000003` to `0xc3000006` | `GET_MABS_OFFSET`, `GET_BOOTSESSIONUUID`, `VCPU_WFK`, `VCPU_KICK` | 1 each | |
+| PSCI | `0xc400000e`, `0x84000002` | `SYSTEM_SUSPEND`, `CPU_OFF` | 1 each | kernel sleep path; `b .` after each |
+| | through `_smc_call` | `SYSTEM_OFF` `0x84000008`, `SYSTEM_RESET` `0x84000009`, `CPU_ON` `0xc4000003` | 1 | `AppleVirtualPlatform`'s one `hvc`, which takes `x0` from its caller; the three IDs are the constants that kext builds (INFERRED as its callers' arguments) |
+| Nested hypervisor | `0xc6000015` to `0xc6000017` | `NESTED_SPACE_MAP`, `UNMAP`, `PROTECT` | 2, 2, 1 | |
+| | from a structure | INFERRED: `NESTED_VCPU_RUN` to `NESTED_VM_DESTROY` (`0xc6000010` to `0xc6000018`) | 11 | the kernel builds those IDs as constants; the 11 sites pass `x0` to `x5` through one structure |
+
+So PSCI goes through `hvc`, not `smc`. A guest on the gaokun3 calls the
+monitor for every CPU start and stop, and the monitor forwards to the
+firmware's PSCI.
+
+**The calling contract** (VERIFIED in published source, INFERRED for
+26A428):
+- Success is `x0` 0 for the PAC calls. Each is followed by `cbnz x0, .`,
+  so any other value leaves that CPU spinning for ever with interrupts in
+  whatever state they were.
+- The context-switch macros save only `x0` to `x3` around the call, so a
+  monitor must preserve every other general register. `GET_DEFAULT_KEYS`
+  returns the default ROP value in `x2` and the default JOP value in `x3`.
+  These values are opaque to the guest: it hands them back through
+  `SET_B_KEYS` and `SET_EL0_DIVERSIFIER`.
+- `SET_INITIAL_STATE` runs once per CPU in `common_start`, before the
+  guest enables the keys in `SCTLR_EL1`. The guest never writes a key
+  register (B5).
+- `cswitch.s` skips its `ISB` after a key change because "the hypervisor
+  guarantees context synchronization". The monitor's `ERET` gives that.
+- The OEM calls are optional. `hvg_is_hcall_available` issues `PAC_NOP`
+  first and treats a negative `x0`, or `0xffffffff`, as "no OEM calls".
+  The guest then uses none of them: not paravirtual locks (`VCPU_WFK` and
+  `VCPU_KICK`, `osfmk/arm/locks_arm.c`), and not the time-offset or
+  boot-session sysctls. So `PAC_NOP` answered with `NOT_SUPPORTED` (-1)
+  turns off the whole OEM service cleanly.
+- The nested hypervisor's behaviour is not in published source, only its
+  IDs. A monitor that offers no nested virtualization answers
+  `NOT_SUPPORTED`. Whether the guest asks for it during boot is UNKNOWN;
+  the QEMU smoke test shows it.
+
+**What standard PAuth can and cannot provide** (INFERRED from the Arm
+architecture and the contract above):
+- The guest expects separate key state at EL1 and EL0:
+  - EL1 keys are fixed at `SET_INITIAL_STATE` and sign kernel heap
+    pointers and return addresses.
+  - EL0 B keys follow each task's ROP value.
+  - EL0 A keys are diversified by each task's JOP value, without touching
+    EL1's A keys (the `pac_asm.h` comment says so).
+- FEAT_PAuth has one key set for the whole EL1&0 regime. EL0 and EL1 share
+  `APIAKey_EL1` and the rest, and nothing traps an EL0-to-EL1 transition
+  to EL2 for a key swap. `HCR_EL2.API` and `APK` would trap every PAC
+  instruction and key access, which is far too costly to use.
+- So on the gaokun3 a monitor can serve the PAC calls functionally only by
+  collapsing the key domains: one random key set at `SET_INITIAL_STATE`,
+  and `SET_B_KEYS` and both diversifier calls accepted without changing
+  any key.
+  - Changing the shared keys per task would break the kernel. Its heap
+    pointers and the return addresses on every thread's kernel stack were
+    signed under the EL1 keys and must still authenticate after a switch.
+  - The collapsed scheme authenticates everything the guest signs. Nothing
+    in the contract depends on authentication failing.
+  - It removes PAC isolation between processes, and between user and
+    kernel: a user process could sign pointers the kernel accepts.
+- Returning success for a call whose effect is not provided is the kind of
+  fabricated success AGENTS.md forbids by default. So the collapsed scheme
+  needs an explicit opt-in gate, a documented security limitation, and the
+  machine owner's decision before Route B depends on it. That is Phase 0C
+  overturn condition 2, answered as "servable, with weaker isolation".
 
 ### B8: the VirtualMac2,1 entry and boot handoff (26A428)
 
@@ -754,8 +809,9 @@ hold for both builds; 26A428's kexts add one `HVC`.
 - B8: whether `OSKext` and `AppleVPBootPolicy` accept a Snapintosh AuxKC.
 - B5: what the 11 implementation-defined registers the monitor does not
   know are, and what each needs.
-- B6: which calls the 25 `HVC` sites without a local constant make, and the
-  exact semantics of each PAC call a monitor must serve.
+- B6: every site is named. Open: the nested hypervisor's semantics (not
+  in published source), and whether the owner accepts collapsed PAC key
+  domains on the gaokun3.
 - Port-wide, not a route question: a Metal driver for the gaokun3's
   Adreno 690.
 - B7: tick constants outside `timebase-frequency`. The gaokun3's own
@@ -783,14 +839,14 @@ record ([GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md)), not the decision.
 | SPTM and TXM | Required: 348 call words, served by `compat/sptm*.c` and `compat/txm*.c` (reused) | None (VERIFIED, B2) |
 | Page tables | The kernel's 16 KiB tables can run natively at stage 1, so the shadow layer is not needed (INFERRED) | Same (INFERRED) |
 | Counter and timer | All 1,060 Apple alias reads trapped through `HCR_EL2.TIDCP` and served in software, as on the A16. The 24 MHz guest rate stays, since the WD1 watchdog forces it ([BOOT-CHAIN.md](BOOT-CHAIN.md#9-timers)). Without ECV, nothing stops the physical rate leaking through the architectural counter; the kernel itself never reads one (INFERRED) | 891 `CNTVCT_EL0` reads at the device tree's rate: put the gaokun3's 19,200,000 (VERIFIED, run 9) in the tree and no ECV or trap is needed (INFERRED, B7). No WD1 watchdog driver or node (VERIFIED). Other 24 MHz assumptions UNKNOWN |
-| Pointer authentication | The kernel sets its own keys (28 key-register writes, OBSERVED). The monitor's PAuth handling (`compat/pauth*.c`) applies (reused) | The hypervisor holds the keys. The PAC hypercalls must be served, or the guest spins at the first (VERIFIED in source). New service, with a call on each user-key switch (INFERRED from `pac_asm.h`) |
-| Hypercalls | None: 0 `HVC`, 0 `SMC` (OBSERVED) | 46 `hvc #0` sites (B6). The PAC calls are required; the OEM calls (clock offset, boot-session UUID, vCPU wait and kick) and the nested calls are optional (VERIFIED in source). 25 sites' calls are not yet traced |
+| Pointer authentication | The kernel sets its own keys (28 key-register writes, OBSERVED). The monitor's PAuth handling (`compat/pauth*.c`) applies (reused) | The hypervisor holds the keys. The PAC hypercalls must be served, or the guest spins at the first (VERIFIED in source), with a call on each context switch (OBSERVED, B6). Standard PAuth cannot give EL0 and EL1 separate keys, so the monitor can only collapse the key domains: functional, but no PAC isolation between processes or between user and kernel (INFERRED, B6) |
+| Hypercalls | None: 0 `HVC`, 0 `SMC` (OBSERVED) | 46 `hvc #0` sites (B6). The PAC calls are required; the OEM calls (clock offset, boot-session UUID, vCPU wait and kick) and the nested calls are optional (VERIFIED in source). PSCI also goes through `hvc`, so the monitor forwards it. Every site is named (OBSERVED, B6) |
 | Interrupts | A virtual AIC on the GIC (`compat/aic.c`, `compat/irq-forward.c`, reused) | A GICv3 for the guest. The gaokun3's virtual CPU interface is usable at EL2, with 4 list registers (VERIFIED, run 9), so the CPU interface needs no model; the distributor and redistributor view is new |
 | Device models | The J700 set the A16 uses: AIC, ANS2 storage on the NVMe host, DART, SEP, PMGR and the rest (reused, re-targeted to the gaokun3's hardware) | A small virtual platform (B3, B4): PL011, PL031 and `avp,rtc`, PL061, pvpanic, `aes,s8000` version 3 (a variant of `compat/aes-engine.c`), `avp,ctrr`, `avp,sealed-registers`, and a PCIe host bridge with virtio devices backed by the monitor's own drivers (the disk through `compat/nvme-host.c`). Almost all new |
 | IMPDEF registers | 1,881 accesses across 188 registers, trapped through TIDCP as on the A16 (reused) | 56 accesses across 13 registers: 2 known to the monitor, 11 new (B5) |
 | Graphics | Console on the boot framebuffer, as on the A16. A desktop needs a Metal driver for the Adreno 690 | The same. The paravirtual GPU needs Apple's ParavirtualizedGraphics host, so a desktop also needs a Metal driver for the Adreno 690 |
-| Main risks | The breadth of the rewrite, and its cost on hot paths (the `ERET` on every exception return, INFERRED); the policy change it needs; A6 cannot be sized without the KDK | The exact semantics of the PAC calls (B6); AuxKC acceptance; which virtio types each driver takes; the as-booted tree (B3 cross-check); the 11 IMPDEF registers |
-| Evidence still missing | A4 (`SPSR` constants), A6 (hot paths, needs the KDK) | B3 cross-check, B5 and B6 remainders, `AppleVPBootPolicy`'s AuxKC rules |
+| Main risks | The breadth of the rewrite, and its cost on hot paths (the `ERET` on every exception return, INFERRED); the policy change it needs; A6 cannot be sized without the KDK | Collapsed PAC key domains, a security loss the owner must accept (B6); AuxKC acceptance; which virtio types each driver takes; the as-booted tree (B3 cross-check); the 11 IMPDEF registers |
+| Evidence still missing | A4 (`SPSR` constants), A6 (hot paths, needs the KDK) | B3 cross-check, the B5 remainder, the nested hypervisor's semantics (B6), `AppleVPBootPolicy`'s AuxKC rules |
 
 **Reading the table** (INFERRED, not a decision):
 

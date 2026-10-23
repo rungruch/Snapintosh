@@ -59,6 +59,15 @@ becomes "stop", if:
 2. The PAC hypercalls cannot be served correctly on PAuth2 with QARMA5.
    For example, the guest might depend on Apple's PAC algorithm rather
    than only on keys it never reads.
+
+   Partly answered by B6
+   ([GAOKUN3-PHASE0B.md](GAOKUN3-PHASE0B.md#b6-every-hypercall-and-what-a-monitor-must-answer-26a428)).
+   The guest expects separate EL0 and EL1 key state, which standard PAuth
+   cannot provide without trapping every exception. A monitor can serve
+   the calls only by collapsing the key domains: one key set for the
+   kernel and every process (INFERRED). That should boot, but it gives up
+   PAC isolation, so it is the owner's decision. The QEMU smoke test
+   checks the functional part.
 3. The kernel depends on the VirtualMac platform in ways the monitor
    cannot model: device semantics the published sources do not describe,
    or a boot-policy check (`AppleVPBootPolicy`) that refuses a loader
