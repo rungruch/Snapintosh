@@ -802,11 +802,81 @@ architecture and the contract above):
   INFERRED: a desktop on the gaokun3 needs a Metal driver for the Adreno
   690 whichever route is taken, so graphics does not separate the routes.
 
+### Phase 0C Route B QEMU smoke test (2026-10-23)
+
+**Status: FAIL (host-only smoke gate, not a Route B rejection).** The
+harness is [`tools/vmapple-smoke/`](../tools/vmapple-smoke/). It is project
+source, MIT licensed and contains no Apple material; the 26A428
+`kernelcache.release.vma2` and `DeviceTree.vma2macosap` it reads stay under
+ignored `downloads/`.
+
+**Configuration.** QEMU 11.1.2's `virt` board ran under TCG with one vCPU,
+GICv3 and `-cpu max,sve=off,sme=off`: generic PAuth and the 16 KiB granule,
+but no SVE, SME or Apple CPU features. The smoke stub starts at EL2; it
+builds the classic `boot_args` and a completed VirtualMac tree, then enters
+the stock kernel at EL1 with its MMU and caches off. Its physical
+kernelcache base keeps the same 32 MiB-block offset as the kernel's Mach
+header (`0x1004000`), which XNU's first block mapping requires. The first
+attempt matched only the 16 KiB offset and executed `__LINKEDIT` as code;
+the corrected layout reaches the kernel's real PAC calls.
+
+**Evidence.** Commands, run from the repository root:
+
+```sh
+python3 tools/test-vmapple-smoke.py
+python3 tools/vmapple-smoke/smoke.py selftest --trace
+python3 tools/vmapple-smoke/smoke.py boot \
+  --kernelcache downloads/extracted/vma2macosap/kernelcache.release.vma2 \
+  --trace --timeout 30
+```
+
+- **PASS:** the synthetic self-test (no Apple input) checks 19 loader data
+  transforms. The EL1 mini-kernel also proves the EL2 stub preserves the
+  DAIF debug mask over HVC returns, accepts `SET_INITIAL_STATE`,
+  `GET_DEFAULT_KEYS`, `SET_B_KEYS` and `SET_EL0_DIVERSIFIER`, installs
+  working architectural PAuth keys, and RAZ/WIs a TIDCP-trapped
+  implementation-defined register.
+- **OBSERVED:** the stock 26A428 kernel reaches EL1, its `common_start`
+  path calls `VMAPPLE_PAC_SET_INITIAL_STATE` (`0xc1000000`) and
+  `VMAPPLE_PAC_GET_DEFAULT_KEYS` (`0xc1000001`), then calls `PAC_NOP`
+  (`0xc10000f0`). The stub returns `NOT_SUPPORTED` for `PAC_NOP`, so the
+  kernel disables the optional OEM service as published XNU specifies.
+  The saved guest `SPSR_EL2` at those calls was `0x600003c4` and then
+  `0x800003c4`: all DAIF masks, including debug, were set.
+- **FAIL:** no serial message or kernel banner appears. Local control-flow
+  analysis finds the kernel calling `panic` with
+  `ml_set_interrupts_enabled_with_debug: debug exceptions enabled in kernel
+  mode`, then entering its `WFE` halt loop. Removing `debug=0x8` and
+  disabling QEMU SVE/SME did not change it. This is an unresolved generic
+  QEMU/minimal-platform discrepancy, not evidence that the gaokun3 has the
+  same failure.
+
+**What it decides.** The initial PAC interface is servable far enough for
+stock XNU to initialise its key state on a generic PAuth CPU; no Apple-only
+PAC instruction or key-register write blocks that path. It does **not**
+prove a successful VirtualMac boot, process-context PAC switching, the
+collapsed-key-domain design on the gaokun3's QARMA5 implementation, or any
+platform device model. The Phase 0C QEMU check stays failed until the guest
+reaches a serial console or a more specific platform failure.
+
+**Next for this check:** identify why the generic QEMU model presents debug
+exceptions unmasked to XNU after the recorded PAC calls. A direct QEMU
+`vmapple` comparison is **not available for this 26A428 kernel**: installed
+QEMU 11.1.2 has no `vmapple` machine, and upstream's current VMApple
+instructions require an already-installed Virtualization.framework macOS
+12.x guest and state that newer guests are unsupported. Building it would
+not be a control for macOS 27. Do not paper over the panic by returning
+fabricated success or patching the stock kernel.
+
 ### Still open
 
 - B3's cross-check: the as-booted tree from `ioreg` inside a macOS virtual
   machine, which needs one.
 - B8: whether `OSKext` and `AppleVPBootPolicy` accept a Snapintosh AuxKC.
+  The Phase 0C QEMU smoke reaches the first PAC calls but fails before
+  serial on the generic QEMU/minimal-platform debug-mask discrepancy.
+  QEMU's `vmapple` model is not a 26A428 control: QEMU 11.1.2 lacks it and
+  upstream supports only macOS 12.x guests for that model.
 - B5: what the 11 implementation-defined registers the monitor does not
   know are, and what each needs.
 - B6: every site is named. Open: the nested hypervisor's semantics (not
