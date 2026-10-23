@@ -25,10 +25,14 @@
  *   emulate-rotated  treat the firmware's GOP mode as having no framebuffer
  *               address, as the gaokun3's does; test only
  *   emulate-no-fb    treat every GOP mode that way; test only
+ *   emulate-dt-fb    describe the firmware's real GOP framebuffer as if it
+ *               were the device tree's /chosen simple-framebuffer; test only
  *
- * With no mode that has a framebuffer address and no "serial" UART, nothing
- * could show the results, so el2qual says so on the firmware console and
- * stops before ExitBootServices: no Secure Launch is attempted for nothing. */
+ * With no GOP mode that has a framebuffer address, el2qual draws on the
+ * device tree's /chosen simple-framebuffer if the firmware's memory map
+ * reserves it (report.c). With neither and no "serial" UART, nothing could
+ * show the results, so el2qual says so on the firmware console and stops
+ * before ExitBootServices: no Secure Launch is attempted for nothing. */
 #include <stddef.h>
 #include <stdint.h>
 #include "el2qual.h"
@@ -291,12 +295,20 @@ static uint64_t vhe_tcr(uint64_t tcr)
 static struct el2q_run run;
 static struct el2q_text text;
 static struct {
-    int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb;
+    int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
 } opt;
+/* clean: the display reads this buffer from memory, not through the CPU's
+ * caches, and nothing says how firmware mapped it, so every draw is cleaned
+ * to the point of coherency (a GOP framebuffer's mapping is the firmware's
+ * business). */
 static struct {
     uint32_t *base;
-    int bgr, gop;
+    int bgr, gop, clean;
 } screen;
+static const void *fdt_table;
+/* The firmware's own mode, kept for emulate-dt-fb before any emulate-*
+ * option hides its address. */
+static struct el2q_simplefb gop_real;
 static struct efi_text_output *con_out;
 static uintptr_t image_base;
 static uint64_t image_size, table;
@@ -324,8 +336,11 @@ static void console_line(const char *s)
 
 static void draw(void)
 {
-    if (screen.base)
-        el2q_render(&text, screen.base, run.fb_width, run.fb_height, run.fb_stride, screen.bgr);
+    if (!screen.base) return;
+    el2q_render(&text, screen.base, run.fb_width, run.fb_height, run.fb_stride, screen.bgr);
+    /* el2q_render rewrites every pixel, so every line is cleaned. */
+    if (screen.clean)
+        dcache_range(screen.base, (size_t)run.fb_stride * run.fb_height * 4, CLEAN);
 }
 
 /* A breadcrumb on screen (and console, while boot services last) before each
@@ -588,6 +603,7 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "emulate-vhe")) opt.emulate_vhe = 1;
         if (word_is(w, len, "emulate-rotated")) opt.emulate_rotated = 1;
         if (word_is(w, len, "emulate-no-fb")) opt.emulate_no_fb = 1;
+        if (word_is(w, len, "emulate-dt-fb")) opt.emulate_dt_fb = 1;
     }
 }
 
@@ -602,6 +618,7 @@ static void find_tables(struct efi_system_table *st)
     /* The FDT header's totalsize bounds the parse; 64 MiB is a ceiling on a
      * corrupt one, not a size any real tree approaches. */
     run.dt_state = el2q_fdt_zap_state(fdt, 64u << 20);
+    fdt_table = fdt;
 }
 
 /* Whether the GOP's current mode can still be drawn on after
@@ -624,6 +641,7 @@ static void use_mode(const struct efi_gop_mode *m)
     run.fb_stride = i->stride;
     run.fb_format = i->format;
     run.fb_base = m->framebuffer;
+    run.fb_source = EL2Q_FB_GOP;
     screen.base = (uint32_t *)(uintptr_t)m->framebuffer;
     screen.bgr = i->format == GOP_BGRX;
 }
@@ -646,6 +664,11 @@ static void find_screen(struct efi_boot_services *bs)
     run.fb_height = m->info->height;
     run.fb_stride = m->info->stride;
     run.fb_format = m->info->format;
+    if (mode_writable(m, 0)) {
+        const struct efi_gop_mode_info *i = m->info;
+        gop_real = (struct el2q_simplefb){m->framebuffer, m->framebuffer_size, i->width,
+                                          i->height, i->stride * 4, i->format == GOP_BGRX};
+    }
     if (mode_writable(m, opt.emulate_rotated || opt.emulate_no_fb)) {
         use_mode(m);
         return;
@@ -672,6 +695,40 @@ static void find_screen(struct efi_boot_services *bs)
         }
     }
     if (gop->mode->mode != first) gop->set_mode(gop, first);
+}
+
+/* The fallback when no GOP mode has an address: the device tree's /chosen
+ * simple-framebuffer, if report.c finds it self-consistent and the
+ * firmware's memory map reserves all of it (report.c says why both). Its
+ * outcome is kept in run.fb_dt for the stop message. */
+static void find_dt_screen(struct efi_boot_services *bs)
+{
+    struct el2q_simplefb fb;
+    run.fb_dt = el2q_fdt_simplefb(fdt_table, 64u << 20, &fb);
+    if (opt.emulate_dt_fb && gop_real.base) {
+        fb = gop_real;
+        run.fb_dt = EL2Q_SFB_OK;
+    }
+    if (run.fb_dt != EL2Q_SFB_OK) return;
+    uint64_t size = sizeof memory_map, key = 0, descriptor_size = 0;
+    uint32_t version = 0;
+    if (EFI_ERROR(bs->get_memory_map(&size, memory_map, &key, &descriptor_size, &version))) {
+        run.fb_dt = EL2Q_SFB_NO_MAP;
+        return;
+    }
+    if (!el2q_memmap_reserved(memory_map, size, descriptor_size, fb.base, fb.size)) {
+        run.fb_dt = EL2Q_SFB_NOT_RESERVED;
+        return;
+    }
+    run.fb_source = EL2Q_FB_DT;
+    run.fb_base = fb.base;
+    run.fb_width = fb.width;
+    run.fb_height = fb.height;
+    run.fb_stride = fb.stride / 4;
+    run.fb_format = fb.bgr ? GOP_BGRX : GOP_RGBX;
+    screen.base = (uint32_t *)(uintptr_t)fb.base;
+    screen.bgr = (int)fb.bgr;
+    screen.clean = 1;
 }
 
 /* Breadcrumb text only; the report's own text is built in report.c. */
@@ -707,6 +764,11 @@ __attribute__((noreturn)) static void stop_before_ebs(void)
         p = append(p, ")");
     }
     console_line(line);
+    if (screen.gop) {
+        p = append(line, "DT FRAMEBUFFER: ");
+        append(p, el2q_sfb_words(run.fb_dt));
+        console_line(line);
+    }
     console_line("STOPPED BEFORE EXITBOOTSERVICES: NOTHING WAS MEASURED");
     console_line("HOLD THE POWER BUTTON TO TURN THE MACHINE OFF");
     if (opt.poweroff && run.start_el == 2) psci(PSCI_SYSTEM_OFF, 0, 0, 0);
@@ -731,18 +793,27 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     }
     find_tables(st);
     find_screen(bs);
+    if (!screen.base) find_dt_screen(bs);
     if (!screen.base && !uart()) stop_before_ebs();
     if (screen.base) {
-        char where[96], *p = append(where, "SCREEN: GOP MODE ");
-        p = append_dec(p, run.fb_mode);
-        p = append(p, " ");
+        /* progress() writes the console before it draws, so on the device
+         * tree's buffer, the one written outside any GOP's contract, this line
+         * is the last one left if the first write faults. */
+        int dt = run.fb_source == EL2Q_FB_DT;
+        char where[96], *p = append(where, dt ? "SCREEN: DT SIMPLE-FB " : "SCREEN: GOP MODE ");
+        if (!dt) {
+            p = append_dec(p, run.fb_mode);
+            p = append(p, " ");
+        }
         p = append_dec(p, run.fb_width);
         p = append(p, "X");
         p = append_dec(p, run.fb_height);
         p = append(p, " FB ");
         put_hex(p, run.fb_base, 16);
-        p = append(p + 16, run.fb_mode != run.fb_first_mode ? " FROM MODE " : "");
-        if (run.fb_mode != run.fb_first_mode) append_dec(p, run.fb_first_mode);
+        p += 16;
+        *p = 0;
+        if (dt) append(p, ", DRAWING");
+        else if (run.fb_mode != run.fb_first_mode) append_dec(append(p, " FROM MODE "), run.fb_first_mode);
         progress(where);
     }
 

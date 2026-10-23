@@ -614,6 +614,236 @@ static void test_gop_order(void)
     CHECK(has_line("SCREEN GOP MODE 7  NO FRAMEBUFFER ADDRESS"));
 }
 
+/* ---- Device-tree framebuffer ------------------------------------------------ */
+
+/* One framebuffer node under `parent` ("chosen" unless given). ac/sc 0 leave
+ * #address-cells/#size-cells out (the spec's defaults, 2 and 1, then apply);
+ * NULL strings and the omit bits (1 width, 2 height, 4 stride, 8 reg) leave
+ * properties out. */
+struct sfb_spec {
+    const char *parent, *node, *status, *format;
+    const char *compat;
+    uint32_t compat_len, ac, sc, width, height, stride, omit;
+    uint64_t base, size;
+};
+
+static void cell_prop(struct fdt_builder *f, const char *name, uint32_t v)
+{
+    uint8_t b[4];
+    putbe(b, v);
+    fdt_prop(f, name, b, 4);
+}
+
+static void sfb_node(struct fdt_builder *f, const struct sfb_spec *s)
+{
+    uint32_t ac = s->ac ? s->ac : 2, sc = s->sc ? s->sc : 1;
+    fdt_begin(f, s->node ? s->node : "framebuffer@c6200000");
+    if (s->compat) fdt_prop(f, "compatible", s->compat, s->compat_len);
+    if (s->status) fdt_prop(f, "status", s->status, (uint32_t)strlen(s->status) + 1);
+    if (!(s->omit & 8)) {
+        uint8_t reg[16];
+        unsigned n = 0;
+        for (unsigned i = ac; i--;) putbe(reg + 4 * n++, i < 2 ? (uint32_t)(s->base >> 32 * i) : 0);
+        for (unsigned i = sc; i--;) putbe(reg + 4 * n++, i < 2 ? (uint32_t)(s->size >> 32 * i) : 0);
+        fdt_prop(f, "reg", reg, 4 * n);
+    }
+    if (!(s->omit & 1)) cell_prop(f, "width", s->width);
+    if (!(s->omit & 2)) cell_prop(f, "height", s->height);
+    if (!(s->omit & 4)) cell_prop(f, "stride", s->stride);
+    if (s->format) fdt_prop(f, "format", s->format, (uint32_t)strlen(s->format) + 1);
+    fdt_token(f, 2);
+}
+
+static uint32_t sfb_tree(struct fdt_builder *f, const struct sfb_spec *s, const struct sfb_spec *second)
+{
+    memset(f, 0, sizeof *f);
+    fdt_begin(f, "");
+    fdt_begin(f, s->parent ? s->parent : "chosen");
+    if (s->ac) cell_prop(f, "#address-cells", s->ac);
+    if (s->sc) cell_prop(f, "#size-cells", s->sc);
+    sfb_node(f, s);
+    if (second) sfb_node(f, second);
+    fdt_token(f, 2);
+    fdt_token(f, 2);
+    return fdt_finish(f);
+}
+
+static const char sfb_compat[] = "simple-framebuffer";
+
+/* The gaokun3's node, as its EL2 device tree has it. */
+static struct sfb_spec gaokun3_fb(void)
+{
+    return (struct sfb_spec){.compat = sfb_compat, .compat_len = sizeof sfb_compat, .ac = 2,
+                             .sc = 2, .width = 1600, .height = 2560, .stride = 6400,
+                             .format = "a8r8g8b8", .base = 0xc6200000, .size = 0xfa0000};
+}
+
+static void test_simplefb(void)
+{
+    static struct fdt_builder f;
+    struct el2q_simplefb fb;
+    struct sfb_spec s = gaokun3_fb();
+    uint32_t n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_OK);
+    CHECK(fb.base == 0xc6200000 && fb.size == 0xfa0000 && fb.width == 1600 &&
+          fb.height == 2560 && fb.stride == 6400 && fb.bgr == 1);
+
+    s.format = "x8b8g8r8";
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_OK && fb.bgr == 0);
+    s.format = "r5g6b5";
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_FORMAT);
+    s.format = NULL;
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_FORMAT);
+
+    /* Geometry the binding allows but a drawer cannot trust. */
+    struct { uint64_t base, size; uint32_t width, height, stride, omit; } bad[] = {
+        {0xc6200000, 0xfa0000 - 4, 1600, 2560, 6400, 0},      /* stride * height > size */
+        {0xc6200000, 0xfa0000, 1600, 2560, 6396, 0},          /* stride < width * 4 */
+        {0xc6200000, 0xfa0000, 1600, 2560, 6402, 0},          /* stride not whole pixels */
+        {0xc6200002, 0xfa0000, 1600, 2560, 6400, 0},          /* unaligned base */
+        {0, 0xfa0000, 1600, 2560, 6400, 0},                   /* no address */
+        {0xc6200000, 0xfa0000, 0, 2560, 6400, 0},             /* empty */
+        {0xc6200000, 0xfa0000, 20000, 1, 80000, 0},           /* absurd width */
+        {0xfffffffffffff000ull, 0x2000, 1, 1, 4, 0},          /* wraps */
+        {0xc6200000, 0xfa0000, 1600, 2560, 6400, 2},          /* no height */
+        {0xc6200000, 0xfa0000, 1600, 2560, 6400, 4},          /* no stride */
+    };
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        s = gaokun3_fb();
+        s.base = bad[i].base;
+        s.size = bad[i].size;
+        s.width = bad[i].width;
+        s.height = bad[i].height;
+        s.stride = bad[i].stride;
+        s.omit = bad[i].omit;
+        n = sfb_tree(&f, &s, NULL);
+        CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_GEOMETRY);
+    }
+
+    /* Status, compatible matching and where the node sits. */
+    s = gaokun3_fb();
+    s.status = "disabled";
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_NO_NODE);
+    s.status = "okay";
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_OK);
+    s.status = "ok";
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_OK);
+    static const char longer[] = "simple-framebuffer-x", listed[] = "vendor,fb\0simple-framebuffer";
+    s = gaokun3_fb();
+    s.compat = longer;
+    s.compat_len = sizeof longer;
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_NO_NODE);
+    s.compat = listed;
+    s.compat_len = sizeof listed;
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_OK);
+    s = gaokun3_fb();
+    s.parent = "soc@0";
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_NO_NODE);
+    s.parent = "chosen-not";
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_NO_NODE);
+
+    /* Cell sizes: the spec's defaults when /chosen gives none; unsupported
+     * or short reg is unreadable rather than guessed at. */
+    s = gaokun3_fb();
+    s.ac = s.sc = 0;
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_OK && fb.base == 0xc6200000 &&
+          fb.size == 0xfa0000);
+    s.ac = 1;
+    s.sc = 1;
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_OK && fb.base == 0xc6200000);
+    s.ac = 3;
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_BAD_DT);
+    s = gaokun3_fb();
+    s.omit = 8;
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_BAD_DT);
+
+    /* A failing node does not hide a good one after it; with none good,
+     * the failure is reported. */
+    struct sfb_spec broken = gaokun3_fb(), good = gaokun3_fb();
+    broken.node = "framebuffer@0";
+    broken.stride = 4;
+    good.base = 0xc7200000;
+    n = sfb_tree(&f, &broken, &good);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_OK && fb.base == 0xc7200000);
+    n = sfb_tree(&f, &broken, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_GEOMETRY);
+
+    /* A tree without /chosen, a missing one, a corrupt one. */
+    n = gpu_tree(&f, adreno_compat, sizeof adreno_compat, "zap-shader", "disabled");
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_NO_NODE);
+    CHECK(el2q_fdt_simplefb(NULL, 0, &fb) == EL2Q_SFB_NO_DT);
+    s = gaokun3_fb();
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n - 1, &fb) == EL2Q_SFB_BAD_DT);
+    f.out[0] ^= 1;
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_BAD_DT);
+    /* No FDT_END: the walk must stop at the struct block's end. (Without
+     * /chosen, since closing it already decides the answer.) */
+    s.parent = "soc@0";
+    n = sfb_tree(&f, &s, NULL);
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_NO_NODE);
+    putbe(f.out + 36, (uint32_t)(f.sl - 4));
+    CHECK(el2q_fdt_simplefb(f.out, n, &fb) == EL2Q_SFB_BAD_DT);
+
+    for (uint32_t i = 0; i <= EL2Q_SFB_OK; i++)
+        CHECK(strcmp(el2q_sfb_words(i), "?") && strlen(el2q_sfb_words(i)) <= EL2Q_TEXT_COLS - 16);
+    CHECK(!strcmp(el2q_sfb_words(EL2Q_SFB_OK + 1), "?"));
+}
+
+static void descriptor(uint8_t *d, uint32_t type, uint64_t start, uint64_t pages)
+{
+    memset(d, 0, 48);
+    put32(d, type);
+    put64(d + 8, start);
+    put64(d + 24, pages);
+}
+
+static void test_memmap(void)
+{
+    /* The gaokun3's map around the framebuffer, 48-byte descriptors as its
+     * firmware reports them: Conventional, the 36 MiB Reserved region, and
+     * a Reserved neighbour that adjoins it. */
+    uint8_t map[4 * 48];
+    descriptor(map, 7, 0xc8600000, 0x10000);
+    descriptor(map + 48, 0, 0xc6200000, 9216);
+    descriptor(map + 96, 0, 0xc4200000, 0x2000);
+    descriptor(map + 144, 0, 0, UINT64_MAX >> 8);                    /* overflowing pages */
+    CHECK(el2q_memmap_reserved(map, sizeof map, 48, 0xc6200000, 0xfa0000));
+    CHECK(el2q_memmap_reserved(map, sizeof map, 48, 0xc8500000, 0x100000));   /* ends at the edge */
+    CHECK(!el2q_memmap_reserved(map, sizeof map, 48, 0xc8500000, 0x100001));  /* one byte past */
+    CHECK(!el2q_memmap_reserved(map, sizeof map, 48, 0xc6100000, 0x200000));  /* spans two */
+    CHECK(!el2q_memmap_reserved(map, sizeof map, 48, 0xc8600000, 0x1000));    /* Conventional */
+    CHECK(!el2q_memmap_reserved(map, sizeof map, 48, 0xc6200000, 0));
+    CHECK(!el2q_memmap_reserved(map, sizeof map, 48, UINT64_MAX - 0xfff, 0x2000));
+    CHECK(!el2q_memmap_reserved(map, sizeof map, 32, 0xc6200000, 0xfa0000));  /* short desc */
+    CHECK(!el2q_memmap_reserved(map, 48 + 47, 48, 0xc6200000, 0xfa0000));    /* truncated */
+    CHECK(!el2q_memmap_reserved(NULL, sizeof map, 48, 0xc6200000, 0xfa0000));
+    CHECK(el2q_memmap_reserved(map + 48, 48, 48, 0xc6200000, 0xfa0000));
+
+    /* The report says where it is drawn. */
+    base_run();
+    run.fb_source = EL2Q_FB_DT;
+    run.fb_base = 0xc6200000;
+    el2q_report(&run, &text);
+    check_widths();
+    CHECK(has_line("SCREEN DT SIMPLE-FB  FB 00000000C6200000  NO GOP ADDRESS"));
+    CHECK(!has_line("SCREEN GOP MODE"));
+}
+
 int main(void)
 {
     test_acpi();
@@ -621,6 +851,8 @@ int main(void)
     test_verdicts();
     test_report();
     test_gop_order();
+    test_simplefb();
+    test_memmap();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

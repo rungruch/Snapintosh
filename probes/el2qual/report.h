@@ -90,7 +90,9 @@ struct el2q_run {
     int64_t psci_version;            /* -1 when PSCI was not reachable */
     uint32_t fb_width, fb_height, fb_stride, fb_format;
     uint32_t fb_mode, fb_first_mode; /* GOP mode drawn on; the one firmware left */
-    uint64_t fb_base;                /* 0: no mode had a framebuffer address */
+    uint64_t fb_base;                /* 0: nothing to draw on */
+    uint32_t fb_source;              /* enum el2q_fb_source */
+    uint32_t fb_dt;                  /* enum el2q_sfb_state of the DT fallback */
     uint64_t start_id[EL2Q_ID_COUNT];/* ID registers at the starting EL */
     uint32_t cpu_count;              /* slots used; slot 0 is the boot CPU */
     struct el2q_cpu cpu[EL2Q_MAX_CPUS];
@@ -120,6 +122,42 @@ struct el2q_gop_mode { uint32_t width, height, format, valid; };
  * EL2Q_GOP_MODES entries to order[] and returns how many. */
 unsigned el2q_gop_order(const struct el2q_gop_mode *modes, unsigned count, unsigned current,
                         unsigned order[EL2Q_GOP_MODES]);
+
+/* Where the screen came from: a GOP mode, or, when no GOP mode has a
+ * framebuffer address, the device tree's /chosen simple-framebuffer. */
+enum el2q_fb_source { EL2Q_FB_NONE, EL2Q_FB_GOP, EL2Q_FB_DT };
+
+/* A /chosen simple-framebuffer node (Linux
+ * Documentation/devicetree/bindings/display/simple-framebuffer.yaml). */
+struct el2q_simplefb {
+    uint64_t base, size;
+    uint32_t width, height, stride;  /* stride in bytes */
+    uint32_t bgr;                    /* 1: [ax]8r8g8b8, BGRX in memory; 0: [ax]8b8g8r8 */
+};
+
+enum el2q_sfb_state {
+    EL2Q_SFB_NOT_TRIED,    /* a GOP mode had an address */
+    EL2Q_SFB_NO_DT,        /* no device tree configuration table */
+    EL2Q_SFB_BAD_DT,       /* the tree, or the node's reg cells, do not parse */
+    EL2Q_SFB_NO_NODE,      /* no enabled simple-framebuffer child of /chosen */
+    EL2Q_SFB_FORMAT,       /* not a 32 bpp format el2qual draws */
+    EL2Q_SFB_GEOMETRY,     /* address, width, height, stride and size disagree */
+    EL2Q_SFB_NO_MAP,       /* GetMemoryMap failed (set by el2qual.c) */
+    EL2Q_SFB_NOT_RESERVED, /* not inside one Reserved region (set by el2qual.c) */
+    EL2Q_SFB_OK
+};
+
+/* The first enabled simple-framebuffer child of /chosen, checked for a
+ * drawable format and self-consistent geometry. *out is filled only on OK. */
+enum el2q_sfb_state el2q_fdt_simplefb(const void *fdt, size_t limit, struct el2q_simplefb *out);
+
+/* Whether [base, base + size) lies inside a single EfiReservedMemoryType
+ * descriptor of a GetMemoryMap buffer (descriptors desc_size bytes apart). */
+int el2q_memmap_reserved(const void *map, uint64_t map_size, uint64_t desc_size,
+                         uint64_t base, uint64_t size);
+
+/* Console wording for a fallback outcome. */
+const char *el2q_sfb_words(uint32_t state);
 
 /* Verdicts, shared by the report and the tests. */
 enum el2q_verdict { EL2Q_NOT_RUN, EL2Q_YES, EL2Q_NO, EL2Q_INCONCLUSIVE };

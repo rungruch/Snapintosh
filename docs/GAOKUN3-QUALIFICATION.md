@@ -24,10 +24,12 @@ is Secure Boot, changed by the owner and restored afterwards.
 ## What el2qual does, and what it cannot protect against
 
 el2qual reads system registers, executes the instructions under test behind
-a fault handler, calls PSCI to start and stop CPUs, draws on the UEFI
-framebuffer, and stops in a WFE loop. It issues no storage I/O and touches
-no clock, regulator, GPU or interrupt controller. Holding the power button
-ends any run.
+a fault handler, calls PSCI to start and stop CPUs, draws on a GOP
+framebuffer or, on this machine, the device tree's framebuffer in reserved
+memory (see "The screen"), and stops in a WFE loop. It writes no other
+memory it does not own, issues no storage I/O and touches no clock,
+regulator, GPU or interrupt controller. Holding the power button ends any
+run.
 
 It cannot catch two things:
 
@@ -75,12 +77,41 @@ firmware console's own line `SNAPINTOSH EL2QUAL: STARTED AT EL1, CALLING
 EXITBOOTSERVICES`: el2qual had nothing to draw on, so that run measured
 nothing.
 
-el2qual now switches to the largest mode that reports an address, trying
-mode 0 (the native 1600x2560) first, and draws everything from then on in
-portrait: rotate the tablet or the photo. That mode 0 has an address is
-INFERRED (only the rotated modes are documented as `Blt`-only). If no mode
-has one, el2qual says so on the firmware console and stops before
-`ExitBootServices`, so no Secure Launch is attempted.
+el2qual then learned to switch to the largest mode that reports an address,
+mode 0 (the native 1600x2560) first. A second run on 2026-10-23, from a
+stage 1 stick whose `el2qual.efi` was built from commit `96e3d2c` (SHA-256
+`3323c2e81227192df1764a92d719125b2c63f3798c57cc02a519705e56b1d3b4`, read
+back from the stick's manifest), showed
+`NO GOP MODE HAS A FRAMEBUFFER ADDRESS (MODE 7)` and `STOPPED BEFORE
+EXITBOOTSERVICES: NOTHING WAS MEASURED` on the firmware console. OBSERVED
+for this firmware: after `SetMode`, no other GOP mode reported an address
+either, or `SetMode` failed for them; el2qual does not record which.
+
+So el2qual now has a second source. When no GOP mode has an address, it
+draws on the device tree's `/chosen` simple-framebuffer, the record Linux
+uses for the same buffer: the gaokun3 EL2 DTB has
+`/chosen/framebuffer@c6200000`, 1600x2560, stride 6400 bytes, `a8r8g8b8`,
+size `0xfa0000` (VERIFIED by parsing the DTB with `probes/el2qual/report.c`).
+It draws there only if the node is self-consistent and lies inside one
+`Reserved` region of the firmware's memory map; the recorded map has
+`Reserved 0xc6200000-0xc85fffff` (OBSERVED, gk3probe). It cleans every draw
+to the point of coherency, since the display reads memory, not the CPU's
+caches. The report says `SCREEN DT SIMPLE-FB  FB 00000000C6200000  NO GOP
+ADDRESS`, in portrait: rotate the tablet or the photo.
+
+Two consequences, and what is still unverified:
+
+- The device tree comes from systemd-boot, so a stage 1 stick (el2qual
+  alone) can never draw. Stage 1b is the first stage that can.
+- That pixels written there appear on the panel, and that the firmware does
+  not redraw the buffer before `ExitBootServices`, are INFERRED. Before the
+  first write el2qual prints `SCREEN: DT SIMPLE-FB 1600X2560 FB
+  00000000C6200000, DRAWING` on the firmware console, so a fault on that
+  write leaves the line as the last one on screen.
+
+With neither source, el2qual says why on the firmware console (`DT
+FRAMEBUFFER: <reason>`) and stops before `ExitBootServices`, so no Secure
+Launch is attempted.
 
 ## Inputs and their provenance
 
@@ -144,36 +175,48 @@ is attempted.
 
 1. Build and copy the stage 1 tree. Shut Windows down completely.
 2. With AC connected, open the one-time boot menu and choose the stick.
-3. el2qual starts, calls `ExitBootServices`, draws its report and halts.
+3. el2qual starts, finds nothing it can draw on (see "The screen"), says
+   so on the firmware console and halts before `ExitBootServices`.
 4. Photograph the whole screen. Hold the power button, remove the stick, and
    confirm Windows starts.
 
-Expected screen, in portrait (see "The screen"): first the yellow
-breadcrumb `SCREEN: GOP MODE 0 1600X2560 FB <address> FROM MODE 7`, then
-the report: `START EL1  AFTER EBS EL1`, `SCREEN GOP MODE 0  FB <address>
-FROM MODE 7`, `NOT AT EL2: ONLY THE STARTING VIEW BELOW`, `SLBOUNCE GATE: NO
-DEVICE TREE: WILL NOT SWITCH`, an ACPI CPU count and GIC version, the
-framebuffer size, and the ID registers as EL1 sees them.
+Expected screen, on the firmware console: `NO GOP MODE HAS A FRAMEBUFFER
+ADDRESS (MODE 7)`, `DT FRAMEBUFFER: NO DEVICE TREE`, `STOPPED BEFORE
+EXITBOOTSERVICES: NOTHING WAS MEASURED`.
 
-Pass: the report is complete and legible. Record the GOP mode and address,
-the framebuffer size, ACPI CPU count and GIC version, and compare the ID
-registers with the values Windows caches (MIDR `0x410FD4B0` or
-`0x410FD4C0`, `ID_AA64ISAR1 0x01200031`, `ID_AA64MMFR0
-0x0000011100101022`; OBSERVED 2026-10-22). A difference is recorded, not
-a failure: UEFI runs under Qualcomm's hypervisor and Windows may run under
-Hyper-V, and either may present ID registers its own way.
+Pass: exactly that, and Windows starts afterwards. Stage 1 now shows only
+that the application runs and stops safely on this firmware; the second
+run of 2026-10-23 showed all of it except the `DT FRAMEBUFFER` line, which
+that build did not have.
 
 ## Stage 1b: systemd-boot with the device tree, no slbounce
 
-Exposure: as stage 1, plus systemd-boot and an installed device tree. This
-stage proves the stage 2 stick will open slbounce's gate, without a Secure
-Launch attempt.
+Exposure: as stage 1, plus systemd-boot and an installed device tree, and
+el2qual's first write to the device tree's framebuffer. No Secure Launch is
+attempted. This stage proves the stage 2 stick will open slbounce's gate,
+and is the first that can draw a report.
 
-Run as stage 1, choosing entry 1 in the menu. Pass:
-`SLBOUNCE GATE: ZAP-SHADER DISABLED: OPEN`. `NO DEVICE TREE` means
-systemd-boot did not install it (is Secure Boot off?). `ZAP-SHADER ENABLED`
-or `NO ADRENO ZAP-SHADER` means the DTB is not an EL2 variant. Do not
-continue to stage 2 until this passes.
+Run as stage 1, choosing entry 1 in the menu.
+
+Expected screen, in portrait: the console line `SCREEN: DT SIMPLE-FB
+1600X2560 FB 00000000C6200000, DRAWING`, then el2qual's own large text:
+`START EL1  AFTER EBS EL1`, `SCREEN DT SIMPLE-FB  FB 00000000C6200000  NO
+GOP ADDRESS`, `NOT AT EL2: ONLY THE STARTING VIEW BELOW`, the slbounce gate,
+an ACPI CPU count and GIC version, the framebuffer size, and the ID
+registers as EL1 sees them.
+
+Pass: the report is complete and legible, and shows `SLBOUNCE GATE:
+ZAP-SHADER DISABLED: OPEN`. `NO DEVICE TREE` means systemd-boot did not
+install it (is Secure Boot off?). `ZAP-SHADER ENABLED` or `NO ADRENO
+ZAP-SHADER` means the DTB is not an EL2 variant. Do not continue to stage 2
+until this passes.
+
+Record the screen line, the framebuffer size, ACPI CPU count and GIC
+version, and compare the ID registers with the values Windows caches (MIDR
+`0x410FD4B0` or `0x410FD4C0`, `ID_AA64ISAR1 0x01200031`, `ID_AA64MMFR0
+0x0000011100101022`; OBSERVED 2026-10-22). A difference is recorded, not a
+failure: UEFI runs under Qualcomm's hypervisor and Windows may run under
+Hyper-V, and either may present ID registers its own way.
 
 ## Stage 2: Secure Launch to EL2
 
@@ -223,7 +266,11 @@ the A78C and X1C cores.
 | --- | --- | --- |
 | Firmware refuses the stick | Secure Boot still on, or not FAT32 | fix and retry the same stage |
 | Only the firmware's small `... CALLING EXITBOOTSERVICES` line, nothing after | an `el2qual.efi` built before the screen fix: the firmware's mode 7 has no framebuffer address | rebuild from the current tree and retry |
-| `NO GOP MODE HAS A FRAMEBUFFER ADDRESS` and `STOPPED BEFORE EXITBOOTSERVICES` | no GOP mode exposes a framebuffer el2qual can write; nothing was attempted | photograph, stop, report |
+| `NO GOP MODE HAS A FRAMEBUFFER ADDRESS`, `DT FRAMEBUFFER: NO DEVICE TREE` and `STOPPED ...` (stage 1) | expected: a stage 1 stick has no device tree | stage 1 done; go on to stage 1b |
+| The same with `DT FRAMEBUFFER: NO DEVICE TREE` on a stage 1b or 2 stick | systemd-boot did not install the DTB (is Secure Boot off? is the entry's `devicetree` path right?) | fix and retry the same stage |
+| `DT FRAMEBUFFER:` any other reason, and `STOPPED ...` | the DTB's node or the firmware's memory map differs from the recorded ones; nothing was written | photograph, stop, report |
+| Hang with `SCREEN: DT SIMPLE-FB ... DRAWING` as the last console line | el2qual's first write to the device tree's framebuffer faulted: firmware does not map it | photograph, stop, report |
+| The large text appears and is then drawn over before the report | the firmware redraws the buffer while boot services run | wait for the report after `ExitBootServices`; record it |
 | Nothing drawn at all | no GOP at all, or a fault before the first line | photograph, stop, report |
 | Reboot right after `CALLING EXITBOOTSERVICES` (stage 2) | Secure Launch failed: `tcblaunch.exe` too new, or slbounce/firmware mismatch | stop; check the `tcblaunch.exe` version |
 | `AFTER EBS EL1` with the gate `OPEN` (stage 2) | slbounce did not switch: driver not loaded (file name) or reported Secure Launch unavailable | check the manifest paths; stop |

@@ -21,8 +21,13 @@ report it writes to the PL011:
   max-rotated  as max, with the firmware's GOP mode treated as having no
                framebuffer address (the gaokun3's mode 7): el2qual must move
                to another mode and say so
-  max-no-fb    every GOP mode treated that way and no "serial": el2qual must
-               stop before ExitBootServices, saying why on the console
+  max-dt-fb    every GOP mode treated that way, and the real framebuffer
+               handed to the device-tree fallback as its simple-framebuffer
+               (QEMU's EDK2 installs no device tree): el2qual must accept it
+               against the real memory map, draw on it and say so
+  max-no-fb    every GOP mode treated that way, no device tree and no
+               "serial": el2qual must stop before ExitBootServices, saying
+               why on the console
 
 On every configuration that runs, all four CPUs must finish at EL2 without
 a fault, the report must name the GOP mode it drew on, and each feature's
@@ -66,13 +71,17 @@ CONFIGS = {
                        routes=('BLOCKED: NV2 ECV RNDR PAUTH', 'BLOCKED: PAUTH')),
     'max-rotated': dict(cpu='max', options='emulate-rotated', pac='Y', walk='Y', moved=True,
                         features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-dt-fb': dict(cpu='max', options='emulate-no-fb emulate-dt-fb', pac='Y', walk='Y', dt=True,
+                      features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
     # Without "serial" a stop is the only correct outcome; the firmware
     # console, which EDK2 also sends to the PL011, is where it is reported.
     'max-no-fb': dict(cpu='max', options='emulate-no-fb', serial=False, stop=True),
 }
 
-STOP_LINES = ('NO GOP MODE HAS A FRAMEBUFFER ADDRESS', 'STOPPED BEFORE EXITBOOTSERVICES')
+STOP_LINES = ('NO GOP MODE HAS A FRAMEBUFFER ADDRESS', 'DT FRAMEBUFFER: NO DEVICE TREE',
+              'STOPPED BEFORE EXITBOOTSERVICES')
 SCREEN = re.compile(r'^SCREEN GOP MODE (\d+)  FB ([0-9A-F]{16})(?:  FROM MODE (\d+))?$')
+DT_SCREEN = re.compile(r'^SCREEN DT SIMPLE-FB  FB ([0-9A-F]{16})  NO GOP ADDRESS$')
 
 
 def check_stop(log):
@@ -108,7 +117,16 @@ def check(log, expect, smp=SMP):
         return ['no complete EL2QUAL BEGIN..END report on the serial port']
     problems = []
     screens = [m for line in lines for m in [SCREEN.match(line)] if m]
-    if len(screens) != 1:
+    dt_screens = [m for line in lines for m in [DT_SCREEN.match(line)] if m]
+    if expect.get('dt'):
+        if len(dt_screens) != 1 or screens:
+            problems.append(f'{len(dt_screens)} SCREEN DT lines and {len(screens)} GOP ones, '
+                            'wanted 1 DT line')
+        elif not int(dt_screens[0][1], 16):
+            problems.append('the report was drawn on framebuffer address 0')
+    elif dt_screens:
+        problems.append('drawn on the device tree\'s framebuffer without being asked to')
+    elif len(screens) != 1:
         problems.append(f'{len(screens)} SCREEN GOP MODE lines with an address, wanted 1')
     else:
         mode, base, first = screens[0][1], int(screens[0][2], 16), screens[0][3]
@@ -172,12 +190,16 @@ def synthetic(expect, smp=SMP):
     if expect.get('stop'):
         return '\n'.join(['Shell> el2qual.efi poweroff emulate-no-fb',
                           'NO GOP MODE HAS A FRAMEBUFFER ADDRESS (MODE 0)',
+                          'DT FRAMEBUFFER: NO DEVICE TREE',
                           'STOPPED BEFORE EXITBOOTSERVICES: NOTHING WAS MEASURED',
                           'HOLD THE POWER BUTTON TO TURN THE MACHINE OFF', ''])
     feats = ' '.join(f'{n}={PRESENT_AT[n] if expect["features"][n] else 0}/'
                      f'{"OK" if expect["features"][n] else "UD"}' for n in FEATURES)
     hcr = (1 << 34 | 1 << 27) if expect.get('vhe') else 1 << 31
-    screen = 'SCREEN GOP MODE 1  FB 0000000080000000' + ('  FROM MODE 0' if expect.get('moved') else '')
+    if expect.get('dt'):
+        screen = 'SCREEN DT SIMPLE-FB  FB 0000000080000000  NO GOP ADDRESS'
+    else:
+        screen = 'SCREEN GOP MODE 1  FB 0000000080000000' + ('  FROM MODE 0' if expect.get('moved') else '')
     lines = ['junk before', 'EL2QUAL BEGIN', screen,
              f'ENTRY HCR_EL2 {hcr:016X} SCTLR 0000000030C5183D']
     if expect.get('vhe'):
@@ -206,11 +228,18 @@ def self_test():
                           'CALLING EXITBOOTSERVICES\n', expect, False)
             expect_result(f'{name} wrote a report', good + synthetic(CONFIGS['max']), expect, False)
             continue
-        expect_result(f'{name} no screen line', re.sub(r'SCREEN GOP MODE .*\n', '', good),
+        expect_result(f'{name} no screen line', re.sub(r'SCREEN (GOP MODE|DT) .*\n', '', good),
                       expect, False)
         expect_result(f'{name} screen at 0', good.replace('FB 0000000080000000',
                                                           'FB 0000000000000000'), expect, False)
-        if expect.get('moved'):
+        if expect.get('dt'):
+            expect_result(f'{name} drawn on GOP instead', good.replace(
+                'SCREEN DT SIMPLE-FB  FB 0000000080000000  NO GOP ADDRESS',
+                'SCREEN GOP MODE 1  FB 0000000080000000'), expect, False)
+            expect_result(f'{name} DT and GOP both', good.replace(
+                'EL2QUAL BEGIN', 'EL2QUAL BEGIN\nSCREEN GOP MODE 1  FB 0000000080000000'),
+                expect, False)
+        elif expect.get('moved'):
             expect_result(f'{name} did not move', good.replace('  FROM MODE 0', ''), expect, False)
         else:
             expect_result(f'{name} moved unasked', good.replace(

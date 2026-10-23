@@ -117,21 +117,38 @@ int el2q_acpi_parse(const void *rsdp_address, struct el2q_acpi *o)
  * first node compatible with "qcom,adreno" and its "zap-shader" child, and
  * wants status "disabled" (slbounce src/bounce_main.c). Same rule here, so
  * the screen says before ExitBootServices whether the bounce can happen. */
-enum el2q_dt_state el2q_fdt_zap_state(const void *fdt, size_t limit)
+enum { FDT_BEGIN_NODE = 1, FDT_END_NODE = 2, FDT_PROP = 3, FDT_NOP = 4, FDT_END = 9 };
+
+/* The structure and strings blocks of a flattened device tree, each bounded
+ * by the header's totalsize, which is itself bounded by limit. */
+struct fdt_blocks {
+    const uint8_t *strings;
+    uint32_t off_struct, end, size_strings;
+};
+
+static int fdt_open(const uint8_t *b, size_t limit, struct fdt_blocks *f)
 {
-    const uint8_t *b = fdt;
-    enum { FDT_BEGIN_NODE = 1, FDT_END_NODE = 2, FDT_PROP = 3, FDT_NOP = 4, FDT_END = 9 };
-    if (!b) return EL2Q_DT_NONE;
-    if (limit < 40 || be32(b) != 0xd00dfeedu) return EL2Q_DT_BAD;
+    if (limit < 40 || be32(b) != 0xd00dfeedu) return -1;
     uint32_t total = be32(b + 4), off_struct = be32(b + 8), off_strings = be32(b + 12);
     uint32_t size_strings = be32(b + 32), size_struct = be32(b + 36);
     if (total > limit || total < 40 || off_struct > total || off_strings > total ||
         size_struct > total - off_struct || size_strings > total - off_strings)
-        return EL2Q_DT_BAD;
-    const uint8_t *strings = b + off_strings;
+        return -1;
+    *f = (struct fdt_blocks){b + off_strings, off_struct, off_struct + size_struct, size_strings};
+    return 0;
+}
+
+enum el2q_dt_state el2q_fdt_zap_state(const void *fdt, size_t limit)
+{
+    const uint8_t *b = fdt;
+    if (!b) return EL2Q_DT_NONE;
+    struct fdt_blocks f;
+    if (fdt_open(b, limit, &f)) return EL2Q_DT_BAD;
+    const uint8_t *strings = f.strings;
+    uint32_t size_strings = f.size_strings;
     int depth = 0, adreno_depth = -1, zap_depth = -1;
     enum el2q_dt_state zap = EL2Q_DT_ZAP_OKAY;       /* no status property: okay */
-    for (uint32_t p = off_struct, end = off_struct + size_struct; p + 4 <= end;) {
+    for (uint32_t p = f.off_struct, end = f.end; p + 4 <= end;) {
         uint32_t token = be32(b + p);
         p += 4;
         if (token == FDT_BEGIN_NODE) {
@@ -211,6 +228,160 @@ unsigned el2q_gop_order(const struct el2q_gop_mode *modes, unsigned count, unsig
         n++;
     }
     return n;
+}
+
+/* When no GOP mode has an address, the device tree is the other record of
+ * the scanout buffer: the gaokun3's has /chosen/framebuffer@c6200000, a
+ * 1600x2560 a8r8g8b8 simple-framebuffer, and the firmware's memory map
+ * marks the 36 MiB around it Reserved (gaokun-android gk3probe log). A wrong
+ * address would be a write into memory el2qual does not own, so the node
+ * must be self-consistent here and lie inside one Reserved descriptor
+ * (el2q_memmap_reserved) before el2qual.c draws on it. */
+
+static int string_in_list(const uint8_t *v, uint32_t len, const char *s, uint32_t n)
+{
+    for (uint32_t i = 0; i < len;) {
+        uint32_t e = i;
+        while (e < len && v[e]) e++;
+        if (e - i == n && same(v + i, s, n)) return 1;
+        i = e + 1;
+    }
+    return 0;
+}
+
+static uint64_t cells_at(const uint8_t *v, unsigned count)
+{
+    uint64_t x = 0;
+    for (unsigned i = 0; i < count; i++) x = x << 32 | be32(v + 4 * i);
+    return x;
+}
+
+struct sfb_node {
+    int compatible, disabled;
+    const uint8_t *reg, *format;
+    uint32_t reg_len, format_len, width, height, stride, have;  /* have: width|height|stride */
+};
+
+static enum el2q_sfb_state sfb_check(const struct sfb_node *n, unsigned ac, unsigned sc,
+                                     struct el2q_simplefb *out)
+{
+    if (ac < 1 || ac > 2 || sc < 1 || sc > 2 || !n->reg || n->reg_len < 4 * (ac + sc))
+        return EL2Q_SFB_BAD_DT;
+    struct el2q_simplefb fb = {cells_at(n->reg, ac), cells_at(n->reg + 4 * ac, sc),
+                               n->width, n->height, n->stride, 0};
+    /* The 32 bpp formats of the binding; the first two are BGRX in memory,
+     * the GOP layout el2q_render calls bgr. */
+    static const struct { char name[9]; uint32_t bgr; } formats[] = {
+        {"a8r8g8b8", 1}, {"x8r8g8b8", 1}, {"a8b8g8r8", 0}, {"x8b8g8r8", 0},
+    };
+    unsigned f = 0;
+    while (f < 4 && !(n->format && n->format_len == 9 && same(n->format, formats[f].name, 9))) f++;
+    if (f == 4) return EL2Q_SFB_FORMAT;
+    fb.bgr = formats[f].bgr;
+    if (n->have != 7 || !fb.base || (fb.base & 3) || fb.base + fb.size < fb.base ||
+        !fb.width || !fb.height || fb.width > 16384 || fb.height > 16384 ||
+        (fb.stride & 3) || fb.stride < fb.width * 4 || (uint64_t)fb.stride * fb.height > fb.size)
+        return EL2Q_SFB_GEOMETRY;
+    *out = fb;
+    return EL2Q_SFB_OK;
+}
+
+enum el2q_sfb_state el2q_fdt_simplefb(const void *fdt, size_t limit, struct el2q_simplefb *out)
+{
+    const uint8_t *b = fdt;
+    if (!b) return EL2Q_SFB_NO_DT;
+    struct fdt_blocks f;
+    if (fdt_open(b, limit, &f)) return EL2Q_SFB_BAD_DT;
+    /* The root node is the first node, at depth 1: /chosen is at 2 and the
+     * framebuffer nodes, its children, at 3. */
+    enum { CHOSEN = 2, CHILD = 3 };
+    int depth = 0, chosen = 0;
+    unsigned ac = 2, sc = 1;                    /* the devicetree spec's defaults */
+    enum el2q_sfb_state seen = EL2Q_SFB_NO_NODE;
+    struct sfb_node n = {0};
+    for (uint32_t p = f.off_struct; p + 4 <= f.end;) {
+        uint32_t token = be32(b + p);
+        p += 4;
+        if (token == FDT_BEGIN_NODE) {
+            const uint8_t *name = b + p;
+            uint32_t len = 0;
+            while (p + len < f.end && name[len]) len++;
+            if (p + len >= f.end) return EL2Q_SFB_BAD_DT;
+            p += (len + 4) & ~3u;
+            depth++;
+            if (depth == CHOSEN) chosen = len == 6 && same(name, "chosen", 6);
+            if (chosen && depth == CHILD) n = (struct sfb_node){0};
+        } else if (token == FDT_END_NODE) {
+            if (chosen && depth == CHILD && n.compatible && !n.disabled) {
+                /* Keep a failing node's reason; a later one may still do. */
+                seen = sfb_check(&n, ac, sc, out);
+                if (seen == EL2Q_SFB_OK) return seen;
+            }
+            if (chosen && depth == CHOSEN) return seen;
+            if (--depth < 0) return EL2Q_SFB_BAD_DT;
+        } else if (token == FDT_PROP) {
+            if (p + 8 > f.end) return EL2Q_SFB_BAD_DT;
+            uint32_t len = be32(b + p), nameoff = be32(b + p + 4);
+            const uint8_t *v = b + p + 8;
+            p += 8;
+            if (len > f.end - p || nameoff >= f.size_strings) return EL2Q_SFB_BAD_DT;
+            p += (len + 3) & ~3u;
+            if (!chosen) continue;
+            const uint8_t *name = f.strings + nameoff;
+            size_t room = f.size_strings - nameoff;
+#define PROP_IS(s) (room >= sizeof(s) && same(name, s, sizeof(s)))
+            if (depth == CHOSEN && len == 4 && PROP_IS("#address-cells")) ac = be32(v);
+            if (depth == CHOSEN && len == 4 && PROP_IS("#size-cells")) sc = be32(v);
+            if (depth != CHILD) continue;
+            if (PROP_IS("compatible")) n.compatible = string_in_list(v, len, "simple-framebuffer", 18);
+            if (PROP_IS("status"))
+                n.disabled = !((len == 5 && same(v, "okay", 5)) || (len == 3 && same(v, "ok", 3)));
+            if (PROP_IS("reg")) { n.reg = v; n.reg_len = len; }
+            if (PROP_IS("format")) { n.format = v; n.format_len = len; }
+            if (len == 4 && PROP_IS("width")) { n.width = be32(v); n.have |= 1; }
+            if (len == 4 && PROP_IS("height")) { n.height = be32(v); n.have |= 2; }
+            if (len == 4 && PROP_IS("stride")) { n.stride = be32(v); n.have |= 4; }
+#undef PROP_IS
+        } else if (token == FDT_END) {
+            return seen;
+        } else if (token != FDT_NOP) {
+            return EL2Q_SFB_BAD_DT;
+        }
+    }
+    return EL2Q_SFB_BAD_DT;
+}
+
+/* EFI_MEMORY_DESCRIPTOR (UEFI 7.2): Type at 0, PhysicalStart at 8,
+ * NumberOfPages at 24; descriptors are desc_size apart, which may exceed the
+ * structure (48 on the gaokun3). EfiReservedMemoryType is 0. */
+int el2q_memmap_reserved(const void *map, uint64_t map_size, uint64_t desc_size,
+                         uint64_t base, uint64_t size)
+{
+    const uint8_t *m = map;
+    if (!m || desc_size < 40 || !size || base + size < base) return 0;
+    for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
+        uint64_t start = le64(m + off + 8), pages = le64(m + off + 24);
+        if (le32(m + off) != 0 || pages > UINT64_MAX >> 12) continue;
+        uint64_t end = start + (pages << 12);
+        if (end >= start && base >= start && base + size <= end) return 1;
+    }
+    return 0;
+}
+
+const char *el2q_sfb_words(uint32_t state)
+{
+    static const char *const words[] = {
+        [EL2Q_SFB_NOT_TRIED] = "NOT TRIED",
+        [EL2Q_SFB_NO_DT] = "NO DEVICE TREE",
+        [EL2Q_SFB_BAD_DT] = "DEVICE TREE UNREADABLE",
+        [EL2Q_SFB_NO_NODE] = "NO /CHOSEN SIMPLE-FRAMEBUFFER",
+        [EL2Q_SFB_FORMAT] = "UNSUPPORTED PIXEL FORMAT",
+        [EL2Q_SFB_GEOMETRY] = "ADDRESS, SIZE OR STRIDE INCONSISTENT",
+        [EL2Q_SFB_NO_MAP] = "NO MEMORY MAP",
+        [EL2Q_SFB_NOT_RESERVED] = "NOT INSIDE ONE RESERVED REGION",
+        [EL2Q_SFB_OK] = "OK",
+    };
+    return state < sizeof words / sizeof words[0] ? words[state] : "?";
 }
 
 /* ---- Verdicts ------------------------------------------------------------ */
@@ -399,8 +570,15 @@ static void header(const struct el2q_run *r, struct el2q_text *t)
     put_c(&b, 'X');
     put_dec(&b, r->fb_height);
 
-    /* Which mode the report is drawn on, so a photo records it; a switch away
-     * from the firmware's mode is the gaokun3 case described above. */
+    /* What the report is drawn on, so a photo records it: the device tree's
+     * framebuffer, or a GOP mode, and a switch away from the firmware's. */
+    if (r->fb_source == EL2Q_FB_DT) {
+        b = new_line(t, EL2Q_YELLOW);
+        put_s(&b, "SCREEN DT SIMPLE-FB  FB ");
+        put_hex(&b, r->fb_base, 16);
+        put_s(&b, "  NO GOP ADDRESS");
+        return;
+    }
     int moved = r->fb_mode != r->fb_first_mode;
     b = new_line(t, moved || !r->fb_base ? EL2Q_YELLOW : EL2Q_WHITE);
     put_s(&b, "SCREEN GOP MODE ");
