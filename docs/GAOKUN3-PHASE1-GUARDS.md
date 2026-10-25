@@ -1,20 +1,23 @@
 # gaokun3 Phase 1: thermal and battery/AC guards
 
-Status, 2026-10-23:
+Status, 2026-10-25:
 - **Thermal guard: pinned, and run once on the gaokun3.** el2qual's
   [EL2 tsens read](#el2-tsens-read) (qualification run 10) read the
   version word `0x30000000` on all four controllers at EL2. It ran the
   guard on the live sensors for 12 s: PASSED, nothing tripped. That makes
   `0x30000000` the guard's pin. It is still not linked into any monitor
   build.
-- **Battery guard: host-tested only.** The
-  [Windows battery readings](#windows-battery-readings) are ready, and
-  have not run.
+- **Battery guard: host-tested, its bounds checked against real
+  readings.** The [Windows battery readings](#results-2026-10-25)
+  (2026-10-25) passed every bound the guard applies. They also
+  reproduced BATT-1: a weak USB source reported as charging while the
+  battery drained, which the guard would count as AC.
 - The Linux survey is [retired](#linux-survey-retired) after a panel
   fault.
 
 Hardware: the thermal guard, one supervised el2qual run (run 10). The
-battery guard: NOT RUN. Neither guard has run inside a monitor.
+battery guard itself: NOT RUN; its bounds were replayed against Windows'
+readings, not run on the EC. Neither guard has run inside a monitor.
 
 The port target is the Huawei MateBook E Go 2023 (`gaokun3`, SC8280XP).
 These guards are the gaokun3 counterparts of the A16's
@@ -116,6 +119,7 @@ The owner may lower the limit for this fanless tablet.
 | `0x00` in `0x82` on AC means "not charging"; weak USB sources report charging while the battery drains (BATT-1); the charge level that sets the critical bit is unmeasured (BATT-3); the sign of the rate is unconfirmed | gaokun-android `patches/0072-…` | OBSERVED / UNMEASURED |
 | On AC and `Full` at 98 %: 8475 mV, 0 mA, 5228 of 5363 mAh; design 5900 mAh at 7640 mV | Linux's battery driver, one truncated run ([retired survey](#linux-survey-retired)) | OBSERVED |
 | Battery voltage range, full-capacity range, gauge consistency | 2-cell pack (gaokun-android power profile); 4483 mAh | INFERRED |
+| Under Windows, 88–95 %: 8210..8517 mV; full charge 40920 mWh (4805..4984 mAh at the measured voltage), 33 cycles; percent within 1 point of remaining/full; held at 95 % on AC with neither flag set; a weak USB source reported as charging while the battery drained (BATT-1) | the [Windows battery readings](#results-2026-10-25), firmware 2.18 | OBSERVED, through Huawei's Windows driver |
 
 ### Policy
 
@@ -137,7 +141,8 @@ The guard does no I/O. The caller passes the three EC reads (`0x81`,
   from charge/full by more than 10 points.
 
 AC means the adapter bit is set and the EC is not discharging. An adapter
-that cannot carry the load therefore does not count.
+the EC reports as discharging therefore does not count. A weak source it
+reports as charging still does; see Limitations.
 
 `gaokun3_battery_admit()` is `cycle_lib.common.battery_ok()`:
 
@@ -152,8 +157,12 @@ the same verdict at every minimum.
 ### Limitations
 
 - **Weak USB sources.** One snapshot cannot detect BATT-1: a weak source
-  the EC reports as charging counts as AC, at any percent. A runtime
-  monitor that watches the trend would need to catch it. None exists yet.
+  the EC reports as charging counts as AC, at any percent. The AC rule
+  above (adapter set, not discharging) does not catch it either: on a
+  Mac's USB-C port under load, Windows reported charging, never
+  discharging, for 10 minutes while the battery lost about 5.8 W
+  ([results](#results-2026-10-25)). A runtime monitor that watches the
+  remaining charge fall would need to catch it. None exists yet.
 - **INFERRED bounds.** The unknown-bit rule and the INFERRED bounds fail
   closed. If a real gaokun3 reading trips one, runs stop until the bound
   is corrected from a recorded reading.
@@ -173,8 +182,10 @@ Each of these replaces an UNMEASURED or INFERRED entry above:
    - on battery;
    - on a weak USB source.
 
-   The [Windows battery readings](#windows-battery-readings) check the
-   guard's voltage, capacity and gauge bounds, and its AC rule. They come
+   Done through Windows on 2026-10-25
+   ([results](#results-2026-10-25)): every reading is inside the
+   guard's voltage, capacity and gauge bounds, and BATT-1 is reproduced.
+   "On AC, full" is the tablet holding the battery at 95 %. These come
    through Windows' driver, so the EC's own bytes, including `0x81`'s
    upper bits and the `0x82` decode, stay UNMEASURED.
 3. **The charge level at which `0x82` bit 2 sets** (BATT-3). This needs a
@@ -361,9 +372,69 @@ correcting before the guard runs on hardware.
 **Limits.**
 - This is Windows' view through Huawei's driver, not the EC bytes. It
   cannot test the guard's byte decode or the unknown-bit rule.
-- The collector itself is NOT RUN here, because this Mac has no
-  PowerShell. Its host test lints what it may call and write, and tests
-  the replay.
+- The collector cannot run on the Mac, which has no PowerShell. Its host
+  test lints what it may call and write, and tests the replay. It has run
+  on the gaokun3 (below).
+
+### Results, 2026-10-25
+
+The owner ran the collector on the MateBook E Go 2023 (firmware 2.18,
+06/30/2023; Windows build 26200) and copied the five files to
+`build/phase1/windows/` (not committed). The first attempt stopped
+before writing anything: under StrictMode, Windows PowerShell threw on
+`.Count` for the single battery. The collector was fixed to return arrays
+before these runs.
+
+| File (state, time) | Samples | Adapter, flags | Percent | Net change | Rate Windows reported |
+| --- | --- | --- | --- | --- | --- |
+| `ac-charging`, 21:21 | 24 | online, neither flag | 95 → 95 | 0 mW | 0 |
+| `ac-charging`, 21:33 | 24 | online, neither flag | 95 → 95 | 0 mW | 0 |
+| `battery`, 21:44 | 60 | offline, discharging | 93 → 92 | −6.2 W | discharge 6.5 W (median) |
+| `weak-usb`, 21:51 | 120 | online, **charging** | 91 → 89 | **−5.8 W** | **charge 6.1 W** (median) |
+| `ac-charging`, 22:04 | 24 | online, charging | 88 → 89 | +14.6 W | charge 16.9 W (median) |
+
+The net change is the remaining capacity's slope from first to last
+sample. Remaining-capacity resolution is coarse (it often repeats
+between samples), so the two-minute runs give rough figures.
+
+The replay (`python3 tools/replay-gaokun3-windows-battery.py
+build/phase1/windows/*.txt`):
+
+- **PASS** format: all five complete.
+- **PASS** voltage: 8210..8517 mV, against 5000..9000.
+- **PASS** capacity: 4805..4984 mAh (40920 mWh at the measured
+  voltage), against 1000..10000.
+- **PASS** gauge: the percent within 1 point of remaining/full; the
+  guard allows 10.
+- **PASS** flags: never charging and discharging together, never
+  charging without the adapter.
+
+What they show (OBSERVED, through Windows' driver):
+
+- **Held on AC.** The tablet stopped charging at 95 % with the adapter
+  in, and reported neither charging nor discharging. The two runs at
+  21:21 and 21:33 are labelled `ac-charging` but are this held state;
+  there is no separate `ac-full` file. That matches the EC's `0x00`
+  "not charging" on AC (gaokun-android). The guard counts it as AC,
+  correctly.
+- **BATT-1 reproduced.** Powered from a Mac's USB-C port while playing
+  4K video at full brightness, Windows reported the adapter online and
+  the battery charging in all 120 samples, and never discharging. Over
+  the same 10 minutes the remaining capacity fell by 978 mWh, about
+  −5.8 W, and the percent fell from 91 to 89. The guard's AC rule would
+  admit this source at any percent.
+- **The rate's sign.** In the weak-USB run Windows reported a charge
+  rate of about 6 W while the battery lost about 5.8 W. So the rate Windows
+  reports does not give the direction of current on its own; only the
+  flags do. Whether the EC's `0x9a` rate word is likewise unsigned is
+  INFERRED from this, not read.
+- **Capacity.** Windows reports a full charge of 40920 mWh after 33
+  cycles and no design capacity. The retired Linux run reported
+  5363 mAh full and a 5900 mAh design. The two sources disagree by about
+  10 %; both are inside the guard's bound.
+
+Not covered: the EC's own bytes, the critical bit's charge level
+(BATT-3), and discharge below 88 %.
 
 ## Linux survey (retired)
 
