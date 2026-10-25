@@ -327,7 +327,7 @@ then need a full GICv3 model.
 | Hang with `PAC: SIGNING AT EL2` last | EL3 traps PAC instructions at EL2 | a result: record it |
 | Hang with `CPU_ON SLOT n` last | that core did not return from PSCI | record; run 4 would hang the same way |
 | A red `V<n> ESR ...` line under a CPU | an unexpected exception on that CPU | photograph closely; stop |
-| One half of the panel corrupt after a Linux boot, and still on the Huawei logo after a power-off | display state held while the tablet is "off", after Linux's display driver took the panel over ([Incidents](#incidents)) | leave it powered off for longer; if it does not clear, or comes back without Linux, stop and treat it as hardware |
+| One half of the panel corrupt after a Linux boot, and still on the Huawei logo after a power-off | display state held while the tablet is "off", after Linux's display driver took the panel over ([Incidents](#incidents)) | shut down and leave it off for at least 15 minutes, which cleared it once; if it does not clear, stop. Linux is no longer booted on the gaokun3, so any recurrence is treated as hardware |
 
 Recovery is the same in every case: hold the power button until the machine
 is off, remove the stick, power on. Windows should start as before; if
@@ -467,18 +467,23 @@ feeds in [GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md).
 
 This was not an el2qual run. The owner booted a USB stick with
 gaokun_build's Ubuntu 26.04 image (kernel `7.1.0-rc3-gaokun3+`) through
-its standard EL1 entry:
-- slbounce and the image's EL2 entry were moved off the stick;
-- headless boot entries ran the read-only Phase 1 survey
-  (`tools/gaokun3-linux-survey.sh`, not committed when this was written)
-  and powered off.
+its EL1 entry, with slbounce and the image's EL2 entry moved off the
+stick. It was booted twice:
+- first the image's standard entry, where the desktop never started;
+- then a headless entry that ran the read-only Phase 1 survey
+  (`tools/gaokun3-linux-survey.sh`, never committed, deleted on
+  2026-10-23) until a power-off cut it short.
 
 What the owner saw (OBSERVED, the owner's report; no photograph recorded):
-- the right half of the panel (in portrait) corrupt after the Linux boot;
-- still corrupt on the Huawei firmware logo and in Windows after a full
-  power-off (power button held about 15 s, stick removed);
-- whole again after the tablet stayed off for a longer period (how long
-  was not recorded).
+- the right half of the panel (in portrait) showed a striped band in both
+  Linux boots;
+- the band stayed on the Huawei firmware logo and in Windows after a
+  power cycle with the stick removed;
+- the panel was whole again after the tablet was shut down and left off
+  for 15 minutes.
+
+The full record, including what the stick's journal showed, is in
+[GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md#incident-2026-10-23).
 
 What was checked, on the host only:
 - **The survey only reads.** It reads sysfs, debugfs, procfs and the
@@ -500,8 +505,8 @@ What was checked, on the host only:
 What it means:
 - **Trigger (INFERRED):** most likely Linux's `msm` driver taking over the
   panel.
-- **Persistence (INFERRED):** the corruption held through a normal
-  power-off but cleared after a longer one. That points to state kept
+- **Persistence (INFERRED):** the corruption held through a short power
+  cycle but cleared after 15 minutes off. That points to state kept
   while the tablet is "off", by the EC or a panel supply it keeps up,
   rather than permanent damage. Neither is measured, and a marginal
   hardware fault is not excluded (UNKNOWN).
@@ -509,14 +514,14 @@ What it means:
   on the framebuffer the firmware already set up, and stages 1 to 3 never
   showed this.
 
-Until the cause is known:
-- Boot Linux on the gaokun3 only with `module_blacklist=msm` appended to
-  the boot entry's options. This is gaokun_build's own diagnostic step: the
-  firmware's framebuffer stays, and the `msm` driver never takes the panel
-  over. A headless survey needs no graphics. That the battery, EC and
-  tsens drivers work without `msm` is INFERRED, not tested.
-- If one half corrupts again without Linux having run since the last full
-  power-off, treat it as hardware: stop all runs and record it here.
+The owner's decision, 2026-10-23:
+- **No Linux image is booted on the gaokun3 again**, with or without
+  the `msm` display driver. The Linux survey is retired
+  ([GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md#linux-survey-retired)).
+  Hardware readings come only from UEFI applications like el2qual, and
+  from Windows.
+- If one half corrupts again, treat it as hardware, since Linux no longer
+  runs: stop all runs and record it here.
 - After any recurrence, photograph the firmware logo and record how long
   the tablet was off before it recovered.
 
