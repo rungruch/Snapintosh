@@ -711,7 +711,9 @@ architecture and the contract above):
   fabricated success AGENTS.md forbids by default. So the collapsed scheme
   needs an explicit opt-in gate, a documented security limitation, and the
   machine owner's decision before Route B depends on it. That is Phase 0C
-  overturn condition 2, answered as "servable, with weaker isolation".
+  overturn condition 2, answered as "servable, with weaker isolation". The
+  owner accepted it on 2026-10-26 under those terms
+  ([Phase 0C decision](GAOKUN3-PHASE0C.md#decision), condition 1).
 
 ### B8: the VirtualMac2,1 entry and boot handoff (26A428)
 
@@ -1113,8 +1115,9 @@ it.
   TIDCP-trapped access, but the stock kernel takes none all the way to its
   root-mount wait (2026-10-26), so it cannot characterise them yet.
 - B6: every site is named. Open: the nested hypervisor's semantics (not
-  in published source), and whether the owner accepts collapsed PAC key
-  domains on the gaokun3.
+  in published source). Collapsed PAC key domains were accepted on
+  2026-10-26 as a documented limitation
+  ([Phase 0C decision](GAOKUN3-PHASE0C.md#decision)).
 - Port-wide, not a route question: a Metal driver for the gaokun3's
   Adreno 690.
 - B7: tick constants outside `timebase-frequency`. The gaokun3's own

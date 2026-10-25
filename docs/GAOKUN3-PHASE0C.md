@@ -1,8 +1,8 @@
 # gaokun3 Phase 0C: route decision record
 
-Status, 2026-10-23: **PROPOSED.** The machine owner decides; until then
-no Phase 1 work starts. This record proposes Route B, provisionally, and
-names the checks that would overturn it.
+Status, 2026-10-26: **ACCEPTED, with conditions (Route B).** See
+[Decision](#decision). Proposed on 2026-10-23. The proposal and the checks
+that would overturn it are kept below as the record of what was decided.
 
 ## Context
 
@@ -113,6 +113,83 @@ Each check reports PASS, FAIL, SKIP or NOT RUN, with its evidence class.
 
 ## Decision
 
-Not yet taken. The owner records **ACCEPTED** (with any conditions),
-**REJECTED** (and the route chosen instead) or **STOPPED** here, with the
-date.
+**ACCEPTED, with conditions: Route B.** Recorded by the machine owner on
+2026-10-26.
+
+**Basis.**
+
+- **Route A's blocker stands.** The J700 kernel needs NV2, ECV and FGT,
+  which the gaokun3 lacks (VERIFIED, Phase 0A). It would need 146
+  `com.apple.kernel` sites rewritten, beyond the
+  [KERNEL-PATCHES.md](KERNEL-PATCHES.md#policy) policy.
+- **Route B's CPU needs are met.** PAuth and the 16 KiB granule are present
+  on all eight cores (VERIFIED, Phase 0A).
+- **The QEMU smoke test**
+  ([result](GAOKUN3-PHASE0B.md#cpus-trimmed-2026-10-26-the-kernel-waits-for-a-root-disk),
+  OBSERVED, host only) takes the stock 26A428 VirtualMac kernel to its
+  root-mount wait, needing only:
+  - the PAC hypercalls;
+  - PSCI;
+  - `/chosen` data the VM firmware normally supplies;
+  - a GICv3, a PL011 and the timer.
+- **Every stop in it was a firmware duty.** None was Apple-only CPU
+  behaviour, and none touched an implementation-defined register.
+- **What remains open cannot be settled on the host.** It needs the
+  gaokun3's own CPU, or belongs to later phases.
+
+**Conditions.** Each is binding on the work that depends on it.
+
+1. **Collapsed PAC key domains are an accepted, documented limitation.**
+   The guest expects separate EL0 and EL1 key state, which standard PAuth
+   cannot give without trapping every exception
+   ([B6](GAOKUN3-PHASE0B.md#b6-every-hypercall-and-what-a-monitor-must-answer-26a428)).
+   So the monitor uses one key set for the kernel and every process. That
+   removes PAC isolation between processes, and between user and kernel: a
+   user process could sign pointers the kernel accepts. This is accepted
+   for a research port, not for anything holding data that needs that
+   isolation. The PAC service that serves the calls this way:
+   - is opt-in behind its own compile-time gate (AGENTS.md rule 3);
+   - is described as a security limitation wherever the gaokun3 profile is
+     documented;
+   - never reports per-EL key separation it does not provide.
+2. **Hardware can reopen the decision.** The first gaokun3 EL1 boot of
+   this kernel (Phase 3) must reach a stop of the same kind as the QEMU
+   test's: a console, then an unmodelled platform contract. Any of these
+   reopens this record before further Route B work:
+   - an Apple-only CPU behaviour EL2 cannot supply (overturn condition 1);
+   - the PAC calls failing on PAuth2 with QARMA5 (condition 2);
+   - a platform dependency the monitor cannot model (condition 3).
+3. **The boot seed comes from a real entropy source.** XNU panics without
+   256 non-zero bytes in `/chosen/random-seed`, and the gaokun3 has no
+   RNDR. The loader or monitor must take the seed from a real hardware
+   source, for example UEFI's RNG protocol before `ExitBootServices`, or
+   the SoC's random-number generator once its registers are documented. It
+   must refuse to boot without one. A fixed, derived or zero seed is
+   fabricated entropy and is not allowed.
+4. **The VM firmware's duties become monitor requirements**, each
+   implemented to its published XNU contract and failing explicitly where
+   unmodelled:
+   - the boot seed;
+   - the NVRAM bank in `/chosen`;
+   - `/cpus` trimmed to the CPUs actually started;
+   - PSCI (`PSCI_VERSION`, `CPU_ON`, `SYSTEM_OFF`, `SYSTEM_RESET`);
+   - the framebuffer description;
+   - the panic region.
+
+   The QEMU test's choices (an empty CHRP NVRAM bank, `-noprogress`) are
+   smoke-test stand-ins, not designs to copy unexamined.
+5. **B8 does not decide the route.** If `AppleVPBootPolicy` or `OSKext`
+   refuses a Snapintosh AuxKC, input and storage go through virtio devices
+   backed by monitor-side drivers, as
+   [Consequences](#consequences-if-route-b-is-accepted) describes.
+6. **The A16 is untouched.** The J700 profile, the SPTM and TXM layers and
+   the shadow MMU stay as they are for the A16 (AGENTS.md rule 7). Route B
+   adds a profile, and builds with its gates off keep the A16 baseline
+   unchanged (AGENTS.md rule 3).
+
+**What starts now.** Phase 2 (EL2 entry and the USB host link) may begin.
+It starts with host-first work on slbounce's VHE hand-off: `HCR_EL2 = E2H
+| TGE`, with `VBAR_EL2` still at UEFI's vectors, while q1n1 and the monitor
+assume a non-VHE EL2. Hardware runs remain the owner's, supervised and
+under the Phase 1 guards. No Linux image is booted on the gaokun3 (the
+owner's decision of 2026-10-23).
