@@ -8,6 +8,10 @@
    mode where the host has no ASan runtime, and run. It decodes synthetic EC
    snapshots, among them the faulty readings the policy must refuse, and
    prints each record with its admission verdict at every minimum 50..100.
+   It then runs the trend check (BATT-1) on synthetic drains and on the
+   2026-10-25 Windows readings (tools/test-gaokun3-battery-readings.h): the
+   weak USB run must trip DRAIN, the held, charging and battery runs must
+   not. Those lines are informational; the C test's CHECKs decide.
 2. Every record is replayed through tools/cycle_lib/common.py's battery_ok():
    the C verdict must be OK exactly where battery_ok() is true, so the guard
    and the A16 host policy cannot drift apart.

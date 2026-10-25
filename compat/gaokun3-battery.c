@@ -94,3 +94,71 @@ unsigned gaokun3_battery_admit(const struct gaokun3_battery_record *r, unsigned 
     if (!r->plausible) return r->reason;
     return r->ac || r->percent >= minimum ? GAOKUN3_BATTERY_OK : GAOKUN3_BATTERY_LOW;
 }
+
+void gaokun3_battery_trend_init(struct gaokun3_battery_trend *t) {
+    if (t) *t = (struct gaokun3_battery_trend){.abi = GAOKUN3_BATTERY_TREND_ABI};
+}
+
+/* Latched: the caller stops the run on the first trip, and nothing fed
+ * afterwards may make the battery look trustworthy again. */
+static unsigned trend_trip(struct gaokun3_battery_trend *t, unsigned why) {
+    t->reason = why;
+    t->watching = 0;
+    return why;
+}
+
+unsigned gaokun3_battery_trend_feed(struct gaokun3_battery_trend *t,
+                                    const struct gaokun3_battery_record *r, uint64_t now_ms) {
+    if (!t || t->abi != GAOKUN3_BATTERY_TREND_ABI) return GAOKUN3_BATTERY_CONFIG;
+    if (t->reason) return t->reason;
+    if (!r || r->abi != GAOKUN3_BATTERY_ABI) return trend_trip(t, GAOKUN3_BATTERY_CONFIG);
+    if (t->fed && now_ms < t->last_ms) return trend_trip(t, GAOKUN3_BATTERY_CONFIG);
+    if (t->fed && now_ms - t->last_ms > GAOKUN3_BATTERY_TREND_MAX_GAP_MS)
+        return trend_trip(t, GAOKUN3_BATTERY_STALE);
+    t->fed = 1;
+    t->last_ms = now_ms;
+    /* A refused record says nothing about the charge, and the guard does
+     * not rely on the battery past a refusal. */
+    if (!r->plausible) return trend_trip(t, r->reason ? r->reason : GAOKUN3_BATTERY_CONFIG);
+    if (r->status || r->reason != GAOKUN3_BATTERY_OK) return trend_trip(t, GAOKUN3_BATTERY_CONFIG);
+    uint32_t mah = r->capacity_mah;
+    t->last_mah = mah;
+    if (!r->ac) {
+        t->watching = 0;
+        return GAOKUN3_BATTERY_OK;
+    }
+    if (!t->watching) {
+        t->watching = 1;
+        t->watch_ms = t->high_ms = now_ms;
+        t->high_mah = mah;
+        return GAOKUN3_BATTERY_OK;
+    }
+    /* Measure from the latest high: a source that charges, or holds the
+     * charge, keeps moving it forward. A high older than the window restarts
+     * the measurement, so a slow sag on a held charger (about 1 mAh/min
+     * OBSERVED) never adds up to a trip, and a drain at the threshold rate
+     * reaches TREND_DROP_MAH within one window. */
+    if (now_ms - t->high_ms > GAOKUN3_BATTERY_TREND_WINDOW_MS || mah >= t->high_mah) {
+        t->high_mah = mah;
+        t->high_ms = now_ms;
+        return GAOKUN3_BATTERY_OK;
+    }
+    uint32_t drop = t->high_mah - mah;
+    if (drop > t->worst_drop_mah) t->worst_drop_mah = drop;
+    return drop >= GAOKUN3_BATTERY_TREND_DROP_MAH ? trend_trip(t, GAOKUN3_BATTERY_DRAIN)
+                                                   : GAOKUN3_BATTERY_OK;
+}
+
+unsigned gaokun3_battery_admit_watched(const struct gaokun3_battery_record *r,
+                                       const struct gaokun3_battery_trend *t, unsigned minimum) {
+    if (!t || t->abi != GAOKUN3_BATTERY_TREND_ABI) return GAOKUN3_BATTERY_CONFIG;
+    unsigned verdict = gaokun3_battery_admit(r, minimum);
+    if (verdict != GAOKUN3_BATTERY_OK && verdict != GAOKUN3_BATTERY_LOW) return verdict;
+    if (t->reason) return t->reason;
+    if (verdict == GAOKUN3_BATTERY_LOW || r->percent >= minimum) return verdict;
+    /* Only the AC claim admits this run, and BATT-1 is exactly a false one:
+     * it counts once a whole window of it has passed without a drain. */
+    if (!t->watching || t->last_ms - t->watch_ms < GAOKUN3_BATTERY_TREND_WINDOW_MS)
+        return GAOKUN3_BATTERY_UNWATCHED;
+    return GAOKUN3_BATTERY_OK;
+}

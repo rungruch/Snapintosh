@@ -3,12 +3,16 @@
  * readings the policy must refuse, decoded and admitted at every minimum.
  * Each case prints one JSON line; tools/test-gaokun3-battery.py replays the
  * records through tools/cycle_lib/common.py's battery_ok() and requires the
- * same verdict. Values are synthetic except where a comment says OBSERVED. */
+ * same verdict. Values are synthetic except where a comment says OBSERVED.
+ * The trend check (gaokun3_battery_trend_*) is exercised after the snapshot
+ * cases, on synthetic drains and on the 2026-10-25 Windows readings in
+ * test-gaokun3-battery-readings.h; its lines are plain text, not parity JSON. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include "gaokun3-battery.h"
+#include "test-gaokun3-battery-readings.h"
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "line %d: %s\n", __LINE__, #x); exit(1); } } while (0)
 #define T0 UINT64_C(1000000)            /* ms */
@@ -67,6 +71,215 @@ static struct gaokun3_battery_record run(const char *name, struct gaokun3_batter
     CHECK(gaokun3_battery_admit(&r, 0) == GAOKUN3_BATTERY_CONFIG);
     cases++;
     return r;
+}
+
+/* ---- Trend check ---------------------------------------------------------- */
+
+static unsigned trend_cases;
+
+/* A snapshot at a given charge on the observed pack, its percent consistent. */
+static struct gaokun3_battery_snapshot charge_at(unsigned adp, unsigned bst, unsigned mah, uint64_t t) {
+    struct gaokun3_battery_snapshot s = snap(adp, bst, (mah * 100 + FULL / 2) / FULL, 8300, mah, FULL, 0);
+    s.read_ms = t;
+    return s;
+}
+
+static unsigned feed(struct gaokun3_battery_trend *t, struct gaokun3_battery_snapshot s, uint64_t now,
+                     struct gaokun3_battery_record *r) {
+    gaokun3_battery_decode(&s, now, r);
+    return gaokun3_battery_trend_feed(t, r, now);
+}
+
+/* Feeds `ms` of samples every `step` ms from `from`, the charge moving `rate`
+ * mAh per minute from `start` (positive falls), plus `jitter` mAh on every
+ * other sample. Stops at a trip; *at is when it happened, else the last
+ * sample. */
+static unsigned drift(struct gaokun3_battery_trend *t, unsigned adp, unsigned bst, unsigned start,
+                      int rate, unsigned jitter, uint64_t from, uint64_t ms, uint64_t step, uint64_t *at,
+                      struct gaokun3_battery_record *r) {
+    unsigned why = GAOKUN3_BATTERY_OK;
+    for (uint64_t e = 0, n = 0; e <= ms; e += step, n++) {
+        int64_t mah = (int64_t)start - (int64_t)rate * (int64_t)e / 60000 + (n & 1 ? (int64_t)jitter : 0);
+        *at = from + e;
+        why = feed(t, charge_at(adp, bst, (unsigned)mah, from + e), from + e, r);
+        if (why) break;
+    }
+    return why;
+}
+
+static void trend_report(const char *name, const struct gaokun3_battery_trend *t, unsigned why, uint64_t at) {
+    static const char *const names[] = {"OK", "LOW", "CONFIG", "READ", "STALE", "BITS", "ABSENT",
+                                        "CONTRADICTION", "CRITICAL", "RANGE", "INCONSISTENT", "DRAIN",
+                                        "UNWATCHED"};
+    CHECK(why < sizeof names / sizeof names[0]);
+    printf("  trend %-38s %-9s at %6.1f s, worst drop %u mAh\n", name, names[why],
+           (double)(at - T0) / 1000.0, t->worst_drop_mah);
+    trend_cases++;
+}
+
+/* Windows' mWh as the EC's mAh word: at the run's median voltage, fixed for
+ * the whole run as a coulomb counter would be, so the conversion adds no
+ * voltage noise of its own (a per-sample conversion would swing about 45 mAh
+ * with the 1 % voltage ripple under load). */
+static unsigned windows_mah(unsigned mwh, unsigned mv) { return (mwh * 1000u + mv / 2) / mv; }
+
+/* Replays one Windows run as EC snapshots every `every`-th sample. */
+static unsigned replay(const struct gaokun3_windows_run *run, unsigned every, struct gaokun3_battery_trend *t,
+                       struct gaokun3_battery_record *r, uint64_t *at) {
+    unsigned adp = GAOKUN3_ADP_PRESENT | (run->online ? GAOKUN3_ADP_AC : 0u);
+    unsigned bst = (run->charging ? CHG : 0u) | (run->discharging ? DIS : 0u);
+    unsigned full = windows_mah(run->full_mwh, run->median_mv), why = GAOKUN3_BATTERY_OK;
+    gaokun3_battery_trend_init(t);
+    for (unsigned i = 0; i < run->count; i += every) {
+        const struct gaokun3_windows_sample *w = &run->samples[i];
+        uint64_t now = T0 + (uint64_t)w->elapsed_s * 1000u;
+        struct gaokun3_battery_snapshot s = snap(adp, bst, w->percent, w->mv,
+                                                 windows_mah(w->remaining_mwh, run->median_mv), full, 0);
+        s.read_ms = now;
+        CHECK(gaokun3_battery_decode(&s, now, r) == GAOKUN3_BATTERY_OK);   /* every reading is plausible */
+        *at = now;
+        why = gaokun3_battery_trend_feed(t, r, now);
+        if (why) break;
+    }
+    return why;
+}
+
+static const struct gaokun3_windows_run *windows_run(const char *name) {
+    for (unsigned i = 0; i < sizeof gaokun3_windows_runs / sizeof gaokun3_windows_runs[0]; i++)
+        if (!strcmp(gaokun3_windows_runs[i].name, name)) return &gaokun3_windows_runs[i];
+    CHECK(!"no such Windows run");
+    return NULL;
+}
+
+static void trend_tests(void) {
+    struct gaokun3_battery_trend t;
+    struct gaokun3_battery_record r;
+    uint64_t at;
+    unsigned why;
+    const uint64_t W = GAOKUN3_BATTERY_TREND_WINDOW_MS, HOUR = 3600000;
+
+    /* The Windows readings (OBSERVED). The weak USB source is the negative
+     * case: charging claimed in every sample while the charge fell. */
+    const struct gaokun3_windows_run *weak = windows_run("weak-usb-91");
+    why = replay(weak, 1, &t, &r, &at);
+    trend_report("windows weak-usb-91", &t, why, at);
+    CHECK(why == GAOKUN3_BATTERY_DRAIN && at - T0 >= 120000 && at - T0 <= 200000);
+    CHECK(t.worst_drop_mah >= GAOKUN3_BATTERY_TREND_DROP_MAH);
+    /* Without the trend this record admits on AC at any minimum: BATT-1. */
+    CHECK(r.ac && gaokun3_battery_admit(&r, 100) == GAOKUN3_BATTERY_OK);
+    for (unsigned m = GAOKUN3_BATTERY_FLOOR_PERCENT; m <= 100; m++)
+        CHECK(gaokun3_battery_admit_watched(&r, &t, m) == GAOKUN3_BATTERY_DRAIN);
+    /* Polled five times slower, near the 30 s limit (the collector's 5 s
+     * spacing drifts, so every sixth sample is just over it), it still trips
+     * in time. */
+    why = replay(weak, 5, &t, &r, &at);
+    trend_report("windows weak-usb-91 every ~25 s", &t, why, at);
+    CHECK(why == GAOKUN3_BATTERY_DRAIN && at - T0 <= 240000);
+
+    const char *quiet[] = {"held-95-a", "held-95-b", "charging-88", "battery-93"};
+    for (unsigned i = 0; i < 4; i++) {
+        const struct gaokun3_windows_run *run = windows_run(quiet[i]);
+        why = replay(run, 1, &t, &r, &at);
+        char name[64];
+        snprintf(name, sizeof name, "windows %s", quiet[i]);
+        trend_report(name, &t, why, at);
+        CHECK(why == GAOKUN3_BATTERY_OK && t.worst_drop_mah == 0);
+        CHECK(gaokun3_battery_admit_watched(&r, &t, 50) == GAOKUN3_BATTERY_OK);
+        /* Two minutes is under one window: AC alone cannot admit yet. */
+        CHECK(gaokun3_battery_admit_watched(&r, &t, 100) ==
+              (run->online ? GAOKUN3_BATTERY_UNWATCHED : GAOKUN3_BATTERY_LOW));
+    }
+
+    /* Synthetic drains, polled every 5 s like the collector. */
+    gaokun3_battery_trend_init(&t);
+    why = drift(&t, AC_PRESENT, 0, 4000, 1, 0, T0, 2 * HOUR, 5000, &at, &r);
+    trend_report("held, sagging 1 mAh/min, 2 h", &t, why, at);
+    CHECK(why == GAOKUN3_BATTERY_OK && gaokun3_battery_admit_watched(&r, &t, 100) == GAOKUN3_BATTERY_OK);
+    gaokun3_battery_trend_init(&t);
+    why = drift(&t, AC_PRESENT, CHG, 3000, 4, 0, T0, HOUR, 5000, &at, &r);
+    trend_report("charging claimed, -4 mAh/min, 1 h", &t, why, at);
+    CHECK(why == GAOKUN3_BATTERY_OK);
+    gaokun3_battery_trend_init(&t);
+    why = drift(&t, AC_PRESENT, CHG, 3000, 6, 0, T0, HOUR, 5000, &at, &r);
+    trend_report("charging claimed, -6 mAh/min", &t, why, at);
+    CHECK(why == GAOKUN3_BATTERY_DRAIN && at - T0 <= W);
+    gaokun3_battery_trend_init(&t);
+    why = drift(&t, AC_PRESENT, 0, 4000, 0, 1, T0, HOUR, 5000, &at, &r);
+    trend_report("held, 1 mAh jitter, 1 h", &t, why, at);
+    CHECK(why == GAOKUN3_BATTERY_OK && t.worst_drop_mah == 1);
+    /* Measured from the latest high: 50 mAh up, then a weak source. */
+    gaokun3_battery_trend_init(&t);
+    why = drift(&t, AC_PRESENT, CHG, 2000, -10, 0, T0, W, 5000, &at, &r);
+    CHECK(why == GAOKUN3_BATTERY_OK);
+    why = drift(&t, AC_PRESENT, CHG, 2050, 12, 0, at + 5000, W, 5000, &at, &r);
+    trend_report("charged 50 mAh, then -12 mAh/min", &t, why, at);
+    CHECK(why == GAOKUN3_BATTERY_DRAIN && t.high_mah == 2050);
+    /* Latched: nothing fed afterwards clears it. */
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 4000, at + 5000), at + 5000, &r) == GAOKUN3_BATTERY_DRAIN);
+    CHECK(gaokun3_battery_trend_feed(&t, &r, at + 10000) == GAOKUN3_BATTERY_DRAIN);
+
+    /* Unplugging ends the watch: the open discharge is the charge rule's,
+     * and AC must then be watched for a whole new window. */
+    gaokun3_battery_trend_init(&t);
+    why = drift(&t, AC_PRESENT, CHG, 2000, 4, 0, T0, W + 60000, 5000, &at, &r);
+    CHECK(why == GAOKUN3_BATTERY_OK && gaokun3_battery_admit_watched(&r, &t, 100) == GAOKUN3_BATTERY_OK);
+    CHECK(feed(&t, charge_at(BATTERY_ONLY, DIS, 1900, at + 5000), at + 5000, &r) == GAOKUN3_BATTERY_OK);
+    CHECK(!t.watching && gaokun3_battery_admit_watched(&r, &t, 100) == GAOKUN3_BATTERY_LOW);
+    why = drift(&t, AC_PRESENT, CHG, 1850, 0, 0, at + 10000, W - 5000, 5000, &at, &r);
+    CHECK(why == GAOKUN3_BATTERY_OK && gaokun3_battery_admit_watched(&r, &t, 100) == GAOKUN3_BATTERY_UNWATCHED);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 1850, at + 5000), at + 5000, &r) == GAOKUN3_BATTERY_OK);
+    CHECK(gaokun3_battery_admit_watched(&r, &t, 100) == GAOKUN3_BATTERY_OK);
+    trend_report("unplugged, then rewatched", &t, GAOKUN3_BATTERY_OK, at + 5000);
+    /* A charge above the minimum needs no watched AC. */
+    gaokun3_battery_trend_init(&t);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 4000, T0), T0, &r) == GAOKUN3_BATTERY_OK);
+    CHECK(gaokun3_battery_admit_watched(&r, &t, 80) == GAOKUN3_BATTERY_OK);
+    CHECK(gaokun3_battery_admit_watched(&r, &t, 100) == GAOKUN3_BATTERY_UNWATCHED);
+
+    /* Gaps and time. */
+    gaokun3_battery_trend_init(&t);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0), T0, &r) == GAOKUN3_BATTERY_OK);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0 + 30000), T0 + 30000, &r) == GAOKUN3_BATTERY_OK);
+    why = feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0 + 60001), T0 + 60001, &r);
+    trend_report("a 30.001 s gap", &t, why, T0 + 60001);
+    CHECK(why == GAOKUN3_BATTERY_STALE);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0 + 65001), T0 + 65001, &r) == GAOKUN3_BATTERY_STALE);
+    gaokun3_battery_trend_init(&t);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0), T0, &r) == GAOKUN3_BATTERY_OK);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0 - 1), T0 - 1, &r) == GAOKUN3_BATTERY_CONFIG);
+
+    /* A refused record trips with its own reason, and stays tripped. */
+    gaokun3_battery_trend_init(&t);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0), T0, &r) == GAOKUN3_BATTERY_OK);
+    why = feed(&t, charge_at(AC_PRESENT, CHG | CRT, 3000, T0 + 5000), T0 + 5000, &r);
+    trend_report("a critical record", &t, why, T0 + 5000);
+    CHECK(why == GAOKUN3_BATTERY_CRITICAL);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0 + 10000), T0 + 10000, &r) == GAOKUN3_BATTERY_CRITICAL);
+    CHECK(gaokun3_battery_admit_watched(&r, &t, 50) == GAOKUN3_BATTERY_CRITICAL);
+    gaokun3_battery_trend_init(&t);
+    struct gaokun3_battery_snapshot stale = charge_at(AC_PRESENT, CHG, 3000, T0);
+    CHECK(feed(&t, stale, T0 + GAOKUN3_BATTERY_MAX_AGE_MS + 1, &r) == GAOKUN3_BATTERY_STALE);
+
+    /* Interface misuse fails closed. */
+    struct gaokun3_battery_trend blank = {0};
+    CHECK(feed(&blank, charge_at(AC_PRESENT, CHG, 3000, T0), T0, &r) == GAOKUN3_BATTERY_CONFIG);
+    CHECK(gaokun3_battery_trend_feed(NULL, &r, T0) == GAOKUN3_BATTERY_CONFIG);
+    gaokun3_battery_trend_init(NULL);
+    gaokun3_battery_trend_init(&t);
+    CHECK(gaokun3_battery_trend_feed(&t, NULL, T0) == GAOKUN3_BATTERY_CONFIG && t.reason == GAOKUN3_BATTERY_CONFIG);
+    gaokun3_battery_trend_init(&t);
+    CHECK(feed(&t, charge_at(AC_PRESENT, CHG, 3000, T0), T0, &r) == GAOKUN3_BATTERY_OK);
+    struct gaokun3_battery_record forged = r;
+    forged.reason = GAOKUN3_BATTERY_RANGE;             /* plausible but with a refusal */
+    CHECK(gaokun3_battery_trend_feed(&t, &forged, T0 + 5000) == GAOKUN3_BATTERY_CONFIG);
+    gaokun3_battery_trend_init(&t);
+    forged = r; forged.abi++;
+    CHECK(gaokun3_battery_trend_feed(&t, &forged, T0) == GAOKUN3_BATTERY_CONFIG);
+    gaokun3_battery_trend_init(&t);
+    CHECK(gaokun3_battery_admit_watched(&r, NULL, 50) == GAOKUN3_BATTERY_CONFIG);
+    CHECK(gaokun3_battery_admit_watched(&r, &blank, 50) == GAOKUN3_BATTERY_CONFIG);
+    CHECK(gaokun3_battery_admit_watched(NULL, &t, 50) == GAOKUN3_BATTERY_CONFIG);
+    CHECK(gaokun3_battery_admit_watched(&r, &t, 49) == GAOKUN3_BATTERY_CONFIG);
 }
 
 int main(void) {
@@ -177,6 +390,7 @@ int main(void) {
     for (unsigned m = 0; m <= 200; m++)
         if (gaokun3_battery_admit(&r, m) != GAOKUN3_BATTERY_CONFIG) { if (first) lo = m; hi = m; first = 0; }
     printf("{\"minimum_bounds\":[%u,%u]}\n", lo, hi);
-    printf("PASS: gaokun3 battery policy, %u snapshot cases\n", cases);
+    trend_tests();
+    printf("PASS: gaokun3 battery policy, %u snapshot cases, %u trend cases\n", cases, trend_cases);
     return 0;
 }
