@@ -66,6 +66,11 @@ struct sc8280xp_thermal_io {
  * and control words, the four TRDY words, and each controller's declared
  * sensor status words. Nothing else. */
 int sc8280xp_thermal_address_allowed(uint64_t address);
+#define SC8280XP_THERMAL_WORDS 58u      /* 4 x (version, control, TRDY) + 46 sensors */
+/* The same words, in the order a poll reads them: writes min(max, 58) of them
+ * to out and returns 58. A caller can check each is mapped before the guard
+ * makes its first read. */
+unsigned sc8280xp_thermal_words(uint64_t *out, unsigned max);
 /* Ticks until the next poll is due, at most limit; 0 when tripped or unset. */
 uint64_t sc8280xp_thermal_wait(const struct sc8280xp_thermal_state *, uint64_t now,
                                uint64_t hz, uint64_t limit);

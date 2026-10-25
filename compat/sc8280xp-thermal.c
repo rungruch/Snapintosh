@@ -50,6 +50,22 @@ int sc8280xp_thermal_address_allowed(uint64_t address) {
     return 0;
 }
 
+_Static_assert(SC8280XP_THERMAL_WORDS == 3 * SC8280XP_THERMAL_BLOCKS + SC8280XP_THERMAL_SENSORS,
+               "allowlist size");
+
+unsigned sc8280xp_thermal_words(uint64_t *out, unsigned max) {
+    unsigned n = 0;
+    for (unsigned b = 0; b < SC8280XP_THERMAL_BLOCKS; b++) {
+        uint64_t words[3] = {tsens[b].srot + SROT_HW_VER, tsens[b].srot + SROT_CTRL,
+                             tsens[b].tm + TM_TRDY};
+        for (unsigned i = 0; i < 3; i++, n++)
+            if (out && n < max) out[n] = words[i];
+        for (unsigned s = 0; s < tsens[b].sensors; s++, n++)
+            if (out && n < max) out[n] = tsens[b].tm + TM_SN_STATUS + 4 * s;
+    }
+    return n;
+}
+
 static int clock_ok(uint64_t hz) { return hz >= 1000 && hz <= 1000000000; }
 
 uint64_t sc8280xp_thermal_wait(const struct sc8280xp_thermal_state *s, uint64_t now,

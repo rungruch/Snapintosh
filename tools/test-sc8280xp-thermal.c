@@ -128,6 +128,20 @@ static void check_allowlist(void) {
         allowed += (unsigned)got;
     }
     CHECK(allowed == 4 * 3 + SC8280XP_THERMAL_SENSORS);
+    /* The enumeration is the allowlist exactly: every word allowed, none
+     * repeated, as many as the scan found, and a short buffer never overrun. */
+    uint64_t words[SC8280XP_THERMAL_WORDS + 1] = {0};
+    CHECK(sc8280xp_thermal_words(words, SC8280XP_THERMAL_WORDS + 1) == SC8280XP_THERMAL_WORDS);
+    CHECK(SC8280XP_THERMAL_WORDS == allowed && words[SC8280XP_THERMAL_WORDS] == 0);
+    for (unsigned i = 0; i < SC8280XP_THERMAL_WORDS; i++) {
+        CHECK(expected_allowed(words[i]));
+        for (unsigned j = 0; j < i; j++) CHECK(words[j] != words[i]);
+    }
+    CHECK(words[0] == SROT(0) && words[1] == SROT(0) + 4 && words[2] == dt[0].tm + 0xe4 &&
+          words[3] == SENSOR(0, 0) && words[SC8280XP_THERMAL_WORDS - 1] == SENSOR(3, 4));
+    uint64_t three[3] = {0};
+    CHECK(sc8280xp_thermal_words(three, 2) == SC8280XP_THERMAL_WORDS && three[2] == 0);
+    CHECK(sc8280xp_thermal_words(NULL, 0) == SC8280XP_THERMAL_WORDS);
     CHECK(!sc8280xp_thermal_address_allowed(PSHOLD));
     for (unsigned i = 0; i < 4; i++) {
         CHECK(!sc8280xp_thermal_address_allowed(SENSOR(i, dt[i].sensors)));  /* one past the declared count */
