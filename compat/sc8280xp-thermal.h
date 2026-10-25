@@ -24,12 +24,15 @@
  * the only action. The fanless tablet's owner may choose a lower one. */
 #define SC8280XP_THERMAL_LIMIT_MC 95000
 #define SC8280XP_THERMAL_ADMIT_SAMPLES 20u
-/* The SROT version word all four controllers must report. Nothing has read it
- * on a gaokun3 yet, and the A16's value is a different revision, so it is 0:
- * not measured, and the guard refuses every poll (SC8280XP_THERMAL_UNPINNED).
- * Acceptance to change it: a recorded read-only measurement of SROT+0 on all
- * four controllers, written into docs/GAOKUN3-PHASE1-GUARDS.md. */
-#define SC8280XP_THERMAL_VERSION_PIN 0u
+/* The SROT version word all four controllers must report: tsens 3.0.0.
+ * VERIFIED as read at EL2 on all four on a MateBook E Go 2023, firmware 2.18
+ * (06/30/2023), 2026-10-23: el2qual 3's tsens stage, qualification run 10,
+ * which also ran this guard on the live sensors for 12 s without a trip
+ * (docs/GAOKUN3-PHASE1-GUARDS.md#el2-tsens-read). It differs from the A16's
+ * 0x30020000. Another firmware or board revision needs its own read first; a
+ * different word trips CONFIG at the first SROT. 0 would refuse every poll
+ * (SC8280XP_THERMAL_UNPINNED). */
+#define SC8280XP_THERMAL_VERSION_PIN 0x30000000u
 #define SC8280XP_THERMAL_REPORT_WORDS 173u
 
 /* The first eleven match enum a16_thermal_reason, so reports read the same. */

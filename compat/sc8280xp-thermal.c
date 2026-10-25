@@ -137,8 +137,10 @@ int sc8280xp_thermal_poll(struct sc8280xp_thermal_state *s, uint64_t now, uint64
         if (read_word(s, io, srot + SROT_CTRL, &v))
             return trip(s, io, SC8280XP_THERMAL_READ, s->location, now);
         s->control[b] = v;
-        /* Every sensor this policy reads must be enabled; the exact enable mask
-         * is unmeasured, so extra enabled sensors are allowed, missing ones are not. */
+        /* Every sensor this policy reads must be enabled. Run 10 read each
+         * mask equal to the declared sensors (0x3fff, 0xffff, 0x7ff, 0x1f;
+         * docs/GAOKUN3-PHASE1-GUARDS.md); the rule stays a superset check, so
+         * a firmware that enables more does not stop a run, a missing one does. */
         if (!(v & CTRL_TSENS_EN) || (v & CTRL_SW_RST) || !(v & CTRL_CODE_OR_TEMP) ||
             (((v >> CTRL_SENSOR_EN_SHIFT) & 0xffffu) & mask) != mask)
             return trip(s, io, SC8280XP_THERMAL_CONFIG, srot + SROT_CTRL, now);

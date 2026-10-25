@@ -234,7 +234,8 @@ def main():
 
     pin = define(header, 'SC8280XP_THERMAL_VERSION_PIN')
     print(f'INFO pin: production SC8280XP_THERMAL_VERSION_PIN is '
-          + ('0 (unmeasured): the guard refuses every poll' if not pin else f'{pin:#010x}'))
+          + ('0 (unmeasured): the guard refuses every poll' if not pin else
+             f'{pin:#010x} (read at EL2, run 10)'))
 
     cc = a.cc or os.environ.get('CC') or shutil.which('clang')
     if not cc:

@@ -173,13 +173,30 @@ int main(void) {
     uint64_t reads, t0;
     int r;
 
-    /* The production pin is unmeasured (0): refuse before any MMIO. */
+    /* No pin: refuse before any MMIO. */
     reset(&b, 0); b.pin = 0; CHECK(step(&b) && b.reads == 0);
     fired(&b, "unpinned", SC8280XP_THERMAL_UNPINNED, 0);
-    reset(&b, 0); b.pin = SC8280XP_THERMAL_VERSION_PIN;
-    if (!SC8280XP_THERMAL_VERSION_PIN) {
-        CHECK(admit(&b) == 1 && b.reads == 0);
-        fired(&b, "production-pin", SC8280XP_THERMAL_UNPINNED, 0);
+
+    /* Run 10's words (el2qual 3 on the gaokun3, firmware 2.18, OBSERVED from
+     * the photographed report): the production pin and the four control and
+     * TRDY words the guard read at EL2. It must admit them as they are, and
+     * refuse the same bus with the pin one off. */
+    {
+        static const uint32_t control[4] = {0x9d61fff9, 0x9d67fff9, 0x9d603ff9, 0x9d6000f9};
+        static const uint32_t trdy[4] = {8, 8, 8, 9};
+        CHECK(SC8280XP_THERMAL_VERSION_PIN == 0x30000000u);
+        reset(&b, 0); b.step = HZ / 1000; b.pin = SC8280XP_THERMAL_VERSION_PIN;
+        for (unsigned i = 0; i < 4; i++) {
+            b.version[i] = 0x30000000u;
+            b.control[i] = control[i];
+            b.trdy[i] = trdy[i];
+            CHECK(((control[i] >> 3) & 0xffffu) == (1u << dt[i].sensors) - 1);
+        }
+        CHECK(admit(&b) == 0 && s.ready && s.valid_count == 46 && !s.reason && !b.stops);
+        reset(&b, 0); b.pin = SC8280XP_THERMAL_VERSION_PIN ^ 1;
+        for (unsigned i = 0; i < 4; i++) b.version[i] = 0x30000000u;
+        CHECK(step(&b));
+        fired(&b, "run10-wrong-pin", SC8280XP_THERMAL_CONFIG, SROT(0));
     }
 
     /* Baseline: all 46 sensors valid, ready, peak 35.2 C; a poll not yet due reads nothing. */
