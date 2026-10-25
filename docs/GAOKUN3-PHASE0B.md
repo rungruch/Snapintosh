@@ -681,8 +681,8 @@ firmware's PSCI.
   turns off the whole OEM service cleanly.
 - The nested hypervisor's behaviour is not in published source, only its
   IDs. A monitor that offers no nested virtualization answers
-  `NOT_SUPPORTED`. Whether the guest asks for it during boot is UNKNOWN;
-  the QEMU smoke test shows it.
+  `NOT_SUPPORTED`. The guest makes no nested call on its way to IOKit
+  (OBSERVED, QEMU smoke, 2026-10-26); later boot is UNKNOWN.
 
 **What standard PAuth can and cannot provide** (INFERRED from the Arm
 architecture and the contract above):
@@ -804,7 +804,10 @@ architecture and the contract above):
 
 ### Phase 0C Route B QEMU smoke test (2026-10-23)
 
-**Status: FAIL (host-only smoke gate, not a Route B rejection).** The
+**Status: PASS, 2026-10-26 (host only).** The stock kernel prints its
+banner and boots into IOKit, then stops at a named platform contract
+(NVRAM). The 2026-10-23 FAIL below was a loader omission, and its panic was
+misattributed; see [the rerun](#rerun-2026-10-26-the-real-first-stop). The
 harness is [`tools/vmapple-smoke/`](../tools/vmapple-smoke/). It is project
 source, MIT licensed and contains no Apple material; the 26A428
 `kernelcache.release.vma2` and `DeviceTree.vma2macosap` it reads stay under
@@ -843,13 +846,12 @@ python3 tools/vmapple-smoke/smoke.py boot \
   kernel disables the optional OEM service as published XNU specifies.
   The saved guest `SPSR_EL2` at those calls was `0x600003c4` and then
   `0x800003c4`: all DAIF masks, including debug, were set.
-- **FAIL:** no serial message or kernel banner appears. Local control-flow
-  analysis finds the kernel calling `panic` with
+- **FAIL (superseded 2026-10-26):** no serial message or kernel banner
+  appeared. Static analysis attributed the `WFE` halt loop to the
   `ml_set_interrupts_enabled_with_debug: debug exceptions enabled in kernel
-  mode`, then entering its `WFE` halt loop. Removing `debug=0x8` and
-  disabling QEMU SVE/SME did not change it. This is an unresolved generic
-  QEMU/minimal-platform discrepancy, not evidence that the gaokun3 has the
-  same failure.
+  mode` panic, whose call site sits just before that loop. That was wrong:
+  the [rerun](#rerun-2026-10-26-the-real-first-stop) traced the boot and
+  found a different panic reaching the same loop.
 
 **What it decides.** The initial PAC interface is servable far enough for
 stock XNU to initialise its key state on a generic PAuth CPU; no Apple-only
@@ -857,7 +859,8 @@ PAC instruction or key-register write blocks that path. It does **not**
 prove a successful VirtualMac boot, process-context PAC switching, the
 collapsed-key-domain design on the gaokun3's QARMA5 implementation, or any
 platform device model. The Phase 0C QEMU check stays failed until the guest
-reaches a serial console or a more specific platform failure.
+reaches a serial console or a more specific platform failure. The rerun
+below reaches both.
 
 **The TIDCP access set, measured (B5).** The stub's first version RAZ/WIed
 every implementation-defined system-register access silently, which left open
@@ -881,28 +884,107 @@ That is the evidence for treating the stop as a QEMU or minimal-platform
 limitation rather than a missing Snapintosh register contract. It is not
 proof of where the fault lies, only that one candidate is excluded.
 
-**Next for this check:** identify why the generic QEMU model presents debug
-exceptions unmasked to XNU after the recorded PAC calls. A direct QEMU
-`vmapple` comparison is **not available for this 26A428 kernel**: installed
-QEMU 11.1.2 has no `vmapple` machine, and upstream's current VMApple
-instructions require an already-installed Virtualization.framework macOS
-12.x guest and state that newer guests are unsupported. Building it would
-not be a control for macOS 27. Do not paper over the panic by returning
-fabricated success or patching the stock kernel.
+#### Rerun, 2026-10-26: the real first stop
+
+**How it was found.** A QEMU CPU-state log of every executed block (`-d
+cpu,nochain`, with one hot loop filtered out) shows `PSTATE.D` set in every
+EL1 block from entry to the halt. `-d int` shows no EL1 exception after the
+last PAC call. So the debug-mask check never fired. The block that enters the
+halt loop is the kernel's early `panic`, and its arguments in the log name
+the real message (OBSERVED, local trace):
+
+```
+Expected 256 seed bytes from bootloader, but got 0.   (prng_random.c)
+```
+
+**Why.** A non-SPTM arm64 XNU takes 4 × SHA-512 = 256 bytes of boot entropy
+from `/chosen/random-seed` (published XNU: `osfmk/prng/prng_random.c`,
+`pexpert/gen/pe_gen.c`). If every byte is zero, it counts as no seed. The
+VMAPPLE template carries that property as 256 zero bytes for the VM
+firmware to fill, and the smoke loader never filled it. So this was a loader
+omission, not a QEMU or CPU discrepancy, and not an overturn condition.
+
+**Fix, in `tools/vmapple-smoke/kcload.py`:**
+
+- The loader fills `/chosen/random-seed` from the host's `os.urandom`. It
+  refuses a tree without that property, one shorter than 256 bytes, and an
+  all-zero or short fill. `tools/test-vmapple-smoke.py` covers all four
+  refusals on its synthetic tree.
+- It adds `-noprogress` to the boot arguments. With the seed in place, the
+  kernel reaches `PE_init_iokit`. There, with no framebuffer in the smoke
+  `boot_args`, the boot-progress centring loop (`pexpert/arm/pe_init.c`)
+  shrinks its offset until the image fits half of a zero-sized display,
+  and so never ends on a release kernel. A real loader passes the
+  simple-framebuffer instead (Phase 3).
+
+**Result (OBSERVED, host only):**
+
+- The Darwin 27.0.0 `RELEASE_ARM64_VMAPPLE` banner prints on the PL011.
+- VM bootstrap and the zone, logging and IPC setup all complete.
+- The kernel issues `PAC_NOP` three more times and nothing else: no nested
+  hypervisor call and no other hypercall reaches the stub.
+- It still makes no implementation-defined register access (B5 log empty).
+- It reaches IOKit and stops at:
+
+  ```
+  panic: NVRAM size is 0 bytes, possibly due to bad config with iBoot + xnu mismatch  (IONVRAM.cpp)
+  ```
+
+  `IODTNVRAM::initImageFormat` reads `/chosen/nvram-bank-size`. The
+  template has it, with `nvram-bank-count` and `nvram-current-bank`, all
+  zero, and has no `nvram-proxy-data`. Like the seed, the VM firmware
+  supplies these.
+- Panicking then faults inside the panic path (a data abort with FAR
+  `0xb1`) and nests. The kernel reported `gPanicBase` uninitialised
+  earlier, so this is INFERRED to be the missing panic region and secondary
+  to the NVRAM stop.
+
+**What it decides.** This meets the check's gate: a serial console, and a
+specific platform failure.
+
+- **Overturn condition 1:** nothing Apple-only appeared up to IOKit. No
+  implementation-defined register access and no unexpected EL2 exception.
+- **Overturn condition 2:** the PAC calls are served on standard PAuth this
+  far.
+- **Overturn condition 3** is not answered. NVRAM is the first of the VM
+  firmware's `/chosen` contracts the monitor must model. The others, still
+  unmet, are a framebuffer description, the panic region and
+  `AppleVPBootPolicy`.
+
+None of this proves a full boot, process-context PAC switching, or anything
+about the gaokun3's own QARMA5 behaviour.
+
+```sh
+python3 tools/test-vmapple-smoke.py
+python3 tools/vmapple-smoke/smoke.py selftest
+python3 tools/vmapple-smoke/smoke.py boot --trace --timeout 180 \
+  --kernelcache downloads/extracted/vma2macosap/kernelcache.release.vma2
+```
+
+The boot run marks all five milestones `ok` and still ends `RESULT: NOT RUN
+as a pass -- the guest panicked`. Its rule refuses any panic, and this one
+is the NVRAM stop. The check passes against the gate above, a console and a
+specific platform failure, not against that line, which is left strict.
+
+**Next for this check:** model the VM firmware's NVRAM contract
+(`nvram-bank-size`, `nvram-bank-count`, `nvram-proxy-data`, with an empty
+image in a format XNU accepts), then rerun to find the following stop. Do
+not paper over a stop by returning fabricated success or patching the
+stock kernel.
 
 ### Still open
 
 - B3's cross-check: the as-booted tree from `ioreg` inside a macOS virtual
   machine, which needs one.
 - B8: whether `OSKext` and `AppleVPBootPolicy` accept a Snapintosh AuxKC.
-  The Phase 0C QEMU smoke reaches the first PAC calls but fails before
-  serial on the generic QEMU/minimal-platform debug-mask discrepancy.
+  The Phase 0C QEMU smoke now boots to IOKit and stops at the NVRAM
+  contract, before any kext loads, so it does not answer B8 yet.
   QEMU's `vmapple` model is not a 26A428 control: QEMU 11.1.2 lacks it and
   upstream supports only macOS 12.x guests for that model.
 - B5: what the 11 implementation-defined registers the monitor does not
   know are, and what each needs. The QEMU smoke test now logs every
-  TIDCP-trapped access, but the stock kernel takes none before it stops, so
-  it cannot characterise them yet.
+  TIDCP-trapped access, but the stock kernel takes none on its way to IOKit
+  (2026-10-26), so it cannot characterise them yet.
 - B6: every site is named. Open: the nested hypervisor's semantics (not
   in published source), and whether the owner accepts collapsed PAC key
   domains on the gaokun3.
