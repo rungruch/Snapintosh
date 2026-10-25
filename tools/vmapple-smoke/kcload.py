@@ -13,7 +13,8 @@ stub drops into:
     physBase, and KVA = PA - physBase + virtBase.
   - the template device tree, completed the way the VM boot firmware would:
     placeholders resolved, /chosen/dram-base and dram-size added (arm_init
-    panics without them), the counter rate filled in, and the arm-io ranges,
+    panics without them), /chosen/random-seed filled with entropy, the
+    counter rate filled in, and the arm-io ranges,
     PL011 and GICv3 register windows moved from the VirtualMac platform map
     onto QEMU virt's (UART at 0x09000000, GICD at 0x08000000, GICR at
     0x080A0000). The rest of the device map is left as the template has it;
@@ -29,6 +30,7 @@ entry contract are used; this is an independent implementation for the
 gaokun3 port's Phase 0C smoke test, not a copy of any other loader.
 """
 import json
+import os
 import pathlib
 import struct
 import sys
@@ -61,11 +63,22 @@ QEMU_GICR_SIZE = 0x100000               # 8 PEs x 0x20000
 TIMEBASE_HZ = 1_000_000_000
 
 # `-v` keeps ordinary boot messages visible; serial=3 selects the PL011 output
-# console. `debug=0x8` is not needed for this check and was removed while
-# diagnosing the host-only debug-mask panic; its removal did not change that
-# stop, so the harness does not attribute the panic to a boot argument.
-CMDLINE = '-v serial=3'
+# console. `debug=0x8` is not needed for this check.
+# `-noprogress`: the smoke boot_args describe no framebuffer, and with a zero
+# display size PE_init_iokit's progress-image centring loop
+# (pexpert/arm/pe_init.c, "*delta -= 50 * scale" until the image fits half
+# the display) never ends on a release kernel. The real loader passes the
+# simple-framebuffer instead.
+CMDLINE = '-v serial=3 -noprogress'
 BOOT_ARGS_SIZE = 0x480
+
+# XNU's early PRNG asks the loader for 4 * SHA-512 = 256 bytes on arm64
+# (osfmk/prng/prng_random.c, BOOTLOADER_ENTROPY_REQUEST_SIZE) and reads them
+# from /chosen/random-seed on non-SPTM kernels (pexpert/gen/pe_gen.c). The
+# VMAPPLE template carries that property as 256 zero bytes for the VM
+# firmware to fill; XNU counts an all-zero seed as no seed and panics
+# "Expected 256 seed bytes from bootloader, but got 0".
+RANDOM_SEED_BYTES = 256
 
 
 def _segments(kc):
@@ -89,12 +102,22 @@ def _segments(kc):
     return data, segs, entry
 
 
-def _complete_dt_tree(dt, out=None):
+def _complete_dt_tree(dt, out=None, entropy=os.urandom):
     """Complete an already-parsed VMAPPLE ADT for QEMU. Kept separate from the
     file wrapper so tools/test-vmapple-smoke.py can exercise it with a wholly
     synthetic tree, never Apple material. When `out` is provided, save the
-    generated tree there for the host-only smoke run."""
+    generated tree there for the host-only smoke run. `entropy(n)` supplies
+    the boot seed; the seeded tree is written to `out` only, never committed."""
     resolved = dt.resolve_placeholders()
+
+    seed = dt.get('/device-tree/chosen', 'random-seed')
+    if seed is None or len(seed) < RANDOM_SEED_BYTES:
+        raise SystemExit(f'device tree: /chosen/random-seed has '
+                         f'{"no" if seed is None else len(seed)} bytes, XNU needs {RANDOM_SEED_BYTES}')
+    fill = entropy(len(seed))
+    if len(fill) != len(seed) or not any(fill):
+        raise SystemExit('device tree: the entropy source returned no usable random-seed')
+    dt.set('/device-tree/chosen', 'random-seed', fill)
 
     dt.add('/device-tree/chosen', 'dram-base', struct.pack('<Q', GUEST_RAM_BASE))
     dt.add('/device-tree/chosen', 'dram-size', struct.pack('<Q', GUEST_MEM_SIZE))

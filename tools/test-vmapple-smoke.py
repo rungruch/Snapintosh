@@ -37,23 +37,37 @@ def node(name, properties=(), children=()):
     return struct.pack('<II', len(props), len(children)) + b''.join(props) + b''.join(children)
 
 
-def synthetic_tree():
+def synthetic_tree(seed=bytes(256)):
     cpu0 = node('cpu0', [prop('timebase-frequency', struct.pack('<Q', 0))])
     cpus = node('cpus', [], [cpu0])
     uart = node('uart0', [prop('reg', struct.pack('<QQ', 0, 0x1000))])
     gic = node('gic', [prop('reg', bytes(48))])
     armio = node('arm-io', [prop('ranges', bytes(24))], [uart, gic])
-    chosen = node('chosen')
+    chosen = node('chosen', [] if seed is None else [prop('random-seed', seed)])
     return node('device-tree', [
         prop('clock-frequency', struct.pack('<I', 0)),
         prop('machine-identity', b'recipe', placeholder=True),
     ], [chosen, armio, cpus])
 
 
+def refuses(tree, entropy=lambda n: b'\xa5' * n):
+    try:
+        kcload._complete_dt_tree(appledt.DeviceTree(tree), entropy=entropy)
+    except SystemExit:
+        return True
+    return False
+
+
 def test_dt_completion():
     tree = appledt.DeviceTree(synthetic_tree())
-    blob, resolved = kcload._complete_dt_tree(tree)
+    blob, resolved = kcload._complete_dt_tree(tree, entropy=lambda n: bytes(range(1, 256)) + b'\x01' * (n - 255))
     out = appledt.DeviceTree(blob)
+    check(out.get('/device-tree/chosen', 'random-seed') == bytes(range(1, 256)) + b'\x01',
+          'random-seed placeholder filled with entropy')
+    check(refuses(synthetic_tree(seed=None)), 'a tree without /chosen/random-seed is refused')
+    check(refuses(synthetic_tree(seed=bytes(64))), 'a random-seed shorter than XNU requests is refused')
+    check(refuses(synthetic_tree(), entropy=lambda n: bytes(n)), 'an all-zero seed is refused')
+    check(refuses(synthetic_tree(), entropy=lambda n: b'\x01' * (n - 1)), 'a short entropy fill is refused')
     check(resolved == 1, 'one placeholder was resolved')
     check(not out.nodes['/device-tree']['machine-identity'].placeholder, 'placeholder flag cleared')
     check(out.get('/device-tree/chosen', 'dram-base') == struct.pack('<Q', kcload.GUEST_RAM_BASE),
