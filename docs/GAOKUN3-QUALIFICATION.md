@@ -327,6 +327,7 @@ then need a full GICv3 model.
 | Hang with `PAC: SIGNING AT EL2` last | EL3 traps PAC instructions at EL2 | a result: record it |
 | Hang with `CPU_ON SLOT n` last | that core did not return from PSCI | record; run 4 would hang the same way |
 | A red `V<n> ESR ...` line under a CPU | an unexpected exception on that CPU | photograph closely; stop |
+| One half of the panel corrupt after a Linux boot, and still on the Huawei logo after a power-off | display state held while the tablet is "off", after Linux's display driver took the panel over ([Incidents](#incidents)) | leave it powered off for longer; if it does not clear, or comes back without Linux, stop and treat it as hardware |
 
 Recovery is the same in every case: hold the power button until the machine
 is off, remove the stick, power on. Windows should start as before; if
@@ -350,6 +351,7 @@ between.
 | 7 | 2026-10-23 | 2, entry 4 (no options) | `df1644c4` (`a83d95b`) | PAuth signs on all 8 cores; 16K INCONCLUSIVE (boot CPU D `0x80D`) |
 | 8 | 2026-10-23 | 2, entry 3 (`nopac`) | `15dfd800`, with the `tgran16.c` table cleaning | 16K WALKS on all 8 cores: controls `A OK  B FAULT  C FAULT`, boot CPU D `PAR 0x4001B00` (PA `0x4001000`, the address only a 16K walk reaches) |
 | 9 | 2026-10-23 | 3, entry 3 (`nopac`) | `2738da9b` (`c2c7122`, el2qual 2) | PASS: firmware 2.18; `CNTFRQ_EL0` 19200000 on all 8 cores; GIC system registers and virtual CPU interface usable at EL2 on all 8 (4 list registers, `LR0 RW`); no hang (stage 3 results below) |
+| 10 | 2026-10-23 | thermal, entry 5 (`nopac nosmp thermal`) | `5c28c4ee` (el2qual 3, built before its commit; it rebuilds identically from the tree) | PASS: the Phase 1 thermal guard ran on the live tsens at EL2 for 12 s, nothing tripped; version `0x30000000` on all four controllers, 46/46 sensors valid, peak 39.4 °C; no fault, no SError ([GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md#run-10-2026-10-23)) |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
@@ -458,6 +460,65 @@ Phase 0A's CPU questions and the Phase 0C pre-Phase 1 check 1 are
 answered, for firmware 2.18. Phase 0B, the offline kernelcache study, is
 in [GAOKUN3-PHASE0B.md](GAOKUN3-PHASE0B.md), and the route decision it
 feeds in [GAOKUN3-PHASE0C.md](GAOKUN3-PHASE0C.md).
+
+## Incidents
+
+### 2026-10-23: half the panel corrupt after a Linux survey boot
+
+This was not an el2qual run. The owner booted a USB stick with
+gaokun_build's Ubuntu 26.04 image (kernel `7.1.0-rc3-gaokun3+`) through
+its standard EL1 entry:
+- slbounce and the image's EL2 entry were moved off the stick;
+- headless boot entries ran the read-only Phase 1 survey
+  (`tools/gaokun3-linux-survey.sh`, not committed when this was written)
+  and powered off.
+
+What the owner saw (OBSERVED, the owner's report; no photograph recorded):
+- the right half of the panel (in portrait) corrupt after the Linux boot;
+- still corrupt on the Huawei firmware logo and in Windows after a full
+  power-off (power button held about 15 s, stick removed);
+- whole again after the tablet stayed off for a longer period (how long
+  was not recorded).
+
+What was checked, on the host only:
+- **The survey only reads.** It reads sysfs, debugfs, procfs and the
+  kernel log. It never opens `/dev/mem` or `/dev/i2c-*`, sends no EC
+  commands, and writes only its own output file.
+- **Nothing on the stick is known to write lasting panel or firmware
+  state.** gaokun-android's `himax-spi` touch patches contain no flash
+  writes. gaokun_build's touchscreen tuner writes only the touch driver's
+  sysfs parameters, and is a desktop app the headless entries never start.
+  gaokun_build's image scripts set up no firmware updater.
+- **The symptom matches a known gaokun3 Linux display issue.**
+  gaokun_build's `docs/display-debug.md` records one half of the panel
+  corrupting about 1–2 s into boot, when the `msm` display driver takes
+  over the bonded pair of DSI links that each drive half the panel (DSI1
+  uses DSI0's PLL). gaokun-android once judged a similar black screen a
+  panel or cable fault, then traced it to a kernel regression in the same
+  DSI code.
+
+What it means:
+- **Trigger (INFERRED):** most likely Linux's `msm` driver taking over the
+  panel.
+- **Persistence (INFERRED):** the corruption held through a normal
+  power-off but cleared after a longer one. That points to state kept
+  while the tablet is "off", by the EC or a panel supply it keeps up,
+  rather than permanent damage. Neither is measured, and a marginal
+  hardware fault is not excluded (UNKNOWN).
+- **el2qual is not implicated:** it never programs the display. It draws
+  on the framebuffer the firmware already set up, and stages 1 to 3 never
+  showed this.
+
+Until the cause is known:
+- Boot Linux on the gaokun3 only with `module_blacklist=msm` appended to
+  the boot entry's options. This is gaokun_build's own diagnostic step: the
+  firmware's framebuffer stays, and the `msm` driver never takes the panel
+  over. A headless survey needs no graphics. That the battery, EC and
+  tsens drivers work without `msm` is INFERRED, not tested.
+- If one half corrupts again without Linux having run since the last full
+  power-off, treat it as hardware: stop all runs and record it here.
+- After any recurrence, photograph the firmware logo and record how long
+  the tablet was off before it recovered.
 
 ## Recording results
 
