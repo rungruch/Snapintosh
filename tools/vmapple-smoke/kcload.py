@@ -14,8 +14,8 @@ stub drops into:
   - the template device tree, completed the way the VM boot firmware would:
     placeholders resolved, /chosen/dram-base and dram-size added (arm_init
     panics without them), /chosen/random-seed filled with entropy, an
-    empty NVRAM bank handed over as /chosen/nvram-proxy-data, the counter
-    rate filled in, and the arm-io ranges,
+    empty NVRAM bank handed over as /chosen/nvram-proxy-data, /cpus trimmed
+    to the vCPUs QEMU runs, the counter rate filled in, and the arm-io ranges,
     PL011 and GICv3 register windows moved from the VirtualMac platform map
     onto QEMU virt's (UART at 0x09000000, GICD at 0x08000000, GICR at
     0x080A0000). The rest of the device map is left as the template has it;
@@ -55,7 +55,16 @@ ARMIO_PARENT_BASE = 0x08000000
 QEMU_UART_OFF = 0x01000000              # PL011 at 0x09000000
 QEMU_GICD_OFF = 0x00000000              # GICD at 0x08000000
 QEMU_GICR_OFF = 0x000A0000              # GICR at 0x080A0000
-QEMU_GICR_SIZE = 0x100000               # 8 PEs x 0x20000
+
+# The vCPUs QEMU runs (smoke.py passes this as -smp). The VMAPPLE template
+# lists 32 CPU nodes, cpu0 "running" and the rest "waiting", with reg and
+# cpu-id 0..31; the VM firmware evidently keeps only the VM's own. Left at
+# 32, AppleARMGICv3 panics "CPU count (32) is larger than redistributor
+# count (1)": QEMU's GICv3 has one redistributor frame per vCPU, the last
+# one marked by GICR_TYPER.Last.
+GUEST_CPUS = 1
+GICR_FRAME_SIZE = 0x20000               # RD_base + SGI_base, 64 KiB each (GICv3)
+QEMU_GICR_SIZE = GUEST_CPUS * GICR_FRAME_SIZE
 
 # The counter rate of QEMU TCG's -cpu max on the host this harness was
 # validated on. The stub prints CNTFRQ_EL0 before entering the guest and the
@@ -157,6 +166,35 @@ def _segments(kc):
     return data, segs, entry
 
 
+def _trim_cpus(dt, count):
+    """Keep only the CPU nodes whose reg (the MPIDR affinity the template
+    numbers 0..N-1) is below count, the way the VM firmware describes the
+    VM it actually started. The boot CPU must be cpu reg 0 and "running";
+    a template with fewer CPUs than QEMU runs is refused rather than
+    padded, because a node for each extra CPU would have to be invented."""
+    cpus = '/device-tree/cpus'
+    kept, dropped = [], []
+    for path in dt.children.get(cpus, []):
+        reg = dt.get(path, 'reg')
+        if reg is None or len(reg) != 4:
+            raise SystemExit(f'device tree: {path} has no 4-byte reg')
+        (kept if struct.unpack('<I', reg)[0] < count else dropped).append(path)
+    regs = sorted(struct.unpack('<I', dt.get(p, 'reg'))[0] for p in kept)
+    if regs != list(range(count)):
+        raise SystemExit(f'device tree: CPU regs {regs} do not cover the {count} vCPUs QEMU runs')
+    boot = next(p for p in kept if dt.get(p, 'reg') == bytes(4))
+    if (dt.get(boot, 'state') or b'').rstrip(b'\0') != b'running':
+        raise SystemExit(f'device tree: boot CPU {boot} is not "running"')
+    for path in dropped:
+        doomed = [path]
+        while doomed:
+            node = doomed.pop()
+            doomed += dt.children.pop(node, [])
+            del dt.nodes[node]
+    dt.children[cpus] = kept
+    return len(dropped)
+
+
 def _complete_dt_tree(dt, out=None, entropy=os.urandom):
     """Complete an already-parsed VMAPPLE ADT for QEMU. Kept separate from the
     file wrapper so tools/test-vmapple-smoke.py can exercise it with a wholly
@@ -181,6 +219,7 @@ def _complete_dt_tree(dt, out=None, entropy=os.urandom):
 
     dt.add('/device-tree/chosen', 'dram-base', struct.pack('<Q', GUEST_RAM_BASE))
     dt.add('/device-tree/chosen', 'dram-size', struct.pack('<Q', GUEST_MEM_SIZE))
+    _trim_cpus(dt, GUEST_CPUS)
     dt.set_u32('/device-tree', 'clock-frequency', TIMEBASE_HZ)
     changed = dt.set_all('timebase-frequency', struct.pack('<Q', TIMEBASE_HZ), under='/device-tree/cpus')
     if not changed:

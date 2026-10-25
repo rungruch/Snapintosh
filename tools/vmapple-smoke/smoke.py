@@ -140,13 +140,14 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, trace, 
     """Boot the stub at EL2 with one payload loaded at payload_pa. Returns
     (serial_text, exit_code, timed_out, monitor_text)."""
     import time
+    import kcload                       # the vCPU count the device tree describes
     params = out / 'params.bin'
     params.write_bytes(params_blob(entry_pa, x0, trace))
     mon = out / 'qemu-monitor.sock'
     mon.unlink(missing_ok=True)
     cmd = [
         qemu, '-M', 'virt,virtualization=on,gic-version=3', '-cpu', cpu,
-        '-m', '576M', '-smp', '1', '-display', 'none', '-serial', 'stdio', '-no-reboot',
+        '-m', '576M', '-smp', str(kcload.GUEST_CPUS), '-display', 'none', '-serial', 'stdio', '-no-reboot',
         '-semihosting-config', 'enable=on,target=native',
         '-monitor', f'unix:{mon},server,nowait',
         '-device', f'loader,file={stub_bin},addr={STUB_PA:#x},force-raw=on',

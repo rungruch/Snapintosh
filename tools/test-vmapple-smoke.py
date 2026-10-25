@@ -37,9 +37,17 @@ def node(name, properties=(), children=()):
     return struct.pack('<II', len(props), len(children)) + b''.join(props) + b''.join(children)
 
 
-def synthetic_tree(seed=bytes(256)):
-    cpu0 = node('cpu0', [prop('timebase-frequency', struct.pack('<Q', 0))])
-    cpus = node('cpus', [], [cpu0])
+def cpu(n, state=None, reg=None, children=()):
+    return node(f'cpu{n}', [prop('reg', struct.pack('<I', n if reg is None else reg)),
+                            prop('state', (state or ('running' if n == 0 else 'waiting')).encode() + b'\0'),
+                            prop('timebase-frequency', struct.pack('<Q', 0))], children)
+
+
+def synthetic_tree(seed=bytes(256), cpus=None):
+    # Like the template: several CPUs, cpu0 running, one with a child node.
+    if cpus is None:
+        cpus = [cpu(0), cpu(1, children=[node('cache')]), cpu(2), cpu(3)]
+    cpus = node('cpus', [], cpus)
     uart = node('uart0', [prop('reg', struct.pack('<QQ', 0, 0x1000))])
     gic = node('gic', [prop('reg', bytes(48))])
     armio = node('arm-io', [prop('ranges', bytes(24))], [uart, gic])
@@ -70,6 +78,18 @@ def test_dt_completion():
     check(out.get('/device-tree/chosen', 'nvram-current-bank') == struct.pack('<I', 0), 'bank 0 current')
     check(out.get('/device-tree/chosen', 'nvram-proxy-data') == kcload.nvram_image(),
           'nvram-proxy-data is the bank, exactly nvram-bank-size long')
+    kept = out.children['/device-tree/cpus']
+    check(len(kept) == kcload.GUEST_CPUS, f'/cpus trimmed to {kcload.GUEST_CPUS}: {kept}')
+    check(all(struct.unpack('<I', out.get(c, 'reg'))[0] < kcload.GUEST_CPUS for c in kept),
+          'the kept CPUs are the low regs')
+    check(not [n for n in tree.nodes if n.startswith('/device-tree/cpus/cpu1')],
+          'a dropped CPU and its children leave the tree, not just its serialization')
+    check(kcload.QEMU_GICR_SIZE == kcload.GUEST_CPUS * 0x20000, 'one GICv3 redistributor frame per vCPU')
+    check(refuses(synthetic_tree(cpus=[])), 'a tree with no CPUs is refused')
+    check(refuses(synthetic_tree(cpus=[cpu(1, reg=1)])), 'a tree without CPU reg 0 is refused')
+    check(refuses(synthetic_tree(cpus=[cpu(0, state='waiting'), cpu(1)])),
+          'a boot CPU that is not running is refused')
+    check(refuses(synthetic_tree(cpus=[cpu(0), cpu(5, reg=0)])), 'two CPUs with reg 0 are refused')
     check(refuses(synthetic_tree(seed=None)), 'a tree without /chosen/random-seed is refused')
     check(refuses(synthetic_tree(seed=bytes(64))), 'a random-seed shorter than XNU requests is refused')
     check(refuses(synthetic_tree(), entropy=lambda n: bytes(n)), 'an all-zero seed is refused')
