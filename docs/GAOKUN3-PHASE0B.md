@@ -681,8 +681,8 @@ firmware's PSCI.
   turns off the whole OEM service cleanly.
 - The nested hypervisor's behaviour is not in published source, only its
   IDs. A monitor that offers no nested virtualization answers
-  `NOT_SUPPORTED`. The guest makes no nested call on its way to IOKit
-  (OBSERVED, QEMU smoke, 2026-10-26); later boot is UNKNOWN.
+  `NOT_SUPPORTED`. The guest makes no nested call on its way into IOKit
+  driver matching (OBSERVED, QEMU smoke, 2026-10-26); later boot is UNKNOWN.
 
 **What standard PAuth can and cannot provide** (INFERRED from the Arm
 architecture and the contract above):
@@ -966,25 +966,91 @@ as a pass -- the guest panicked`. Its rule refuses any panic, and this one
 is the NVRAM stop. The check passes against the gate above, a console and a
 specific platform failure, not against that line, which is left strict.
 
-**Next for this check:** model the VM firmware's NVRAM contract
-(`nvram-bank-size`, `nvram-bank-count`, `nvram-proxy-data`, with an empty
-image in a format XNU accepts), then rerun to find the following stop. Do
-not paper over a stop by returning fabricated success or patching the
-stock kernel.
+#### NVRAM modelled, 2026-10-26: the next stop is the CPU count
+
+**What the loader now supplies.** `IODTNVRAM` takes the firmware's NVRAM
+bank from `/chosen` (published XNU: `iokit/Kernel/IONVRAM.cpp` and
+`IONVRAMCHRPHandler.cpp`). The loader now puts there:
+
+- `nvram-bank-size` 0x10000, `nvram-bank-count` 1, `nvram-current-bank` 0;
+- `nvram-proxy-data`: an empty version-1 Apple CHRP bank of exactly that
+  size. That is the 32-byte `nvram` header with a matching checksum and
+  Adler-32, then empty `system` (0x3000) and `common` partitions.
+
+A valid image is required, not optional. Without one, the CHRP handler
+keeps a null image and still reads a default 0x800-byte common partition
+through it. It also never checks the proxy data's length.
+
+The bank size, the partition split and the signature bytes are the smoke
+loader's choices. The kernel checks none of them beyond those bounds, and
+what Apple's VM firmware passes is UNMEASURED.
+
+`tools/test-vmapple-smoke.py` checks the bank against an independent model
+of the handler's acceptance rules. The model refuses copies with a changed
+byte. A wrong Adler-32 range, a wrong header name and a checksum without
+its carry fold each make the test fail.
+
+The tree grew past the 64 KiB the old layout left before `boot_args`, which
+would have silently overwritten its end. So `boot_args` moved to
+`0x4A040000`, and the loader now refuses a tree that does not fit.
+
+**Result (OBSERVED, host only):**
+
+- NVRAM initialises: `lockdown mode in nvram is off`.
+- The kernel's security policies load: AppleImage4, AMFI ("Booted in a
+  VM", model `VirtualMac2,1`), Sandbox, Quarantine, EndpointSecurity.
+- CTRR is skipped ("PV CTRR unavailable").
+- IOKit matching starts kernel-collection drivers. `AppleS8000AES` starts
+  on the template's AES registers.
+- There are still no hypercalls besides the PAC set (one
+  `SET_INITIAL_STATE`, one `GET_DEFAULT_KEYS`, four `PAC_NOP`), no
+  implementation-defined register access and no unexpected EL2 exception.
+- Non-fatal on the way:
+  - AppleImage4 cannot read nonce slots (`failed to read nonce slot data:
+    2`);
+  - an AppleVirtualPlatform assertion that the host interface is not a
+    `SimpleVirtio` device, which is expected, since QEMU's virt board has
+    none at the template's addresses.
+- The stop:
+
+  ```
+  panic: "CPU count (32) is larger than redistributor count (1)."  (AppleARMGICv3.cpp, com.apple.driver.AppleARMGIC)
+  ```
+
+  The VMAPPLE template lists 32 CPU nodes, all `running`. The smoke runs
+  one vCPU, whose single GICv3 redistributor is the last. Apple's VM
+  firmware evidently trims `/cpus` to the VM's CPU count (INFERRED). The
+  monitor must do the same, as the
+  [Phase 0C consequences](GAOKUN3-PHASE0C.md#consequences-if-route-b-is-accepted)
+  already planned ("one running CPU per boot").
+
+**What it decides.**
+
+- Overturn conditions 1 and 2 still hold, now through the security policy
+  setup and into kernel-collection drivers.
+- Condition 3's list grows by one more firmware contract, the CPU nodes.
+  Every stop so far has been an unmodelled firmware duty, not Apple-only
+  CPU behaviour.
+
+**Next for this check:** trim `/cpus` to the vCPUs QEMU runs, and keep
+the GIC redistributor range consistent with them. Then rerun to find the
+following stop. Do not paper over a stop by returning fabricated success
+or patching the stock kernel.
 
 ### Still open
 
 - B3's cross-check: the as-booted tree from `ioreg` inside a macOS virtual
   machine, which needs one.
 - B8: whether `OSKext` and `AppleVPBootPolicy` accept a Snapintosh AuxKC.
-  The Phase 0C QEMU smoke now boots to IOKit and stops at the NVRAM
-  contract, before any kext loads, so it does not answer B8 yet.
+  The Phase 0C QEMU smoke now starts kernel-collection drivers and stops
+  at the GIC's CPU count, before any AuxKC is involved, so it does not
+  answer B8 yet.
   QEMU's `vmapple` model is not a 26A428 control: QEMU 11.1.2 lacks it and
   upstream supports only macOS 12.x guests for that model.
 - B5: what the 11 implementation-defined registers the monitor does not
   know are, and what each needs. The QEMU smoke test now logs every
-  TIDCP-trapped access, but the stock kernel takes none on its way to IOKit
-  (2026-10-26), so it cannot characterise them yet.
+  TIDCP-trapped access, but the stock kernel takes none on its way into
+  IOKit driver matching (2026-10-26), so it cannot characterise them yet.
 - B6: every site is named. Open: the nested hypervisor's semantics (not
   in published source), and whether the owner accepts collapsed PAC key
   domains on the gaokun3.
