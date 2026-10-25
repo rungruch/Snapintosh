@@ -681,8 +681,8 @@ firmware's PSCI.
   turns off the whole OEM service cleanly.
 - The nested hypervisor's behaviour is not in published source, only its
   IDs. A monitor that offers no nested virtualization answers
-  `NOT_SUPPORTED`. The guest makes no nested call on its way into IOKit
-  driver matching (OBSERVED, QEMU smoke, 2026-10-26); later boot is UNKNOWN.
+  `NOT_SUPPORTED`. The guest makes no nested call on its way to the
+  root-mount wait (OBSERVED, QEMU smoke, 2026-10-26); later boot is UNKNOWN.
 
 **What standard PAuth can and cannot provide** (INFERRED from the Arm
 architecture and the contract above):
@@ -1017,7 +1017,8 @@ would have silently overwritten its end. So `boot_args` moved to
   panic: "CPU count (32) is larger than redistributor count (1)."  (AppleARMGICv3.cpp, com.apple.driver.AppleARMGIC)
   ```
 
-  The VMAPPLE template lists 32 CPU nodes, all `running`. The smoke runs
+  The VMAPPLE template lists 32 CPU nodes, `cpu0` `running` and the rest
+  `waiting`. The smoke runs
   one vCPU, whose single GICv3 redistributor is the last. Apple's VM
   firmware evidently trims `/cpus` to the VM's CPU count (INFERRED). The
   monitor must do the same, as the
@@ -1032,25 +1033,85 @@ would have silently overwritten its end. So `boot_args` moved to
   Every stop so far has been an unmodelled firmware duty, not Apple-only
   CPU behaviour.
 
-**Next for this check:** trim `/cpus` to the vCPUs QEMU runs, and keep
-the GIC redistributor range consistent with them. Then rerun to find the
-following stop. Do not paper over a stop by returning fabricated success
-or patching the stock kernel.
+#### CPUs trimmed, 2026-10-26: the kernel waits for a root disk
+
+**What the loader now does.** `GUEST_CPUS` (1) drives both QEMU's `-smp`
+and the device tree.
+
+- The loader keeps only the CPU nodes whose `reg` is below that count,
+  removing the dropped nodes with their children.
+- It sizes the GIC's redistributor range to one 128 KiB GICv3 frame per
+  vCPU.
+- It refuses a tree that would need a CPU node invented: no CPU with
+  `reg` 0, a boot CPU that is not `running`, a duplicated `reg`, or fewer
+  CPUs than QEMU runs.
+
+`tools/test-vmapple-smoke.py` covers the trim and the refusals. Skipping the
+trim, or leaving a dropped CPU's children behind, makes it fail.
+
+**Result (OBSERVED, host only): no panic.**
+
+- `AppleARMGIC` starts with the one CPU.
+- `AppleCredentialManager` initialises. AppleARMBootPerf and
+  AppleARMSFRManifest log missing firmware regions and properties, and
+  carry on.
+- PCI configuration runs and finds 1 bridge and 0 devices. QEMU was given
+  no PCI devices.
+- The kernel's networking and file system modules load.
+- Root mounting then waits, and the CPU idles in `WFI`:
+
+  ```
+  Waiting on <dict ...><key>IOProviderClass</key><string>IOMedia</string><key>Content</key><string>Apple_HFS</string></dict>
+  ```
+
+  The run was stopped at its 300 s limit.
+- The harness reports `RESULT: PASS`: all five milestones and no panic.
+- **Hypercalls:** the PAC set, and once `PSCI_VERSION` (`0x84000000`),
+  which the stub answers as PSCI 1.1. PSCI therefore joins the monitor's
+  service list (CPU_ON for more vCPUs, SYSTEM_OFF and SYSTEM_RESET).
+- **No other trap:** still no implementation-defined register access and no
+  unexpected EL2 exception.
+- An NVRAM sync triggered by `boot-picker-bringup-reason` returns
+  `0xe00002d8`. No NVRAM controller backs the bank, which is expected, and
+  harmless here.
+
+**What it decides.** On a generic Armv8.5 CPU with PAuth and the 16 KiB
+granule, the stock 26A428 VirtualMac kernel needs only these to reach its
+root-mount wait:
+
+- the PAC hypercalls;
+- PSCI;
+- `/chosen` data the VM firmware normally supplies: seed, NVRAM, CPU
+  nodes;
+- a GICv3, a PL011 and the timer.
+
+Every stop came from a firmware duty, none from Apple-only CPU behaviour.
+For overturn conditions 1 and 2, that is as far as a diskless boot can
+take them. Condition 3 remains open: storage, the framebuffer, the panic
+region and `AppleVPBootPolicy` are still unmodelled. None of this is
+evidence about the gaokun3's own CPU, which has PAuth2 with QARMA5 where
+TCG uses its own PAuth implementation.
+
+**Next for this check:** a root disk. That means a virtio block device on
+the PCIe bridge, holding a locally prepared 26A428 system volume that is
+never committed. This is the [Phase 4](GAOKUN3-PHASE0C.md#consequences-if-route-b-is-accepted)
+storage path, so it is a step beyond the Phase 0C smoke gate, not part of
+it.
 
 ### Still open
 
 - B3's cross-check: the as-booted tree from `ioreg` inside a macOS virtual
   machine, which needs one.
 - B8: whether `OSKext` and `AppleVPBootPolicy` accept a Snapintosh AuxKC.
-  The Phase 0C QEMU smoke now starts kernel-collection drivers and stops
-  at the GIC's CPU count, before any AuxKC is involved, so it does not
-  answer B8 yet.
+  The Phase 0C QEMU smoke now runs the kernel-collection drivers through
+  to the root-mount wait, with no AuxKC involved, so it does not answer B8
+  yet.
   QEMU's `vmapple` model is not a 26A428 control: QEMU 11.1.2 lacks it and
   upstream supports only macOS 12.x guests for that model.
 - B5: what the 11 implementation-defined registers the monitor does not
   know are, and what each needs. The QEMU smoke test now logs every
-  TIDCP-trapped access, but the stock kernel takes none on its way into
-  IOKit driver matching (2026-10-26), so it cannot characterise them yet.
+  TIDCP-trapped access, but the stock kernel takes none all the way to its
+  root-mount wait (2026-10-26), so it cannot characterise them yet.
 - B6: every site is named. Open: the nested hypervisor's semantics (not
   in published source), and whether the owner accepts collapsed PAC key
   domains on the gaokun3.
