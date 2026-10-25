@@ -46,6 +46,13 @@ TRY el2q_try_ich_vtr, mrs x10, s3_4_c12_c11_1   /* ICH_VTR_EL2 */
 TRY el2q_try_ich_hcr, mrs x10, s3_4_c12_c11_0   /* ICH_HCR_EL2 */
 TRY el2q_try_pacga,   pacga x10, x2, x3
 
+/* One 32-bit device read for the tsens stage (thermal.c): x2 = the address.
+ * A translation fault or a synchronous external abort on it is absorbed like
+ * an undefined instruction above, and the ESR returned. An asynchronous
+ * SError is not; DAIF keeps it pending, and el2qual.c reads ISR_EL1 after.
+ * Only addresses whose translation el2qual.c has checked come here. */
+TRY el2q_try_read32,  ldr w10, [x2]
+
 /* x0 ctx, x1 out[2], x2 the pattern (EL2Q_LR_PATTERN).
  *
  * ICH_LR0_EL2 is saved, written with the pattern, read back and restored;

@@ -72,7 +72,8 @@ def check_tables():
 def compile_test(cc, out, sanitizers):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'), str(EL2Q / 'report.c'),
-           str(EL2Q / 'firmware.c'), '-o', str(out)]
+           str(EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'),
+           str(ROOT / 'compat' / 'sc8280xp-thermal.c'), '-o', str(out)]
     return cmd, subprocess.run(cmd, capture_output=True, text=True)
 
 

@@ -11,6 +11,8 @@
  * Qualcomm's hypervisor, so EL2-only fields may be hidden); the measurement
  * fields around them are synthetic. */
 #include "report.h"
+#include "thermal.h"
+#include "../compat/sc8280xp-thermal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1176,6 +1178,261 @@ static void test_gic(void)
     CHECK(line[0] == 0);
 }
 
+/* ---- The tsens read (thermal.c) -------------------------------------------------
+ * A synthetic SC8280XP: the gaokun3 DTB's four controllers, a counter that
+ * advances a fixed step per read, and page tables that map what each case
+ * says. The guard itself is the real compat/sc8280xp-thermal.c. */
+
+#define TS_HZ UINT64_C(19200000)
+#define TS_VALID (1u << 21)
+static const struct { uint64_t tm, srot; unsigned sensors; } ts_dt[4] = {
+    {0x0c263000, 0x0c222000, 14}, {0x0c265000, 0x0c223000, 16},
+    {0x0c251000, 0x0c224000, 11}, {0x0c252000, 0x0c225000, 5},
+};
+
+struct fake_tsens {
+    uint32_t version[4], control[4], trdy[4], status[4][16];
+    uint64_t now, step, isr;
+    uint64_t unmapped_at, abort_at;  /* one word that is unmapped / faults, or 0 */
+    int all_unmapped, not_device, vary;
+    unsigned mapped_calls, reads;
+};
+static struct fake_tsens ft;
+
+static int ft_mapped(void *ctx, uint64_t address, uint64_t *par)
+{
+    struct fake_tsens *f = ctx;
+    f->mapped_calls++;
+    CHECK(f->reads == 0);                       /* every word checked before any read */
+    if (f->all_unmapped || address == f->unmapped_at) {
+        *par = 0x809;                           /* F set: a translation fault */
+        return 1;
+    }
+    /* Device-nGnRE (0x04), or Normal write-back (0xff) when not_device. */
+    *par = (address & ~0xfffull) | (uint64_t)(f->not_device ? 0xff : 0x04) << 56;
+    return f->not_device ? 2 : 0;
+}
+
+static uint64_t ft_read(void *ctx, uint64_t address, uint64_t *value)
+{
+    struct fake_tsens *f = ctx;
+    CHECK(f->mapped_calls == 58);
+    CHECK(sc8280xp_thermal_address_allowed(address));
+    f->reads++;
+    if (address == f->abort_at) return 0x96000010;   /* data abort, synchronous external */
+    for (unsigned b = 0; b < 4; b++) {
+        if (address == ts_dt[b].srot) { *value = f->version[b]; return 0; }
+        if (address == ts_dt[b].srot + 4) { *value = f->control[b]; return 0; }
+        if (address == ts_dt[b].tm + 0xe4) { *value = f->trdy[b]; return 0; }
+        uint64_t first = ts_dt[b].tm + 0xa0;
+        if (address >= first && address < first + 4 * ts_dt[b].sensors) {
+            uint32_t v = f->status[b][(address - first) / 4];
+            /* Live sensors: a 0.1 C step every few reads, as silicon does. */
+            if (f->vary && (v & TS_VALID)) v ^= (f->reads >> 6) & 1;
+            *value = v;
+            return 0;
+        }
+    }
+    CHECK(0);
+    return 1;
+}
+
+static uint64_t ft_counter(void *ctx)
+{
+    struct fake_tsens *f = ctx;
+    uint64_t t = f->now;
+    f->now += f->step;
+    return t;
+}
+
+static uint64_t ft_isr(void *ctx) { return ((struct fake_tsens *)ctx)->isr; }
+
+static void ft_reset(void)
+{
+    memset(&ft, 0, sizeof ft);
+    ft.step = TS_HZ / 100000;                   /* 10 us per counter read */
+    ft.vary = 1;
+    for (unsigned b = 0; b < 4; b++) {
+        ft.version[b] = EL2Q_TSENS_PIN;
+        ft.control[b] = 1u | 1u << 21 | ((1u << ts_dt[b].sensors) - 1) << 3;
+        ft.trdy[b] = 1;
+        for (unsigned n = 0; n < ts_dt[b].sensors; n++) ft.status[b][n] = TS_VALID | (400 + b * 16 + n);
+    }
+}
+
+static struct el2q_tsens ft_run(void)
+{
+    const struct el2q_tsens_hw hw = {&ft, ft_mapped, ft_read, ft_counter, ft_isr, TS_HZ,
+                                     TS_HZ * EL2Q_TSENS_WINDOW_S};
+    struct el2q_tsens s;
+    el2q_tsens_run(&s, &hw);
+    return s;
+}
+
+static void tsens_report(const struct el2q_tsens *s)
+{
+    base_run();
+    run.cpu_count = 1;
+    gaokun3_cpu(&run.cpu[0], 0x410fd4b0);
+    run.tsens = *s;
+    el2q_report(&run, &text);
+    check_widths();
+}
+
+static void test_tsens(void)
+{
+    char line[EL2Q_TEXT_COLS + 1];
+    struct el2q_tsens s;
+    enum { HOT = 1, CONFIG = 2, READ = 5, UNCHANGED = 8 };     /* enum sc8280xp_thermal_reason */
+
+    /* Not asked for: no section, no serial lines. */
+    base_run();
+    el2q_report(&run, &text);
+    CHECK(!has_line("TSENS"));
+    el2q_tsens_line(&run, 0, line);
+    CHECK(line[0] == 0);
+
+    /* Live sensors on the pin: admitted, polled the whole window, nothing tripped. */
+    ft_reset();
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_PASSED && s.admit == 0 && s.reason == 0 && !s.abort_esr);
+    CHECK(s.checked == 58 && s.unmapped == 0 && s.valid == 46 && s.reads == s.polls * 58);
+    CHECK(s.polls >= 48 && s.polls <= 52 && s.elapsed_ticks >= TS_HZ * EL2Q_TSENS_WINDOW_S);
+    CHECK(s.max_gap_ticks >= TS_HZ / 4 && s.max_gap_ticks < TS_HZ / 4 + TS_HZ / 1000);
+    CHECK(s.peak_mc >= 44000 && s.peak_mc <= 45300);
+    for (unsigned b = 0; b < 4; b++)
+        CHECK(s.version[b] == EL2Q_TSENS_PIN && s.valid_mask[b] == (1u << ts_dt[b].sensors) - 1);
+    tsens_report(&s);
+    CHECK(has_line("TSENS GUARD (READ ONLY) . PASSED, NOTHING TRIPPED"));
+    CHECK(has_line("  PIN 30000000  VALID 46/46  PEAK 4"));
+    CHECK(has_line("  CTRL VERSION  CONTROL   TRDY      VALID"));
+    CHECK(has_line("  3    30000000  002000F9  00000001  5"));
+    CHECK(!has_line("SERROR") && !has_line("FAULTED"));
+    el2q_tsens_line(&run, 0, line);
+    CHECK(!strncmp(line, "TSENS PASSED CHECKED=58 UNMAPPED=0 ADMIT=0 POLLS=", 49));
+    CHECK(strstr(line, " VALID=46") != 0);
+    el2q_tsens_line(&run, 1, line);
+    CHECK(!strcmp(line, "TSENSWHY REASON=OK AT=0 ESR=0 SERROR=0"));
+    el2q_tsens_line(&run, 5, line);
+    CHECK(!strcmp(line, "TSENSBLK 3 VER=30000000 CTRL=2000F9 TRDY=1 MASK=1F"));
+    el2q_tsens_line(&run, 6, line);
+    CHECK(line[0] == 0);
+
+    /* Nothing mapped (QEMU's case): every word checked, none read. */
+    ft_reset();
+    ft.all_unmapped = 1;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_UNMAPPED && ft.reads == 0 && s.checked == 58 && s.unmapped == 58);
+    CHECK(s.unmapped_at == 0x0c222000 && s.par == 0x809 && s.polls == 0);
+    tsens_report(&s);
+    CHECK(has_line("TSENS GUARD (READ ONLY) . NOT MAPPED, NOTHING READ"));
+    CHECK(has_line("  58 OF 58 WORDS, FIRST 0C222000 PAR 0000000000000809"));
+    CHECK(!has_line("PIN 30000000"));
+    el2q_tsens_line(&run, 0, line);
+    CHECK(!strcmp(line, "TSENS UNMAPPED CHECKED=58 UNMAPPED=58 ADMIT=0 POLLS=0 VALID=0"));
+    el2q_tsens_line(&run, 1, line);
+    CHECK(!strcmp(line, "TSENSWHY REASON=OK AT=C222000 ESR=0 SERROR=0"));
+
+    /* One word missing, the last one: still nothing read. */
+    ft_reset();
+    ft.unmapped_at = 0x0c2520b0;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_UNMAPPED && ft.reads == 0 && s.unmapped == 1 &&
+          s.unmapped_at == 0x0c2520b0);
+
+    /* Mapped, but as Normal memory: refused the same way. */
+    ft_reset();
+    ft.not_device = 1;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_UNMAPPED && ft.reads == 0 && s.par >> 56 == 0xff);
+
+    /* A read that faults: the guard trips READ there and reads nothing after. */
+    ft_reset();
+    ft.abort_at = ts_dt[1].tm + 0xe4;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_TRIPPED && s.admit == 1 && s.reason == READ);
+    CHECK(s.location == ft.abort_at && s.abort_at == ft.abort_at && s.abort_esr == 0x96000010);
+    CHECK(ft.reads == 14 + 3 + 3 && s.reads == ft.reads);
+    tsens_report(&s);
+    CHECK(has_line("TSENS GUARD (READ ONLY) . TRIPPED: READ AT 0C2650E4"));
+    CHECK(has_line("  READ FAULTED AT 0C2650E4 ESR 96000010"));
+    el2q_tsens_line(&run, 1, line);
+    CHECK(!strcmp(line, "TSENSWHY REASON=READ AT=C2650E4 ESR=96000010 SERROR=0"));
+
+    /* A different version word: CONFIG at the first SROT, the real word kept. */
+    ft_reset();
+    for (unsigned b = 0; b < 4; b++) ft.version[b] = 0x20010000;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_TRIPPED && s.reason == CONFIG && s.location == 0x0c222000);
+    CHECK(s.version[0] == 0x20010000 && ft.reads == 1);
+
+    /* Registers that never change: UNCHANGED, inside the 12 s window. */
+    ft_reset();
+    ft.vary = 0;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_TRIPPED && s.reason == UNCHANGED);
+    CHECK(s.elapsed_ticks >= TS_HZ * 9 && s.elapsed_ticks < TS_HZ * EL2Q_TSENS_WINDOW_S);
+
+    /* A sensor at the 95 C limit during the window. */
+    ft_reset();
+    ft.status[2][2] = TS_VALID | 950;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_TRIPPED && s.reason == HOT && s.location == ts_dt[2].tm + 0xa0 + 8);
+
+    /* A sensor never valid: no admission, and no window. */
+    ft_reset();
+    ft.status[0][13] &= ~TS_VALID;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_NO_SAMPLE && s.admit == -1 && s.valid == 45 && s.elapsed_ticks == 0);
+    tsens_report(&s);
+    CHECK(has_line("TSENS GUARD (READ ONLY) . NO COMPLETE SAMPLE"));
+    el2q_tsens_line(&run, 0, line);
+    CHECK(strstr(line, " ADMIT=-1 ") != 0);
+
+    /* A pending SError after the reads is reported, whatever the verdict. */
+    ft_reset();
+    ft.isr = 0x100;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_PASSED && s.isr == 0x100);
+    tsens_report(&s);
+    CHECK(has_line("  SERROR PENDING AFTER THE READS, ISR_EL1 00000100"));
+
+    /* A counter that stops after admission ends the run instead of hanging it. */
+    ft_reset();
+    {
+        const struct el2q_tsens_hw hw = {&ft, ft_mapped, ft_read, ft_counter, ft_isr, TS_HZ,
+                                         TS_HZ * EL2Q_TSENS_WINDOW_S};
+        el2q_tsens_run(&s, &hw);                 /* warm: admitted and passed */
+        CHECK(s.state == EL2Q_TSENS_PASSED);
+    }
+    ft_reset();
+    ft.step = 0;
+    s = ft_run();
+    CHECK(s.state == EL2Q_TSENS_STUCK && s.admit == 0);
+
+    /* A missing operation reads nothing and runs nothing. */
+    ft_reset();
+    const struct el2q_tsens_hw partial = {&ft, ft_mapped, 0, ft_counter, ft_isr, TS_HZ, TS_HZ};
+    el2q_tsens_run(&s, &partial);
+    CHECK(s.state == EL2Q_TSENS_NOT_RUN && ft.mapped_calls == 0);
+    el2q_tsens_run(&s, 0);
+    CHECK(s.state == EL2Q_TSENS_NOT_RUN);
+
+    /* The section survives a report the CPU tables overflow. */
+    ft_reset();
+    s = ft_run();
+    base_run();
+    run.cpu_count = EL2Q_MAX_CPUS;
+    for (unsigned c = 0; c < EL2Q_MAX_CPUS; c++) {
+        gaokun3_cpu(&run.cpu[c], 0x410fd4b0);
+        for (unsigned i = 0; i < EL2Q_ID_COUNT; i++) run.cpu[c].id[i] += c;
+    }
+    run.tsens = s;
+    el2q_report(&run, &text);
+    check_widths();
+    CHECK(text.count == EL2Q_TEXT_LINES && has_line("TSENS GUARD (READ ONLY) . PASSED"));
+}
+
 int main(void)
 {
     test_acpi();
@@ -1187,6 +1444,7 @@ int main(void)
     test_memmap();
     test_smbios();
     test_gic();
+    test_tsens();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

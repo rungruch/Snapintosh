@@ -117,6 +117,32 @@ class Layout(unittest.TestCase):
         for e in (self.out() / 'loader/entries').iterdir():
             self.assertNotIn('devicetree', e.read_text())
 
+    def test_thermal_stage_has_one_entry(self):
+        m = usb.build_layout('thermal', self.out(), self.efi, self.sdboot, self.slb, self.tcb,
+                             self.dtb)
+        out = self.out()
+        self.assert_manifest_complete(out, m)
+        self.assertEqual(m['stage'], 'thermal')
+        self.assertEqual((out / 'EFI/systemd/drivers/slbounceaa64.efi').read_bytes(),
+                         self.slb.read_bytes())
+        self.assertEqual((out / 'tcblaunch.exe').read_bytes(), self.tcb.read_bytes())
+        entries = sorted((out / 'loader/entries').iterdir())
+        self.assertEqual([e.name for e in entries], ['el2qual-5-thermal.conf'])
+        text = entries[0].read_text()
+        self.assertIn('options nopac nosmp thermal\n', text)
+        self.assertIn('devicetree /dtb/gaokun3-el2.dtb\n', text)
+        self.assertIn('default el2qual-5-thermal.conf', (out / 'loader/loader.conf').read_text())
+        # No stage2 entry can be picked by mistake, and stage2 has no thermal one.
+        usb.build_layout('stage2', self.out('s2'), self.efi, self.sdboot, self.slb, self.tcb,
+                         self.dtb)
+        for e in (self.out('s2') / 'loader/entries').iterdir():
+            self.assertNotIn('thermal', e.read_text())
+
+    def test_thermal_stage_input_rules(self):
+        self.refused('thermal needs --slbounce', stage='thermal', slbounce=None)
+        self.refused('thermal needs --systemd-boot', stage='thermal', systemd_boot=None)
+        self.refused('thermal needs --dtb, or --always-switch', stage='thermal', dtb=None)
+
     def test_stage1b_has_no_slbounce(self):
         m = usb.build_layout('stage1b', self.out(), self.efi, self.sdboot, dtb=self.dtb)
         self.assertFalse(any('slbounce' in rel or 'tcblaunch' in rel for rel in m['files']))

@@ -654,10 +654,194 @@ static void differences(const struct el2q_run *r, struct el2q_text *t)
     }
 }
 
+/* ---- The tsens read ---------------------------------------------------------- */
+
+static void put_hex_short(struct lb *b, uint64_t v);
+
+/* enum sc8280xp_thermal_reason, in order (compat/sc8280xp-thermal.h). */
+static const char *const tsens_reasons[] = {
+    "OK", "HOT", "CONFIG", "INVALID", "LATE", "READ", "RANGE", "CRITICAL",
+    "UNCHANGED", "SLOW", "CLOCK", "UNPINNED",
+};
+static const char *const tsens_states[] = {
+    "NOTRUN", "UNMAPPED", "TRIPPED", "NOSAMPLE", "STUCK", "PASSED",
+};
+
+static const char *tsens_reason(uint64_t reason)
+{
+    return reason < sizeof tsens_reasons / sizeof tsens_reasons[0] ? tsens_reasons[reason] : "?";
+}
+
+static const char *tsens_state(uint32_t state)
+{
+    return state < sizeof tsens_states / sizeof tsens_states[0] ? tsens_states[state] : "?";
+}
+
+/* Millidegrees as degrees with one decimal; the sensors resolve 0.1 C. */
+static void put_temp(struct lb *b, int64_t mc)
+{
+    if (mc == INT64_MIN) {
+        put_s(b, "-");
+        return;
+    }
+    if (mc < 0) {
+        put_c(b, '-');
+        mc = -mc;
+    }
+    put_dec(b, (uint64_t)mc / 1000);
+    put_c(b, '.');
+    put_dec(b, (uint64_t)mc / 100 % 10);
+    put_s(b, " C");
+}
+
+/* Counter ticks as milliseconds with one decimal. */
+static void put_ms(struct lb *b, uint64_t ticks, uint64_t hz)
+{
+    if (!hz) {
+        put_s(b, "?");
+        return;
+    }
+    uint64_t tenths = ticks / hz * 10000 + ticks % hz * 10000 / hz;
+    put_dec(b, tenths / 10);
+    put_c(b, '.');
+    put_dec(b, tenths % 10);
+    put_s(b, " MS");
+}
+
+static unsigned popcount(uint64_t v)
+{
+    unsigned n = 0;
+    for (; v; v &= v - 1) n++;
+    return n;
+}
+
+static void tsens_section(const struct el2q_tsens *s, struct el2q_text *t)
+{
+    if (s->state == EL2Q_TSENS_NOT_RUN) return;
+    enum el2q_color c = s->state == EL2Q_TSENS_PASSED ? EL2Q_GREEN
+                      : s->state == EL2Q_TSENS_NO_SAMPLE ? EL2Q_YELLOW : EL2Q_RED;
+    struct lb b = new_line(t, c);
+    label(&b, "TSENS GUARD (READ ONLY)");
+    switch (s->state) {
+    case EL2Q_TSENS_PASSED: put_s(&b, "PASSED, NOTHING TRIPPED"); break;
+    case EL2Q_TSENS_UNMAPPED: put_s(&b, "NOT MAPPED, NOTHING READ"); break;
+    case EL2Q_TSENS_NO_SAMPLE: put_s(&b, "NO COMPLETE SAMPLE"); break;
+    case EL2Q_TSENS_STUCK: put_s(&b, "COUNTER STOPPED"); break;
+    default:
+        put_s(&b, "TRIPPED: ");
+        put_s(&b, tsens_reason(s->reason));
+        if (s->location) {
+            put_s(&b, " AT ");
+            put_hex(&b, s->location, 8);
+        }
+    }
+    if (s->state == EL2Q_TSENS_UNMAPPED) {
+        b = new_line(t, EL2Q_RED);
+        put_s(&b, "  ");
+        put_dec(&b, s->unmapped);
+        put_s(&b, " OF ");
+        put_dec(&b, s->checked);
+        put_s(&b, " WORDS, FIRST ");
+        put_hex(&b, s->unmapped_at, 8);
+        put_s(&b, " PAR ");
+        put_hex(&b, s->par, 16);
+    } else {
+        b = new_line(t, EL2Q_WHITE);
+        put_s(&b, "  PIN ");
+        put_hex(&b, EL2Q_TSENS_PIN, 8);
+        put_s(&b, "  VALID ");
+        put_dec(&b, s->valid);
+        put_s(&b, "/46  PEAK ");
+        put_temp(&b, s->peak_mc);
+        put_s(&b, "  POLLS ");
+        put_dec(&b, s->polls);
+        b = new_line(t, EL2Q_WHITE);
+        put_s(&b, "  MAX POLL ");
+        put_ms(&b, s->max_poll_ticks, s->hz);
+        put_s(&b, "  MAX GAP ");
+        put_ms(&b, s->max_gap_ticks, s->hz);
+        put_s(&b, "  READS ");
+        put_dec(&b, s->reads);
+        b = new_line(t, EL2Q_CYAN);
+        put_s(&b, "  CTRL VERSION  CONTROL   TRDY      VALID");
+        for (unsigned i = 0; i < EL2Q_TSENS_BLOCKS; i++) {
+            b = new_line(t, s->version[i] == EL2Q_TSENS_PIN ? EL2Q_WHITE : EL2Q_YELLOW);
+            put_s(&b, "  ");
+            put_dec(&b, i);
+            pad(&b, 7, ' ');
+            put_hex(&b, s->version[i], 8);
+            put_s(&b, "  ");
+            put_hex(&b, s->control[i], 8);
+            put_s(&b, "  ");
+            put_hex(&b, s->trdy[i], 8);
+            put_s(&b, "  ");
+            put_dec(&b, popcount(s->valid_mask[i]));
+        }
+    }
+    if (s->abort_esr) {
+        b = new_line(t, EL2Q_RED);
+        put_s(&b, "  READ FAULTED AT ");
+        put_hex(&b, s->abort_at, 8);
+        put_s(&b, " ESR ");
+        put_hex(&b, s->abort_esr, 8);
+    }
+    if (s->isr & (1u << 8)) {
+        b = new_line(t, EL2Q_RED);
+        put_s(&b, "  SERROR PENDING AFTER THE READS, ISR_EL1 ");
+        put_hex(&b, s->isr, 8);
+    }
+}
+
+void el2q_tsens_line(const struct el2q_run *r, unsigned index, char out[EL2Q_TEXT_COLS + 1])
+{
+    struct lb b = {out, 0};
+    const struct el2q_tsens *s = &r->tsens;
+    out[0] = 0;
+    if (s->state == EL2Q_TSENS_NOT_RUN) return;
+    if (index == 0) {
+        put_s(&b, "TSENS ");
+        put_s(&b, tsens_state(s->state));
+        put_s(&b, " CHECKED=");
+        put_dec(&b, s->checked);
+        put_s(&b, " UNMAPPED=");
+        put_dec(&b, s->unmapped);
+        put_s(&b, " ADMIT=");
+        if (s->admit < 0) put_c(&b, '-');
+        put_dec(&b, (uint64_t)(s->admit < 0 ? -s->admit : s->admit));
+        put_s(&b, " POLLS=");
+        put_dec(&b, s->polls);
+        put_s(&b, " VALID=");
+        put_dec(&b, s->valid);
+    } else if (index == 1) {
+        put_s(&b, "TSENSWHY REASON=");
+        put_s(&b, tsens_reason(s->reason));
+        put_s(&b, " AT=");
+        put_hex_short(&b, s->state == EL2Q_TSENS_UNMAPPED ? s->unmapped_at : s->location);
+        put_s(&b, " ESR=");
+        put_hex_short(&b, s->abort_esr);
+        put_s(&b, " SERROR=");
+        put_c(&b, s->isr & (1u << 8) ? '1' : '0');
+    } else if (index < 2 + EL2Q_TSENS_BLOCKS) {
+        unsigned i = index - 2;
+        put_s(&b, "TSENSBLK ");
+        put_dec(&b, i);
+        put_s(&b, " VER=");
+        put_hex_short(&b, s->version[i]);
+        put_s(&b, " CTRL=");
+        put_hex_short(&b, s->control[i]);
+        put_s(&b, " TRDY=");
+        put_hex_short(&b, s->trdy[i]);
+        put_s(&b, " MASK=");
+        put_hex_short(&b, s->valid_mask[i]);
+    }
+}
+
 void el2q_report(const struct el2q_run *r, struct el2q_text *t)
 {
     t->count = 0;
     header(r, t);
+    /* Ahead of the CPU tables, so truncation can never cut it off. */
+    tsens_section(&r->tsens, t);
     if (r->end_el == 2 && r->cpu_count) {
         verdicts(&r->cpu[0], t);
         cpu_table(r, t);

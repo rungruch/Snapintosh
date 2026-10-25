@@ -27,6 +27,10 @@
  *   emulate-no-fb    treat every GOP mode that way; test only
  *   emulate-dt-fb    describe the firmware's real GOP framebuffer as if it
  *               were the device tree's /chosen simple-framebuffer; test only
+ *   thermal     after the CPU measurements, run the SC8280XP tsens guard
+ *               (thermal.c) on the boot CPU for 12 s: read only, and only
+ *               the guard's 58 words, each checked against the firmware's
+ *               page tables before the first read. Off by default.
  *
  * With no GOP mode that has a framebuffer address, el2qual draws on the
  * device tree's /chosen simple-framebuffer if the firmware's memory map
@@ -37,6 +41,7 @@
 #include <stdint.h>
 #include "el2qual.h"
 #include "report.h"
+#include "thermal.h"
 
 /* idregs.h is the monitor's: id_register() is shared so both read exactly
  * the allocated encodings; its id_forge() is not used here. */
@@ -94,6 +99,7 @@ uint64_t el2q_try_ich_lr0(struct el2q_ctx *ctx, uint64_t out[2], uint64_t patter
 uint64_t el2q_try_pacga(struct el2q_ctx *ctx, uint64_t *value, uint64_t pointer, uint64_t modifier);
 uint64_t el2q_try_pac(struct el2q_ctx *ctx, const uint64_t *in, const uint64_t *modifier,
                       uint64_t *out, uint64_t *round_trip, uint64_t count);
+uint64_t el2q_try_read32(struct el2q_ctx *ctx, uint64_t *value, uint64_t address);
 void el2q_apia_get(uint64_t key[2]);
 void el2q_apia_set(uint64_t lo, uint64_t hi);
 void tgran16_probe(uint64_t *out, uint64_t table);       /* probes/tgran16.c */
@@ -305,6 +311,7 @@ static struct el2q_run run;
 static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
+    int thermal;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -401,6 +408,11 @@ static void serial_report(void)
         uart_line(u, line);
         el2q_gic_line(&run, s, line);
         if (line[0]) uart_line(u, line);
+    }
+    for (unsigned i = 0;; i++) {
+        el2q_tsens_line(&run, i, line);
+        if (!line[0]) break;
+        uart_line(u, line);
     }
     static const char digits[] = "0123456789";
     char dt[] = "DT STATE ?";
@@ -523,6 +535,56 @@ static void measure(unsigned slot)
     if (!opt.nopac) measure_pac(slot);
 }
 
+/* ---- The tsens read (option "thermal"; thermal.c) ------------------------
+ * The boot CPU at EL2, every other core off, interrupts masked, the
+ * firmware's page tables still in place. */
+
+/* AT S1E2R asks the walk the read would make, without making the access:
+ * with E2H set, as slbounce leaves it, that is the EL2&0 regime. A word
+ * counts as mapped only as Device memory (PAR_EL1.ATTR high nibble 0) at its
+ * own physical address, the identity map UEFI uses. */
+static int tsens_mapped(void *unused, uint64_t address, uint64_t *par)
+{
+    (void)unused;
+    __asm__ volatile("at s1e2r, %0" :: "r"(address) : "memory");
+    ISB();
+    uint64_t p = RD("par_el1");
+    *par = p;
+    if (p & 1) return 1;
+    if ((p >> 56) & 0xf0) return 2;
+    if ((p ^ address) & 0x0000fffffffff000ull) return 3;
+    return 0;
+}
+
+static uint64_t tsens_read(void *unused, uint64_t address, uint64_t *value)
+{
+    (void)unused;
+    return el2q_try_read32(&ctx[0], value, address);
+}
+
+static uint64_t tsens_counter(void *unused)
+{
+    (void)unused;
+    return ticks();
+}
+
+static uint64_t tsens_isr(void *unused)
+{
+    (void)unused;
+    return RD("isr_el1");
+}
+
+static void measure_tsens(void)
+{
+    uint64_t hz = RD("cntfrq_el0");
+    const struct el2q_tsens_hw hw = {0, tsens_mapped, tsens_read, tsens_counter, tsens_isr,
+                                     hz, hz * EL2Q_TSENS_WINDOW_S};
+    /* One breadcrumb before all of it: drawing between polls could delay
+     * one past the guard's one-second gap rule. */
+    progress("TSENS: 58 WORDS, READ ONLY, 12 S. A HANG HERE IS A TSENS READ");
+    el2q_tsens_run(&run.tsens, &hw);
+}
+
 void el2q_secondary_main(uint64_t slot)
 {
     measure((unsigned)slot);
@@ -642,6 +704,7 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "emulate-rotated")) opt.emulate_rotated = 1;
         if (word_is(w, len, "emulate-no-fb")) opt.emulate_no_fb = 1;
         if (word_is(w, len, "emulate-dt-fb")) opt.emulate_dt_fb = 1;
+        if (word_is(w, len, "thermal")) opt.thermal = 1;
     }
 }
 
@@ -910,5 +973,6 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     run.cpu[0].state = EL2Q_CPU_DONE;
     run.cpu[0].done = 1;
     if (!opt.nosmp && run.psci_version >= 0) start_secondaries();
+    if (opt.thermal) measure_tsens();
     finish();
 }

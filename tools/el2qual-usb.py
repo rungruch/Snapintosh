@@ -6,6 +6,7 @@
   python3 tools/el2qual-usb.py stage1b --systemd-boot F --dtb F
   python3 tools/el2qual-usb.py stage2  --systemd-boot F --slbounce F --tcblaunch F
                                        (--dtb F | --always-switch)
+  python3 tools/el2qual-usb.py thermal (the same inputs as stage2)
 
 This only builds a directory tree, by default build/el2qual-usb/<stage>/.
 It never writes to a disk or a mounted volume: copying the tree onto a
@@ -18,6 +19,8 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
   stage1b  systemd-boot with the device tree and the stage 2 entries, but
            no slbounce: el2qual reports whether slbounce's gate would open.
   stage2   stage1b plus slbounce and tcblaunch.exe: the EL2 measurement.
+  thermal  stage2's files with one entry only: the Phase 1 tsens read
+           (load option "thermal"; docs/GAOKUN3-PHASE1-GUARDS.md).
 
 Every input is checked before anything is written (PE machine and
 subsystem, FDT header), and a manifest records the SHA-256 of each file
@@ -55,6 +58,15 @@ ENTRIES = [
     ('el2qual-3-all-cpus.conf', 'el2qual 3: all CPUs, no PAuth', 'nopac'),
     ('el2qual-4-full.conf', 'el2qual 4: all CPUs and PAuth', ''),
 ]
+
+# The Phase 1 tsens read (docs/GAOKUN3-PHASE1-GUARDS.md): the boot CPU alone
+# and no PAuth, the steps run 9 already cleared, then the thermal stage. One
+# entry, so nothing else on the stick can be chosen by mistake.
+THERMAL_ENTRIES = [
+    ('el2qual-5-thermal.conf', 'el2qual 5: tsens read only (boot CPU, no PAuth)',
+     'nopac nosmp thermal'),
+]
+STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRIES}
 
 
 class LayoutError(Exception):
@@ -125,18 +137,19 @@ def entry_text(title, options, dtb_name):
 def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=None,
                  dtb=None, always_switch=False, replace=False):
     """Validate every input, then write the tree; returns the manifest."""
-    if stage not in ('stage1', 'stage1b', 'stage2'):
+    if stage not in ('stage1', 'stage1b', 'stage2', 'thermal'):
         raise LayoutError(f'unknown stage {stage}')
+    switches = stage in ('stage2', 'thermal')
     require_pe(efi, 'el2qual', {SUBSYSTEM_EFI_APPLICATION})
-    if stage in ('stage1b', 'stage2'):
+    if stage != 'stage1':
         if not systemd_boot:
             raise LayoutError(f'{stage} needs --systemd-boot')
         require_pe(systemd_boot, 'systemd-boot', {SUBSYSTEM_EFI_APPLICATION})
     if stage == 'stage1b' and not dtb:
         raise LayoutError('stage1b exists to check the device tree gate: it needs --dtb')
-    if stage == 'stage2':
+    if switches:
         if not slbounce or not tcblaunch:
-            raise LayoutError('stage2 needs --slbounce and --tcblaunch')
+            raise LayoutError(f'{stage} needs --slbounce and --tcblaunch')
         require_pe(slbounce, 'slbounce', {SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER,
                                           SUBSYSTEM_EFI_RUNTIME_DRIVER})
         require_pe(tcblaunch, 'tcblaunch.exe')
@@ -144,7 +157,7 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
         # slbounce's zap-shader gate stays closed and it silently does not
         # switch: a wasted boot, not a dangerous one.
         if not dtb and not always_switch:
-            raise LayoutError('stage2 needs --dtb, or --always-switch to state that '
+            raise LayoutError(f'{stage} needs --dtb, or --always-switch to state that '
                               'slbounce was built with SLBOUNCE_ALWAYS_SWITCH=1')
         if dtb and always_switch:
             raise LayoutError('give --dtb or --always-switch, not both')
@@ -179,10 +192,11 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
         dtb_name = Path(dtb).name if dtb else None
         if dtb:
             place(dtb, f'dtb/{dtb_name}')
-        write('loader/loader.conf', f'timeout 15\ndefault {ENTRIES[0][0]}\neditor no\n')
-        for name, title, options in ENTRIES:
+        entries = STAGE_ENTRIES[stage]
+        write('loader/loader.conf', f'timeout 15\ndefault {entries[0][0]}\neditor no\n')
+        for name, title, options in entries:
             write(f'loader/entries/{name}', entry_text(title, options, dtb_name))
-        if stage == 'stage2':
+        if switches:
             place(slbounce, f'EFI/systemd/drivers/{SLBOUNCE_NAME}')
             # slbounce opens tcblaunch.exe from the root of its own volume.
             place(tcblaunch, 'tcblaunch.exe')
@@ -193,7 +207,7 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('stage', choices=['stage1', 'stage1b', 'stage2'])
+    ap.add_argument('stage', choices=['stage1', 'stage1b', 'stage2', 'thermal'])
     ap.add_argument('--out', help='destination directory (default build/el2qual-usb/<stage>)')
     ap.add_argument('--efi', help='a built el2qual.efi (default: build it now)')
     ap.add_argument('--llvm', help='passed to probes/el2qual/build.py')

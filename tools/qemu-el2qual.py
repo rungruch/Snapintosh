@@ -28,6 +28,11 @@ report it writes to the PL011:
   max-no-fb    every GOP mode treated that way, no device tree and no
                "serial": el2qual must stop before ExitBootServices, saying
                why on the console
+  max-thermal  as max, with the "thermal" stage: the virt machine has no
+               tsens, so it must read nothing (unmapped) or have its first
+               read's fault caught, and the CPU report must still follow
+  max-vhe-thermal  the same after the slbounce handoff emulation, the
+               state the gaokun3 runs the stage in
 
 On every configuration that runs, all four CPUs must finish at EL2 without
 a fault, the report must name the GOP mode it drew on, and each feature's
@@ -76,6 +81,15 @@ CONFIGS = {
     # Without "serial" a stop is the only correct outcome; the firmware
     # console, which EDK2 also sends to the PL011, is where it is reported.
     'max-no-fb': dict(cpu='max', options='emulate-no-fb', serial=False, stop=True),
+    # The virt machine has no tsens: the stage must end without reading, or
+    # with its first read's fault caught, and the CPU report must still come.
+    'max-thermal': dict(cpu='max', options='thermal', pac='Y', walk='Y', thermal=True,
+                        features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The same under slbounce's E2H|TGE state, where the gaokun3 runs it: the
+    # mapping check's AT S1E2R then walks the EL2&0 regime.
+    'max-vhe-thermal': dict(cpu='max', options='emulate-vhe thermal', pac='Y', walk='Y', vhe=True,
+                            thermal=True, features=dict.fromkeys(FEATURES, True),
+                            routes=('CPU OK', 'CPU OK')),
 }
 
 STOP_LINES = ('NO GOP MODE HAS A FRAMEBUFFER ADDRESS', 'DT FRAMEBUFFER: NO DEVICE TREE',
@@ -126,6 +140,47 @@ def check_gic(lines, smp):
         problems.append('no FIRMWARE line read from SMBIOS')
     if not any(line.startswith('VENDOR ') and ' SMBIOS 3.' in line for line in lines):
         problems.append('no VENDOR line with an SMBIOS 3 version')
+    return problems
+
+
+TSENS = re.compile(r'^TSENS (\w+) CHECKED=(\d+) UNMAPPED=(\d+) ADMIT=(-?\d+) POLLS=(\d+) VALID=(\d+)$')
+TSENSWHY = re.compile(r'^TSENSWHY REASON=(\w+) AT=([0-9A-F]+) ESR=([0-9A-F]+) SERROR=([01])$')
+TSENS_FIRST_WORD = 'C222000'      # tsens0 SROT+0, the guard's first read
+
+
+def check_tsens(lines, expect):
+    """The "thermal" stage on QEMU's virt machine, which has no tsens at the
+    SC8280XP's addresses. Two outcomes are correct: the page tables do not
+    map the words, so nothing is read; or they do, and the first read's
+    fault is caught, so the guard trips READ there. Anything that admitted,
+    sampled or left an SError pending read something that is not there."""
+    rows = [m for line in lines for m in [TSENS.match(line)] if m]
+    whys = [m for line in lines for m in [TSENSWHY.match(line)] if m]
+    screen = [line for line in lines if line.startswith('TSENS GUARD (READ ONLY) . ')]
+    if not expect.get('thermal'):
+        if rows or whys or screen:
+            return ['the tsens stage ran without the "thermal" option']
+        return []
+    if len(rows) != 1 or len(whys) != 1 or len(screen) != 1:
+        return [f'{len(rows)} TSENS, {len(whys)} TSENSWHY and {len(screen)} TSENS GUARD lines, '
+                'wanted one each']
+    state, checked, unmapped, admit, polls = rows[0][1], *map(int, rows[0].group(2, 3, 4, 5))
+    reason, at, esr, serror = whys[0].groups()
+    problems = []
+    if checked != 58:
+        problems.append(f'tsens checked {checked} words for a mapping, wanted all 58')
+    if serror != '0':
+        problems.append('an SError was left pending by the tsens stage')
+    if state == 'UNMAPPED':
+        if not unmapped or polls or esr != '0':
+            problems.append(f'tsens UNMAPPED with {unmapped} unmapped, {polls} polls, ESR {esr}')
+    elif state == 'TRIPPED' and reason == 'READ':
+        if esr == '0' or at != TSENS_FIRST_WORD or admit != 1 or polls != 1 or unmapped:
+            problems.append(f'tsens READ trip at {at}, ESR {esr}, admit {admit}, {polls} polls: '
+                            f'wanted the first read ({TSENS_FIRST_WORD}) faulting and caught')
+    else:
+        problems.append(f'tsens {state} {reason}: QEMU has no tsens, wanted UNMAPPED or a '
+                        'caught READ fault')
     return problems
 
 
@@ -214,6 +269,7 @@ def check(log, expect, smp=SMP):
     elif vhe or (hcr >> 34) & 1:
         problems.append('E2H set on a run that did not ask for VHE emulation')
     problems += check_gic(lines, smp)
+    problems += check_tsens(lines, expect)
     return problems
 
 
@@ -238,6 +294,10 @@ def synthetic(expect, smp=SMP):
              f'ENTRY HCR_EL2 {hcr:016X} SCTLR 0000000030C5183D']
     if expect.get('vhe'):
         lines.append('TEST ONLY: SLBOUNCE E2H STATE EMULATED')
+    if expect.get('thermal'):
+        lines += ['TSENS GUARD (READ ONLY) . TRIPPED: READ AT 0C222000',
+                  'TSENS TRIPPED CHECKED=58 UNMAPPED=0 ADMIT=1 POLLS=1 VALID=0',
+                  'TSENSWHY REASON=READ AT=C222000 ESR=96000010 SERROR=0']
     lines += ['GIC VIRTUAL INTERFACE ... YES  4 LRS  PRI 5  ID 16  LR0 RW',
               '  CONTROLS A OK  B FAULT  C FAULT  (WANT OK FAULT FAULT)',
               f'J700 ROUTE (AS ON A16) .. {expect["routes"][0]}',
@@ -321,6 +381,28 @@ def self_test():
         expect_result(f'{name} fault detail line', good.replace(
             'EL2QUAL END', '   V5 ESR 96000045 ELR 000040001234 FAR 000000000000\nEL2QUAL END'),
             expect, False)
+        if expect.get('thermal'):
+            unmapped = (good.replace('TRIPPED: READ AT 0C222000', 'NOT MAPPED, NOTHING READ')
+                        .replace('TSENS TRIPPED CHECKED=58 UNMAPPED=0 ADMIT=1 POLLS=1',
+                                 'TSENS UNMAPPED CHECKED=58 UNMAPPED=58 ADMIT=0 POLLS=0')
+                        .replace('REASON=READ AT=C222000 ESR=96000010', 'REASON=OK AT=C222000 ESR=0'))
+            expect_result(f'{name} unmapped is fine too', unmapped, expect, True)
+            expect_result(f'{name} no TSENS line', good.replace('TSENS TRIPPED', 'XSENS TRIPPED'),
+                          expect, False)
+            expect_result(f'{name} passed on QEMU', good.replace('TSENS TRIPPED', 'TSENS PASSED')
+                          .replace('REASON=READ', 'REASON=OK'), expect, False)
+            expect_result(f'{name} READ trip without a fault', good.replace('ESR=96000010', 'ESR=0'),
+                          expect, False)
+            expect_result(f'{name} tripped later', good.replace('POLLS=1 ', 'POLLS=3 '), expect, False)
+            expect_result(f'{name} SError left', good.replace('SERROR=0', 'SERROR=1'), expect, False)
+            expect_result(f'{name} words skipped', good.replace('CHECKED=58', 'CHECKED=57'),
+                          expect, False)
+            expect_result(f'{name} unmapped but read', unmapped.replace('POLLS=0', 'POLLS=1'),
+                          expect, False)
+        else:
+            expect_result(f'{name} tsens unasked', good.replace(
+                'EL2QUAL END', 'TSENS UNMAPPED CHECKED=58 UNMAPPED=58 ADMIT=0 POLLS=0 VALID=0\n'
+                'EL2QUAL END'), expect, False)
         if expect.get('vhe'):
             expect_result(f'{name} E2H missing', good.replace(
                 f'{1 << 34 | 1 << 27:016X}', f'{1 << 31:016X}'), expect, False)

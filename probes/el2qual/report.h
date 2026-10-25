@@ -11,7 +11,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define EL2Q_VERSION      2     /* 2: counter rate, GICv3 virtualization, SMBIOS */
+#define EL2Q_VERSION      3     /* 2: counter rate, GICv3 virtualization, SMBIOS;
+                                   3: the tsens read (option "thermal") */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4
@@ -109,6 +110,44 @@ struct el2q_firmware {
     char maker[EL2Q_FW_TEXT + 1], product[EL2Q_FW_TEXT + 1];
 };
 
+/* The SC8280XP tsens read (load option "thermal"): the Phase 1 thermal guard,
+ * compat/sc8280xp-thermal.c, run read-only at EL2 on the boot CPU against
+ * the live controllers (docs/GAOKUN3-PHASE1-GUARDS.md). thermal.c drives it;
+ * this is what it leaves for the report. */
+#define EL2Q_TSENS_BLOCKS 4
+/* The version word under test: what the four controllers' tsens debugfs
+ * "version" files read under Linux on 2026-10-23, 3.0.0. Run 10 of this
+ * stage confirmed it at EL2, and it is now the guard's production pin;
+ * thermal.c asserts the two are equal. */
+#define EL2Q_TSENS_PIN 0x30000000u
+/* Long enough to cross the guard's 10 s "unchanged" rule on live sensors. */
+#define EL2Q_TSENS_WINDOW_S 12
+
+enum el2q_tsens_state {
+    EL2Q_TSENS_NOT_RUN,    /* option not given */
+    EL2Q_TSENS_UNMAPPED,   /* a word had no identity device mapping: nothing read */
+    EL2Q_TSENS_TRIPPED,    /* the guard stopped; reason and location say why */
+    EL2Q_TSENS_NO_SAMPLE,  /* admission saw no complete 46-sensor sample */
+    EL2Q_TSENS_STUCK,      /* the counter stopped advancing during the window */
+    EL2Q_TSENS_PASSED      /* admitted, then polled for the whole window */
+};
+
+struct el2q_tsens {
+    uint32_t state;
+    uint32_t checked, unmapped;      /* words checked for a mapping; how many failed */
+    uint64_t unmapped_at, par;       /* the first refused word, and PAR_EL1 for it */
+    uint64_t abort_at, abort_esr;    /* the first read that faulted, else 0 */
+    uint64_t isr;                    /* ISR_EL1 after the reads; bit 8 = SError pending */
+    uint64_t hz, window_ticks, elapsed_ticks;
+    int64_t admit;                   /* sc8280xp_thermal_admit(): 0, 1 or -1 */
+    uint64_t reason, location;       /* the guard's, at the end */
+    uint64_t polls, reads, valid;
+    int64_t peak_mc, current_mc;     /* INT64_MIN when no sensor was valid */
+    uint64_t max_poll_ticks, max_gap_ticks;
+    uint64_t version[EL2Q_TSENS_BLOCKS], control[EL2Q_TSENS_BLOCKS];
+    uint64_t trdy[EL2Q_TSENS_BLOCKS], valid_mask[EL2Q_TSENS_BLOCKS];
+};
+
 struct el2q_run {
     uint64_t start_el, end_el;       /* CurrentEL>>2 at entry and after EBS */
     uint64_t ebs_status, ebs_tries;
@@ -126,6 +165,7 @@ struct el2q_run {
     uint64_t start_id[EL2Q_ID_COUNT];/* ID registers at the starting EL */
     uint32_t cpu_count;              /* slots used; slot 0 is the boot CPU */
     struct el2q_cpu cpu[EL2Q_MAX_CPUS];
+    struct el2q_tsens tsens;
 };
 
 enum el2q_color { EL2Q_WHITE, EL2Q_GREEN, EL2Q_RED, EL2Q_YELLOW, EL2Q_CYAN };
@@ -224,6 +264,16 @@ void el2q_summary_line(const struct el2q_run *run, unsigned slot,
  * <hex> without leading zeros, <p> as above, <word> el2q_lr_word's. Empty for
  * a slot that did not finish. */
 void el2q_gic_line(const struct el2q_run *run, unsigned slot, char out[EL2Q_TEXT_COLS + 1]);
+
+/* Fixed-format lines for the tsens read, for tools/qemu-el2qual.py. index 0:
+ *   TSENS <state> CHECKED=<n> UNMAPPED=<n> ADMIT=<n> POLLS=<n> VALID=<n>
+ * index 1:
+ *   TSENSWHY REASON=<name> AT=<hex> ESR=<hex> SERROR=<0|1>
+ * indexes 2..5, one per controller:
+ *   TSENSBLK <b> VER=<hex> CTRL=<hex> TRDY=<hex> MASK=<hex>
+ * <state> is NOTRUN, UNMAPPED, TRIPPED, NOSAMPLE, STUCK or PASSED. Every
+ * line is empty when the read did not run, and index 6 and above always. */
+void el2q_tsens_line(const struct el2q_run *run, unsigned index, char out[EL2Q_TEXT_COLS + 1]);
 
 /* Draws the report into a 32 bpp framebuffer (stride in pixels), at the
  * largest integer scale of a 6x9 cell that fits every line. bgr selects

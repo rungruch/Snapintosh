@@ -187,8 +187,10 @@ python3 tools/qemu-el2qual.py              # max, max-vhe, max-nopauth, cortex-a
 `build.py` finds LLVM from `--llvm`, `SNAP_LLVM`, Homebrew, then `PATH`;
 `qemu-el2qual.py` finds QEMU from `--qemu`, `SNAP_QEMU`, then `PATH`. Load
 options: `serial` (also write to an SPCR PL011/SBSA UART), `poweroff` (PSCI
-`SYSTEM_OFF` at the end; QEMU), `nopac`, `nosmp`, and four test-only
-options: `emulate-vhe` (recreates slbounce's `E2H|TGE` state on a machine
+`SYSTEM_OFF` at the end; QEMU), `nopac`, `nosmp`, `thermal` (since el2qual
+3: the SC8280XP tsens guard run read-only on the boot CPU,
+[GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md#el2-tsens-read)), and
+four test-only options: `emulate-vhe` (recreates slbounce's `E2H|TGE` state on a machine
 that started at EL2), `emulate-rotated` (treats the firmware's GOP mode as
 having no framebuffer address), `emulate-no-fb` (treats every mode so) and
 `emulate-dt-fb` (hands the real GOP framebuffer to the device-tree fallback
@@ -201,7 +203,8 @@ a breadcrumb on screen, so a hang or reset leaves the step that caused it
 visible; `nopac` and `nosmp` remove those steps. Without either option the
 run ends in a WFE loop, and holding the power button ends it.
 
-Status: QEMU runs pass on all seven configurations (TCG, 4 CPUs). On the
+Status: QEMU runs pass on all seven configurations (TCG, 4 CPUs), and on
+the two `thermal` ones added with el2qual 3 (2026-10-23). On the
 gaokun3 (2026-10-23), after two runs that could show nothing, stage 1b drew
 on the device tree's framebuffer and stage 2 reached EL2 on all 8 cores:
 PAuth works on every core, the 16K granule walks on every core, and NV2,
