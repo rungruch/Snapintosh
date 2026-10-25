@@ -62,6 +62,11 @@ def lint():
     for kind, keys in wb.KEYS.items():
         check(written.get(kind) == keys, f'{kind}: collector writes {sorted(written.get(kind, []))}, '
                                          f'reader wants {sorted(keys)}')
+    # Every CIM reader must return its array with the unary comma: a bare
+    # "return @(...)" unrolls one instance to a scalar, and StrictMode then
+    # throws on .Count (the collector's first run on the gaokun3 stopped so).
+    returns = re.findall(r'\breturn\s+(,?)\s*@\(', code)
+    check(len(returns) == 4 and all(returns), 'a CIM reader returns @(...) without the leading comma')
     check('$StartMin = 55' in code and '$Floor = 50' in code, 'the 55 % start and 50 % floor')
     check("ValidateSet('ac-charging', 'ac-full', 'battery', 'weak-usb')" in code, 'the state set')
     check(set(re.findall(r"'(ac-charging|ac-full|battery|weak-usb)'", code)) == set(wb.STATES), 'states')

@@ -67,14 +67,19 @@ function Flag($value) {
     return '0'
 }
 
+# Both return an array even for one instance or none. PowerShell unrolls a
+# function's output, so "return @(x)" alone hands a single instance back bare,
+# and under StrictMode Windows PowerShell 5.1 throws on that object's .Count
+# (PropertyNotFoundStrict; it failed this way on the gaokun3, which has one
+# battery). The leading comma returns the array as one object.
 function Wmi([string]$class) {
-    try { return @(Get-CimInstance -Namespace 'root\wmi' -ClassName $class -ErrorAction Stop) }
-    catch { return @() }
+    try { return , @(Get-CimInstance -Namespace 'root\wmi' -ClassName $class -ErrorAction Stop) }
+    catch { return , @() }
 }
 
 function Cim([string]$class) {
-    try { return @(Get-CimInstance -ClassName $class -ErrorAction Stop) }
-    catch { return @() }
+    try { return , @(Get-CimInstance -ClassName $class -ErrorAction Stop) }
+    catch { return , @() }
 }
 
 function Prop($objects, [string]$name) {
