@@ -11,7 +11,9 @@ Status, 2026-10-25:
   readings.** The [Windows battery readings](#results-2026-10-25)
   (2026-10-25) passed every bound the guard applies. They also
   reproduced BATT-1: a weak USB source reported as charging while the
-  battery drained, which the guard would count as AC.
+  battery drained, which one snapshot counts as AC. The
+  [trend check](#trend-check-batt-1) added for it trips on that run
+  (host replay only).
 - The Linux survey is [retired](#linux-survey-retired) after a panel
   fault.
 
@@ -29,6 +31,7 @@ rule 5). They are route-independent
 | --- | --- | --- |
 | Thermal | `compat/sc8280xp-thermal.{h,c}` | `python3 tools/test-sc8280xp-thermal.py` |
 | Battery and AC | `compat/gaokun3-battery.{h,c}` | `python3 tools/test-gaokun3-battery.py` |
+| [Trend check (BATT-1)](#trend-check-batt-1) | the same files, `gaokun3_battery_trend_*` | the same test, with `tools/test-gaokun3-battery-readings.h` |
 | [EL2 tsens read](#el2-tsens-read) | `probes/el2qual/thermal.{h,c}` (el2qual option `thermal`) | `python3 tools/test-el2qual.py`; `python3 tools/qemu-el2qual.py --config max-thermal --config max-vhe-thermal` |
 | [Windows battery readings](#windows-battery-readings) | `tools/gaokun3-windows-battery.ps1`, `tools/replay-gaokun3-windows-battery.py` | `python3 tools/test-gaokun3-windows-battery.py` |
 
@@ -154,15 +157,84 @@ It also applies `battery_minimum()`'s 50..100 bound on the minimum. The
 host test replays every record through the Python functions and requires
 the same verdict at every minimum.
 
+### Trend check (BATT-1)
+
+One snapshot cannot tell a weak USB source from a charger: the EC can
+report the adapter and "charging" while the battery drains. On a Mac's
+USB-C port under load, Windows reported charging, never discharging, for
+10 minutes while the battery lost about 5.8 W
+([results](#results-2026-10-25)). The trend check watches consecutive
+decoded records for that. Like the rest of the guard it does no I/O, and
+nothing links it into a monitor yet.
+
+`gaokun3_battery_trend_feed()` takes each decoded record with the time
+it was polled. While the records claim AC, the remaining charge (EC
+`0x94`) must not fall 25 mAh below its latest high within 5 minutes. A
+charge that rises or holds moves the high forward. A high older than 5
+minutes restarts the measurement, so the check trips at a net drain of
+about 5 mAh/min (about 2.5 W at 8.3 V). It trips, and stays tripped, on:
+
+- DRAIN: the fall above;
+- STALE: more than 30 s between records, so a drain could go unwatched;
+- the record's own refusal, when a record is not plausible;
+- CONFIG: misuse, or a clock that runs backwards.
+
+A record without AC ends the watch without a trip. An open discharge is
+the charge rule's business.
+
+`gaokun3_battery_admit_watched()` is `gaokun3_battery_admit()` with the
+trend applied. A tripped trend refuses at any charge. When only AC would
+admit (the charge is under the minimum), the AC claim must have been
+watched for a whole 5 minutes without a drain, else UNWATCHED. It is
+stricter than `cycle_lib`'s `battery_ok()`, which has no history; the
+snapshot policy and its parity with `battery_ok()` are unchanged.
+
+**Why these limits.** They are policy fitted to the 2026-10-25 Windows
+readings, converted from mWh to mAh at each run's median voltage:
+
+| Reading | Largest fall in any 5 minutes | Check |
+| --- | --- | --- |
+| Weak USB source, charging claimed (120 samples) | 62 mAh | DRAIN at 143 s (158 s polled every ~25 s) |
+| Held on AC at 95 %, two runs | 0 | OK |
+| Charging at 88 % | 0 (rising) | OK |
+| On battery | 62 mAh, but no AC claimed | OK; the charge rule applies |
+
+Between the end of the first held run and the start of the second, about
+9.5 minutes, the charge fell about 10 mAh: about 1 mAh/min, a fifth of
+the trip rate. That the tablet stayed on the charger in between was not
+recorded. This is the margin against stopping a run on a charger that is
+only holding. The
+weak source drained at about 2.5 times the trip rate.
+
+**Host evidence.** `tools/test-gaokun3-battery.c` replays the five Windows
+runs as EC snapshots. The weak-USB run is the negative case and must trip
+DRAIN, and must refuse admission at every minimum. Without the trend, its
+last record admits on AC at a minimum of 100. The synthetic cases cover:
+
+- a 1 mAh/min sag for 2 hours;
+- 4 and 6 mAh/min drains;
+- 1 mAh jitter;
+- a charge followed by a drain, measured from the high;
+- unplugging and re-watching;
+- the 30 s gap limit, a backwards clock, a critical record, and misuse.
+
+PASS, 2026-10-25.
+
+**Limits.**
+
+- The readings are Windows' mWh, not the EC's `0x94` word. That the EC
+  word moves the same way, at 1 mAh resolution, is INFERRED.
+- A drain slower than about 5 mAh/min, roughly 2.5 W net, is not caught.
+- Admission on AC below the minimum now needs 5 minutes of watching
+  first. A caller that cannot wait must charge above the minimum.
+
 ### Limitations
 
 - **Weak USB sources.** One snapshot cannot detect BATT-1: a weak source
-  the EC reports as charging counts as AC, at any percent. The AC rule
-  above (adapter set, not discharging) does not catch it either: on a
-  Mac's USB-C port under load, Windows reported charging, never
-  discharging, for 10 minutes while the battery lost about 5.8 W
-  ([results](#results-2026-10-25)). A runtime monitor that watches the
-  remaining charge fall would need to catch it. None exists yet.
+  the EC reports as charging counts as AC, at any percent, and the AC
+  rule above (adapter set, not discharging) does not catch it. The
+  [trend check](#trend-check-batt-1) does, for drains above about
+  5 mAh/min, on host replays only.
 - **INFERRED bounds.** The unknown-bit rule and the INFERRED bounds fail
   closed. If a real gaokun3 reading trips one, runs stop until the bound
   is corrected from a recorded reading.
