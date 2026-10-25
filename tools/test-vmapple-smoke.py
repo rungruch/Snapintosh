@@ -64,6 +64,12 @@ def test_dt_completion():
     out = appledt.DeviceTree(blob)
     check(out.get('/device-tree/chosen', 'random-seed') == bytes(range(1, 256)) + b'\x01',
           'random-seed placeholder filled with entropy')
+    check(out.get('/device-tree/chosen', 'nvram-bank-size') == struct.pack('<I', kcload.NVRAM_BANK_SIZE),
+          'nvram-bank-size set')
+    check(out.get('/device-tree/chosen', 'nvram-bank-count') == struct.pack('<I', 1), 'one NVRAM bank')
+    check(out.get('/device-tree/chosen', 'nvram-current-bank') == struct.pack('<I', 0), 'bank 0 current')
+    check(out.get('/device-tree/chosen', 'nvram-proxy-data') == kcload.nvram_image(),
+          'nvram-proxy-data is the bank, exactly nvram-bank-size long')
     check(refuses(synthetic_tree(seed=None)), 'a tree without /chosen/random-seed is refused')
     check(refuses(synthetic_tree(seed=bytes(64))), 'a random-seed shorter than XNU requests is refused')
     check(refuses(synthetic_tree(), entropy=lambda n: bytes(n)), 'an all-zero seed is refused')
@@ -85,6 +91,59 @@ def test_dt_completion():
     expected_gic = struct.pack('<QQQQ', kcload.QEMU_GICD_OFF, 0x10000,
                                kcload.QEMU_GICR_OFF, kcload.QEMU_GICR_SIZE) + bytes(16)
     check(out.get('/device-tree/arm-io/gic', 'reg') == expected_gic, 'GIC ranges rewritten')
+
+
+def chrp_accepts(image, bank_size):
+    """The CHRP handler's acceptance rules (iokit/Kernel/IONVRAMCHRPHandler.cpp),
+    written out independently of kcload: a version-1 "nvram" header whose
+    checksum and Adler-32 match, then the partitions it walks. Returns the
+    (offset, size) of the common and system partitions, or None if refused."""
+    if len(image) != bank_size or image[4:9] != b'nvram':
+        return None
+    total = image[0] + sum(image[2:16])
+    while total > 0xff:
+        total = (total & 0xff) + (total >> 8)
+    if total != image[1]:
+        return None
+    low, high = 1, 0
+    for byte in image[20:]:
+        low = (low + byte) % 65521
+        high = (high + low) % 65521
+    if struct.unpack_from('<I', image, 16)[0] != (high << 16 | low):
+        return None
+    found, off = {}, 0
+    while off < bank_size:
+        length = struct.unpack_from('<H', image, off + 2)[0] * 16
+        if length < 16 or off + length > bank_size:
+            break
+        name = image[off + 4:off + 16].rstrip(b'\0')
+        if name in (b'common', b'system'):
+            found[name] = (off + 16, length - 16)
+        off += length
+    return found
+
+
+def test_nvram():
+    image = kcload.nvram_image()
+    parts = chrp_accepts(image, kcload.NVRAM_BANK_SIZE)
+    check(parts is not None, 'the NVRAM bank passes the CHRP checksum and Adler-32')
+    check(set(parts) == {b'common', b'system'}, f'common and system partitions found: {parts}')
+    check(all(image[o] == 0 for o, _ in parts.values()), 'both partitions start empty')
+    check(sum(size + 16 for _, size in parts.values()) + 32 == kcload.NVRAM_BANK_SIZE,
+          'the header and partitions fill the bank')
+    for where in (1, 6, 17, 100, len(image) - 1):
+        bad = bytearray(image)
+        bad[where] ^= 0x40
+        check(chrp_accepts(bytes(bad), kcload.NVRAM_BANK_SIZE) is None,
+              f'the acceptance model refuses a bank with byte {where:#x} changed')
+    try:
+        kcload.nvram_image(bank_size=0x3000)
+        check(False, 'a bank too small for the system partition is refused')
+    except ValueError:
+        check(True, 'a bank too small for the system partition is refused')
+    # The real template is about 60 KiB before the bank is added.
+    check(kcload.NVRAM_BANK_SIZE + 0x10000 <= kcload.BOOT_ARGS_PA - kcload.DT_PA,
+          'the device tree with its NVRAM bank fits below boot_args')
 
 
 def test_boot_args():
@@ -171,6 +230,7 @@ def test_tidcp_report_distinguishes_empty_from_unreadable(capsys=None):
 
 def main():
     test_dt_completion()
+    test_nvram()
     test_boot_args()
     test_layout_alignment()
     test_tidcp_decoder()

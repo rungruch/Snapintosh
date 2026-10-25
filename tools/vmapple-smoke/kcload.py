@@ -13,8 +13,9 @@ stub drops into:
     physBase, and KVA = PA - physBase + virtBase.
   - the template device tree, completed the way the VM boot firmware would:
     placeholders resolved, /chosen/dram-base and dram-size added (arm_init
-    panics without them), /chosen/random-seed filled with entropy, the
-    counter rate filled in, and the arm-io ranges,
+    panics without them), /chosen/random-seed filled with entropy, an
+    empty NVRAM bank handed over as /chosen/nvram-proxy-data, the counter
+    rate filled in, and the arm-io ranges,
     PL011 and GICv3 register windows moved from the VirtualMac platform map
     onto QEMU virt's (UART at 0x09000000, GICD at 0x08000000, GICR at
     0x080A0000). The rest of the device map is left as the template has it;
@@ -44,9 +45,9 @@ import appledt                                                  # noqa: E402
 # 16 KiB page offset, or a KVA points into __LINKEDIT rather than __TEXT_EXEC.
 GUEST_RAM_BASE = 0x45004000
 GUEST_MEM_SIZE = 0x1C000000             # 448 MiB; QEMU gets 576 MiB
-DT_PA = 0x4A000000
-BOOT_ARGS_PA = 0x4A010000
-TOP_OF_KERNEL_DATA = 0x4A020000         # 16 KiB aligned, above all loader data
+DT_PA = 0x4A000000                      # up to 256 KiB: the NVRAM bank alone is 64 KiB
+BOOT_ARGS_PA = 0x4A040000
+TOP_OF_KERNEL_DATA = 0x4A050000         # 16 KiB aligned, above all loader data
 
 # QEMU virt's device map, as offsets under arm-io with an identity range
 # whose parent base is 0x08000000 (the GIC distributor base).
@@ -79,6 +80,60 @@ BOOT_ARGS_SIZE = 0x480
 # firmware to fill; XNU counts an all-zero seed as no seed and panics
 # "Expected 256 seed bytes from bootloader, but got 0".
 RANDOM_SEED_BYTES = 256
+
+# IODTNVRAM (iokit/Kernel/IONVRAM.cpp, initImageFormat) reads the boot
+# firmware's NVRAM bank from /chosen: nvram-bank-size, -bank-count and
+# -current-bank, and the bank's contents as nvram-proxy-data. A zero bank
+# size panics "NVRAM size is 0 bytes"; the VMAPPLE template carries all
+# three as zero and no proxy data. The CHRP handler (IONVRAMCHRPHandler.cpp)
+# accepts a bank that starts with Apple's 32-byte header named "nvram"
+# (version 1) whose CHRP checksum and Adler-32 match, and reads variables
+# from the partitions named "common" and "system". Without a valid image it
+# keeps a null image and a default 0x800-byte common partition and reads
+# through it, so an image is required, not optional; and it does not check
+# the proxy data's length, so that must be exactly the bank size.
+#
+# The bank's size, partition split and signature bytes are this smoke
+# loader's choices, not measured Apple VM firmware values: the kernel checks
+# none of them beyond the bounds above. 0x5a and 0x70 are the CHRP NVRAM
+# signatures for Apple's header and an Open Firmware common partition.
+NVRAM_BANK_SIZE = 0x10000
+NVRAM_SYSTEM_SIZE = 0x3000              # including its 16-byte CHRP header
+NVRAM_HEADER_SIG = 0x5A
+NVRAM_PARTITION_SIG = 0x70
+CHRP_BLOCK = 16
+
+
+def _chrp_header(sig, length, name):
+    """One 16-byte CHRP partition header. The checksum covers the signature,
+    the length and the name and folds carries back into the low byte."""
+    if length % CHRP_BLOCK or not CHRP_BLOCK <= length <= 0xFFFF * CHRP_BLOCK:
+        raise ValueError(f'CHRP partition length {length:#x}')
+    body = struct.pack('<H12s', length // CHRP_BLOCK, name.encode())
+    total = sig + sum(body)
+    while total > 0xFF:
+        total = (total & 0xFF) + (total >> 8)
+    return struct.pack('<BB', sig, total) + body
+
+
+def nvram_image(bank_size=NVRAM_BANK_SIZE, system_size=NVRAM_SYSTEM_SIZE):
+    """An empty version-1 Apple NVRAM bank: the 32-byte header, then an
+    empty system and common partition filling the bank. Empty means each
+    partition's first byte is NUL, where the kernel stops reading variables."""
+    import zlib
+    common_size = bank_size - 32 - system_size
+    if common_size < CHRP_BLOCK:
+        raise ValueError(f'NVRAM bank {bank_size:#x} too small for a {system_size:#x} system partition')
+    image = bytearray(bank_size)
+    image[0:16] = _chrp_header(NVRAM_HEADER_SIG, 32, 'nvram')
+    struct.pack_into('<I', image, 20, 1)                    # generation
+    image[32:48] = _chrp_header(NVRAM_PARTITION_SIG, system_size, 'system')
+    off = 32 + system_size
+    image[off:off + 16] = _chrp_header(NVRAM_PARTITION_SIG, common_size, 'common')
+    # The Adler-32 sits at offset 16 and covers everything from the
+    # generation (offset 20) to the end of the bank.
+    struct.pack_into('<I', image, 16, zlib.adler32(bytes(image[20:])))
+    return bytes(image)
 
 
 def _segments(kc):
@@ -118,6 +173,11 @@ def _complete_dt_tree(dt, out=None, entropy=os.urandom):
     if len(fill) != len(seed) or not any(fill):
         raise SystemExit('device tree: the entropy source returned no usable random-seed')
     dt.set('/device-tree/chosen', 'random-seed', fill)
+
+    dt.put('/device-tree/chosen', 'nvram-bank-size', struct.pack('<I', NVRAM_BANK_SIZE))
+    dt.put('/device-tree/chosen', 'nvram-bank-count', struct.pack('<I', 1))
+    dt.put('/device-tree/chosen', 'nvram-current-bank', struct.pack('<I', 0))
+    dt.put('/device-tree/chosen', 'nvram-proxy-data', nvram_image())
 
     dt.add('/device-tree/chosen', 'dram-base', struct.pack('<Q', GUEST_RAM_BASE))
     dt.add('/device-tree/chosen', 'dram-size', struct.pack('<Q', GUEST_MEM_SIZE))
@@ -176,6 +236,9 @@ def lay_out(kc, out):
     if not dt_path.exists():
         raise SystemExit(f'no device tree template at {dt_path}')
     dt_blob, resolved = _complete_dt(dt_path, out)
+    if len(dt_blob) > BOOT_ARGS_PA - DT_PA:
+        raise SystemExit(f'device tree is {len(dt_blob):#x} bytes; only {BOOT_ARGS_PA - DT_PA:#x} '
+                         f'fit before boot_args')
     dt_va = DT_PA - GUEST_RAM_BASE + mh_va                # KVA in the physmap
 
     payload = bytearray(TOP_OF_KERNEL_DATA - GUEST_RAM_BASE)
@@ -183,6 +246,8 @@ def lay_out(kc, out):
         payload[va - mh_va:va - mh_va + fs] = data[fo:fo + fs]
     payload[DT_PA - GUEST_RAM_BASE:DT_PA - GUEST_RAM_BASE + len(dt_blob)] = dt_blob
     args = _boot_args(mh_va, dt_va, len(dt_blob))
+    if BOOT_ARGS_PA + len(args) > TOP_OF_KERNEL_DATA:
+        raise SystemExit('boot_args do not fit below topOfKernelData')
     payload[BOOT_ARGS_PA - GUEST_RAM_BASE:BOOT_ARGS_PA - GUEST_RAM_BASE + len(args)] = args
 
     blob_path = out / 'vmapple-guest.bin'
