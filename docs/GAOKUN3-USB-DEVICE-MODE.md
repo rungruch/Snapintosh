@@ -1,9 +1,11 @@
 # gaokun3 USB device mode: study
 
-Status, 2026-10-26: **step 1 is built and tested on the host and in QEMU;
-nothing has run on the gaokun3.** This document sets what q1n1's A16 USB
-device path assumes against what the gaokun3 provides, and gives a staged
-plan whose first hardware step only reads.
+Status, 2026-10-26: **step 1 ran on the gaokun3** ([runs 16 and
+17](#runs-16-and-17-2026-10-26)). USB0 stays powered after ExitBootServices,
+but its DMA is translated by the SMMU, and q1n1's identity check would refuse
+it as it stands. This document sets what q1n1's A16 USB device path assumes
+against what the gaokun3 provides, and gives a staged plan whose first
+hardware step only reads.
 Phase 2 context: [GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#run-13-2026-10-26-usb-inventory).
 
 ## Goal
@@ -136,7 +138,73 @@ with no hardware access of its own; `el2qual.c` supplies the reads.
 | --- | --- |
 | Host: `python3 tools/test-el2qual.py` (`tools/test-el2qual-usbprobe.c`, ASan+UBSan) | PASS. Against a fake that logs every read: no controller word is read unless the gate is open, for every closed gate (GDSC off; master, AXI or CNOC off; a needed word unmapped or faulting); USB1's words decide nothing; one unmapped controller word means none is read; a fault stops the reads; the SMMU match with and without extended stream IDs, masks, invalid entries, the 128-group cap, faults, unmapped pages and all-ones reads; the exact report lines, and their place and colour on the screen. Each of eight deliberately broken variants of the gate and the SMMU search fails the test |
 | QEMU: `python3 tools/qemu-el2qual.py` (`max-usb`, `max-vhe-usb-smmu`, and the eleven existing configurations) | PASS. The virt machine has none of these blocks: every GCC word `UNMAPPED`, power `UNREAD`, the controller not read, the SMMU `NOT READ: ALL ONES`, no SError, the CPU report intact. The checker recomputes each power decision from the words printed and fails a controller read while not ON; its self-test rejects wrong logs |
-| gaokun3 | NOT RUN |
+| gaokun3 | PASS, runs 16 and 17 (below) |
+
+### Runs 16 and 17, 2026-10-26
+
+**How.** From the `usb-read` stick: el2qual 5 `e1e58904`, built from
+`51800a1`, with run 10's systemd-boot, slbounce, `tcblaunch.exe` and device
+tree. Each run was a cold boot, read only and photographed.
+- Run 16, entry 8: `nopac nosmp usb`.
+- Run 17, entry 9: `nopac nosmp exit-vhe usb-smmu`.
+
+**Ports** (the operator's account, given after the runs, for both runs):
+- the stick was in the other port, USB1, the one firmware booted from;
+- the charger was in the power-button port, USB0.
+
+So USB0 had only a power-only partner, and the firmware was not using it to
+boot. That is the arrangement closest to the later Mac link, whose cable
+also supplies power on that port.
+
+**Result (VERIFIED, photographed; identical in both runs unless said).**
+
+| Word | Before / after ExitBootServices | Reading |
+| --- | --- | --- |
+| USB0 GDSC | `F822F000` / `F822F000` | bit 31 `PWR_ON`: powered |
+| USB0 master clock | `00000221` / `00000221` | bit 31 clear: running |
+| USB0 sleep, mock UTMI, AXI, CNOC | `00000001` each, both times | running |
+| USB1 GDSC, master clock | `F822F000`, `00000221`, both times | powered and running too |
+| `USB0 POWER` | `ON` / `ON` | |
+| xHCI `CAPLENGTH`/`HCIVERSION` | `01100020` | caplength `0x20`; the A16's is `0x30` |
+| xHCI `HCSPARAMS1` | `02000340` | 2 ports, as the A16's; 64 slots |
+| `GSNPSID` | `33313130` | the A16's value |
+| `GVERNUM` | `3139312A` | the A16's is `3230302A` |
+| `GCTL` | `00101005` | `PRTCAPDIR` 1: host mode, as firmware runs it |
+| `GUSB2PHYCFG` / `GUSB3PIPECTL` | `00102400` / `0B0C1402` | the first is the A16's |
+| `DCFG` / `DCTL` | `00080805` / `00F00000` | device side never started (Run/Stop clear) |
+| `GEVNTADRLO(0)` | `00000000` | no device event buffer: host mode |
+| qscratch `HS_PHY_CTRL` / `SS_PHY_CTRL` | `10000000` / `00000000` | VBUS overrides not set |
+| apps_smmu `sCR0` (run 17) | `00240406` | `CLIENTPD` clear, so the SMMU is **on**; `USFCFG` set, so unmatched streams fault; no extended IDs |
+| apps_smmu `IDR0` (run 17) | `7C017ED4` | 212 stream match groups |
+| stream `0x820` (run 17) | group 6: `SMR 80000820`, `S2CR 00000006` | valid, exact match; `TYPE` 0, so **translate**, through context bank 6 |
+
+`USB SERROR NONE` in both runs. The VHE exit in run 17 matched runs 11 and
+12.
+
+**Against the assumptions above.**
+
+1. **Powered after ExitBootServices: holds.** USB0 had only the charger,
+   and the stick was on USB1. The firmware did not power USB0 down at
+   ExitBootServices, although it was not booting from it, so the A16's
+   takeover path applies, without clock or power programming. Not run:
+   USB0 with nothing attached, or with the Mac attached.
+2. **PHY initialised: likely.** The controller runs in host mode with the
+   A16's `GUSB2PHYCFG`. A device-mode run shows it.
+3. **Identity: q1n1 would refuse it.** `GSNPSID` and the port count match,
+   but `snapshot()` also requires `CAPLENGTH` `0x30`, and the gaokun3's is
+   `0x20`. q1n1 needs the gaokun3's identity, as a gaokun3 entry, not a
+   looser check.
+4. **Identity DMA: does not hold as such.** USB0's DMA goes through context
+   bank 6 of an enabled SMMU. Whether that bank maps physical addresses 1:1
+   is unknown, so no device-mode DMA may run yet. The options:
+   - read context bank 6's type and translation (read only, like step 1);
+   - or have q1n1 point stream `0x820` at bypass, an SMMU write that needs
+     its own design and go-ahead.
+
+**A correction made after these runs.** The stage searched at most 128
+stream match groups, on the wrong belief that SMMUv2 allows no more. Linux
+uses `IDR0.NUMSMRG`, all 8 bits, and this SMMU reports 212. The cap is now
+255. Run 17's answer stands, because the match was group 6.
 
 ### Step 2: decided by step 1
 

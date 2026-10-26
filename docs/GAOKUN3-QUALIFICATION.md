@@ -357,12 +357,15 @@ between.
 | 13 | 2026-10-26 | usb-inventory (q1n1 `usb-probe-hold`, no slbounce) | q1n1-usb-probe-hold.efi `0366c947` (built from q1n1 `660dfbb` plus the uncommitted hold option) | PASS, read only: entry EL1; `USB FUNCTION: not installed`; `USB2 HOST` 3 handles, paths `Pci(0x80,0x0)`, `Pci(0x81,0x0)`, `Pci(0x82,0x0)`; `SERIAL IO: not installed`; returned to the boot menu after its hold ([GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#run-13-2026-10-26-usb-inventory)) |
 | 14 | 2026-10-26 | q1n1-foothold, entry 1 (`--el2`) | q1n1.efi `3bf2020f` (q1n1 `6865a21`, `-DQ1N1_VHE_EXIT -DQ1N1_DT_FRAMEBUFFER`) | PASS: q1n1's first boot on the gaokun3. Green bar, `EL2 CONFIRMED AFTER EXITBOOTSERVICES`, entry EL1, current EL2, MIDR `0x410FD4B0`; `SCREEN: DT SIMPLE-FB - CLEANED DRAWS` at `0xC6200000`, its text legible; SPCR names a UART at `0xA90000`, type `0x11`, that q1n1 does not drive ([GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#runs-14-and-15-2026-10-26-q1n1s-first-boot)) |
 | 15 | 2026-10-26 | q1n1-foothold, entry 2 (`--el2 --exit-vhe`) | `3bf2020f` (as run 14) | PASS: as run 14, plus `VHE EXIT DONE PLAN MATCH`, with the entry and exit registers equal to runs 11 and 12 |
+| 16 | 2026-10-26 | usb-read, entry 8 (`nopac nosmp usb`) | `e1e58904` (`51800a1`, el2qual 5) | PASS, read only: USB0 powered and clocked before and after ExitBootServices (`GDSC F822F000`, master `00000221`, AXI and CNOC running); controller read: `GSNPSID 33313130`, `GVERNUM 3139312A`, `GCTL 00101005` (host), xHCI `CAPLENGTH 0x20`; no SError. Stick in the other port (USB1), charger in the power-button port (USB0), the operator's account ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#runs-16-and-17-2026-10-26)) |
+| 17 | 2026-10-26 | usb-read, entry 9 (`nopac nosmp exit-vhe usb-smmu`) | `e1e58904` (as run 16) | PASS, read only: the VHE exit as runs 11 and 12, then the same USB values as run 16; apps_smmu enabled (`sCR0 00240406`), 212 stream match groups, USB0's stream `0x820` matched by group 6 and **translated** through context bank 6 (`S2CR 00000006`); no SError; ports as run 16 |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
 recorded. Runs 11 and 12 were matched the same way: one CPU with PAuth
 `NOT RUN`, then eight with PAuth. Runs 14 and 15 likewise: without, then
-with the `VHE EXIT` lines. Every one ended in a complete report: no hang, no reboot, no
+with the `VHE EXIT` lines. Runs 16 and 17 likewise: without, then with the
+`VHE EXIT` and `SMMU` lines. Every one ended in a complete report: no hang, no reboot, no
 unexpected exception.
 
 Full SHA-256 of run 3's `el2qual.efi`:

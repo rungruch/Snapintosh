@@ -314,9 +314,14 @@ q1n1 has no transport to the Mac yet.
 - **The USB link to the Mac** ([run 13](#run-13-2026-10-26-usb-inventory); study:
   [GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md)). It must be built on q1n1's own
   DWC3 device-mode driver, from a controller the firmware leaves in host
-  mode. Its first step, el2qual's read-only `usb` stage, is built and tested
-  on the host and in QEMU. Next is a supervised run of it on the gaokun3:
-  does USB0 stay powered after ExitBootServices?
+  mode. Its first step, el2qual's read-only `usb` stage, ran on the gaokun3
+  (runs 16 and 17).
+  - **USB0 stays powered after ExitBootServices.**
+  - **Two things block a device-mode run.** q1n1's identity check expects
+    the A16's xHCI `CAPLENGTH` (`0x30`, the gaokun3's is `0x20`), and USB0's
+    DMA is translated by the SMMU through context bank 6, so it is not known
+    to be identity.
+  - **Next:** read context bank 6, or design a bypass for stream `0x820`.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has
