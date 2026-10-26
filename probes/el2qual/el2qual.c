@@ -42,8 +42,8 @@
  *               clocked, the controller's own state (usbprobe.c). Read
  *               only. Off by default.
  *   usb-smmu    "usb", then also apps_smmu's state for USB0's stream and,
- *               when it translates, the context bank it names. Off by
- *               default.
+ *               when it translates, the context bank it names, and the
+ *               stage-2 bank that one nests, if any. Off by default.
  *
  * With no GOP mode that has a framebuffer address, el2qual draws on the
  * device tree's /chosen simple-framebuffer if the firmware's memory map

@@ -173,6 +173,56 @@ static void read_bank(struct el2q_usb *u, const struct el2q_usb_hw *hw)
     if (u->cb != EL2Q_USB_CB_FAULT) u->cb = EL2Q_USB_CB_READ;
 }
 
+/* The stage-2 bank a nested bank names; see usbprobe.h. Only after the
+ * stage-1 bank was read in full and found nested. */
+static void read_stage2(struct el2q_usb *u, const struct el2q_usb_hw *hw)
+{
+    if (u->cb != EL2Q_USB_CB_READ || (u->cbar >> 16 & 3) != 3) return;
+    u->s2_index = u->cbar >> 8 & 0xff;
+    unsigned shift = (u->id1 & IDR1_PAGESIZE) ? 16 : 12;
+    uint64_t numpage = 1ull << ((u->id1 >> 28 & 7) + 1);
+    uint64_t gr1 = EL2Q_USB_SMMU_BASE + (1ull << shift);
+    uint64_t page = (numpage + u->s2_index) << shift;
+    u->s2_page = EL2Q_USB_SMMU_BASE + page;
+    if (u->s2_index >= (u->id1 & 0xff) || page + (1ull << shift) > EL2Q_USB_SMMU_SIZE) {
+        u->s2 = EL2Q_USB_CB_OUT_OF_RANGE;
+        return;
+    }
+    if (hw->mapped(hw->ctx, gr1 + SMMU_GR1_CBAR(u->s2_index)) ||
+        hw->mapped(hw->ctx, gr1 + SMMU_GR1_CBA2R(u->s2_index)) || hw->mapped(hw->ctx, u->s2_page)) {
+        u->s2 = EL2Q_USB_CB_UNMAPPED;
+        return;
+    }
+    const uint64_t at[] = {gr1 + SMMU_GR1_CBAR(u->s2_index), gr1 + SMMU_GR1_CBA2R(u->s2_index),
+                           u->s2_page + CB_SCTLR, u->s2_page + CB_TCR,
+                           u->s2_page + CB_TTBR0, u->s2_page + CB_TTBR0 + 4};
+    uint32_t value[sizeof at / sizeof at[0]] = {0};
+    u->s2 = EL2Q_USB_CB_READ;
+    for (unsigned i = 0; i < sizeof at / sizeof at[0]; i++) {
+        uint64_t word = 0, f = hw->read32(hw->ctx, at[i], &word);
+        if (f) {
+            u->s2 = EL2Q_USB_CB_FAULT;
+            u->s2_esr = f;
+            u->s2_at = at[i];
+            break;
+        }
+        value[i] = (uint32_t)word;
+        u->s2_words = i + 1;
+        /* A bank whose own CBAR is not a stage-2 one is not what the nested
+         * bank's index was taken to mean: interpret nothing more of it. */
+        if (i == 0 && (value[0] >> 16 & 3) != 0) {
+            u->s2_cbar = value[0];
+            u->s2 = EL2Q_USB_CB_NOT_STAGE2;
+            return;
+        }
+    }
+    u->s2_cbar = value[0];
+    u->s2_cba2r = value[1];
+    u->s2_sctlr = value[2];
+    u->s2_tcr = value[3];
+    u->s2_ttbr0 = value[4] | (uint64_t)value[5] << 32;
+}
+
 void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
 {
     u->smmu = EL2Q_USB_SMMU_UNMAPPED;
@@ -182,6 +232,9 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
     u->cb_index = u->id1 = u->cbar = u->cba2r = u->cb_words = 0;
     u->cb_sctlr = u->cb_tcr = u->cb_tcr2 = u->cb_mair0 = u->cb_mair1 = 0;
     u->cb_page = u->cb_ttbr0 = u->cb_esr = u->cb_at = 0;
+    u->s2 = EL2Q_USB_CB_NOT_TRIED;
+    u->s2_index = u->s2_cbar = u->s2_cba2r = u->s2_sctlr = u->s2_tcr = u->s2_words = 0;
+    u->s2_page = u->s2_ttbr0 = u->s2_esr = u->s2_at = 0;
     if (!hw || !hw->mapped || !hw->read32) return;
     /* sCR0, IDR0, the SMRs and the S2CRs all lie in the first 4 KiB of the
      * global register space: S2CR(254), the last there can be, ends it. */
@@ -223,6 +276,7 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
         u->group = n;
         u->smmu = EL2Q_USB_SMMU_MATCH;
         read_bank(u, hw);
+        read_stage2(u, hw);
         return;
     }
 #undef SMMU_READ
@@ -254,6 +308,12 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
  *   SMMU CB<nn> CBAR <w> CBA2R <w> SCTLR <w>
  *   SMMU CB<nn> TCR <w> TCR2 <w>
  *   SMMU CB<nn> TTBR0 <16 hex> MAIR0 <w> MAIR1 <w>
+ * and when that bank is nested, its stage-2 bank:
+ *   SMMU S2 <NOT READ: OUT OF RANGE|NOT READ: UNMAPPED|FAULT AT <a> ESR <e>|NOT A STAGE-2 BANK, CBAR <w>>
+ * or, when its words were read (FAULT also prints the ones read before it):
+ *   SMMU S2 CB<nn> AT <a> CBAR <w> CBA2R <w>
+ *   SMMU S2 CB<nn> SCTLR <w> TCR <w>
+ *   SMMU S2 CB<nn> TTBR0 <16 hex>
  * and last
  *   USB SERROR <PENDING|NONE>
  * <w> is eight hex digits, or UNMAPPED, FAULT or NOT READ for a word that
@@ -382,6 +442,40 @@ static unsigned cb_lines(const struct el2q_usb *u, unsigned index, struct lbuf *
     return count;
 }
 
+static unsigned s2_lines(const struct el2q_usb *u, unsigned index, struct lbuf *b)
+{
+    if (u->s2 == EL2Q_USB_CB_NOT_TRIED) return 0;
+    char cb[] = {'C', 'B', "0123456789ABCDEF"[u->s2_index >> 4 & 15], "0123456789ABCDEF"[u->s2_index & 15], 0};
+    unsigned w = u->s2_words;
+    int words = u->s2 == EL2Q_USB_CB_READ || (u->s2 == EL2Q_USB_CB_FAULT && w);
+    unsigned status = u->s2 != EL2Q_USB_CB_READ;
+    unsigned count = status + (words ? 3 : 0);
+    if (status && index == 0) {
+        put_s(b, "SMMU S2 ");
+        if (u->s2 == EL2Q_USB_CB_OUT_OF_RANGE) put_s(b, "NOT READ: OUT OF RANGE");
+        else if (u->s2 == EL2Q_USB_CB_UNMAPPED) put_s(b, "NOT READ: UNMAPPED");
+        else if (u->s2 == EL2Q_USB_CB_NOT_STAGE2) { put_s(b, "NOT A STAGE-2 BANK, CBAR "); put_hex(b, u->s2_cbar, 8); }
+        else { put_s(b, "FAULT AT "); put_hex(b, u->s2_at, 8); put_s(b, " ESR "); put_hex(b, u->s2_esr, 8); }
+        return count;
+    }
+    index -= status;
+    if (!words || index > 2) return count;
+    put_s(b, "SMMU S2 "); put_s(b, cb);
+    if (index == 0) {
+        put_s(b, " AT "); put_hex(b, u->s2_page, 8);
+        put_word(b, " CBAR ", w > 0 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->s2_cbar);
+        put_word(b, " CBA2R ", w > 1 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->s2_cba2r);
+    } else if (index == 1) {
+        put_word(b, " SCTLR ", w > 2 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->s2_sctlr);
+        put_word(b, " TCR ", w > 3 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->s2_tcr);
+    } else if (index == 2) {
+        put_s(b, " TTBR0 ");
+        if (w > 5) put_hex(b, u->s2_ttbr0, 16);
+        else put_s(b, "NOT READ");
+    }
+    return count;
+}
+
 static unsigned smmu_lines(const struct el2q_usb *u, unsigned index, struct lbuf *b)
 {
     if (u->smmu == EL2Q_USB_SMMU_NOT_ASKED) return 0;
@@ -416,6 +510,8 @@ void el2q_usb_line(const struct el2q_usb *u, unsigned index, char out[EL2Q_USB_L
     if (index < (n = smmu_lines(u, index, &b))) return;
     index -= n;
     if (index < (n = cb_lines(u, index, &b))) return;
+    index -= n;
+    if (index < (n = s2_lines(u, index, &b))) return;
     index -= n;
     if (index == 0) put_s(&b, u->isr & (1u << 8) ? "USB SERROR PENDING" : "USB SERROR NONE");
 }

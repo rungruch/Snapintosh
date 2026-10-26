@@ -350,7 +350,7 @@ def check_usb(lines, expect):
             problems.append(f'the controller was read although power after ExitBootServices was '
                             f'{power.get("A")}: {core}')
     smmu = [line for line in lines if line.startswith('SMMU ')]
-    smmu = [line for line in smmu if not line.startswith(('SMMU CB', 'SMMU ID1'))]
+    smmu = [line for line in smmu if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 '))]
     if expect.get('smmu') and len(smmu) != 2:
         problems.append(f'usb-smmu asked but {len(smmu)} SMMU lines')
     if not expect.get('smmu') and smmu:
@@ -362,6 +362,13 @@ def check_usb(lines, expect):
     match = next((m for line in lines for m in [re.match(
         r'^SMMU STREAM 820 MATCH SMR [0-9A-F]{2} [0-9A-F]{8} S2CR ([0-9A-F]{8})$', line)] if m), None)
     bank = [line for line in lines if line.startswith(('SMMU CB', 'SMMU ID1'))]
+    stage2 = [line for line in lines if line.startswith('SMMU S2 ')]
+    cbar = next((m for line in bank for m in [re.match(r'^SMMU CB[0-9A-F]{2} CBAR ([0-9A-F]{8}) ', line)] if m), None)
+    nested = cbar is not None and (int(cbar[1], 16) >> 16) & 3 == 3
+    if stage2 and not nested:
+        problems.append(f'stage-2 lines without a read, nested bank: {stage2[0]}')
+    if nested and not stage2:
+        problems.append('a nested bank without its stage-2 lines')
     if not match and bank:
         problems.append(f'context-bank lines without a stream match: {bank[0]}')
     if match:
@@ -621,6 +628,15 @@ def self_test():
                     'S2CR 00000006', 'S2CR 00010006'), expect, False)
                 expect_result(f'{name} a translating S2CR called not translated', matched.replace(
                     bank, bank.split('\n')[0] + '\nSMMU CB NOT TRANSLATED'), expect, False)
+                expect_result(f'{name} stage-2 lines without a nested bank', matched.replace(
+                    'MAIR1 00000000', 'MAIR1 00000000\nSMMU S2 CB7E SCTLR 00000061 TCR 80023559'),
+                    expect, False)
+                nested_log = matched.replace('CBAR 00010100', 'CBAR 00037E03')
+                expect_result(f'{name} a nested bank without its stage 2', nested_log, expect, False)
+                expect_result(f'{name} a nested bank with its stage 2', nested_log.replace(
+                    'MAIR1 00000000', 'MAIR1 00000000\nSMMU S2 CB7E AT 150FE000 CBAR 00000003 CBA2R 00000001\n'
+                    'SMMU S2 CB7E SCTLR 00000061 TCR 80023559\nSMMU S2 CB7E TTBR0 000300009F700000'),
+                    expect, True)
             else:
                 expect_result(f'{name} SMMU unasked', good.replace(
                     'USB SERROR NONE', 'SMMU SCR0 0 IDR0 0\nSMMU STREAM 820 NO MATCH\nUSB SERROR NONE'),

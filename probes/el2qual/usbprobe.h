@@ -98,7 +98,8 @@ enum el2q_usb_cb {
     EL2Q_USB_CB_OUT_OF_RANGE,   /* the bank is past NUMCB, or its page past the SMMU's window */
     EL2Q_USB_CB_UNMAPPED,
     EL2Q_USB_CB_FAULT,
-    EL2Q_USB_CB_READ
+    EL2Q_USB_CB_READ,
+    EL2Q_USB_CB_NOT_STAGE2      /* the nested bank's own CBAR is not a stage-2 bank's */
 };
 
 struct el2q_usb_phase {
@@ -125,6 +126,14 @@ struct el2q_usb {
     uint64_t cb_ttbr0;                       /* read as two 32-bit halves */
     uint32_t cb_words;                       /* bank words read, in the order above */
     uint64_t cb_esr, cb_at;
+    /* The stage-2 bank a nested (CBAR TYPE 3) bank names in CBAR bits 15:8. */
+    uint32_t s2;                             /* enum el2q_usb_cb */
+    uint32_t s2_index;
+    uint64_t s2_page;
+    uint32_t s2_cbar, s2_cba2r, s2_sctlr, s2_tcr;
+    uint64_t s2_ttbr0;                       /* VTTBR, read as two 32-bit halves */
+    uint32_t s2_words;
+    uint64_t s2_esr, s2_at;
     uint64_t smmu_esr;
     uint64_t isr;                            /* ISR_EL1 after the reads: a pending SError shows here */
 };
@@ -161,7 +170,14 @@ void el2q_usb_core(struct el2q_usb_phase *phase, const struct el2q_usb_hw *hw);
  * numpage + n), and the bank must be below NUMCB with its page inside the
  * SMMU's window. Then GR1's CBAR(n) and CBA2R(n), and the bank's SCTLR, TCR,
  * TCR2, TTBR0, MAIR0 and MAIR1, each page checked for its mapping first and
- * nothing read after a fault. */
+ * nothing read after a fault.
+ *
+ * When that bank is nested (CBAR TYPE 3, stage 1 then stage 2), CBAR bits
+ * 15:8 are read as the stage-2 bank's index (INFERRED from the SMMUv2
+ * architecture; Linux defines no field there for this type). Its own CBAR
+ * must then be TYPE 0, a stage-2 bank, before anything else of it is
+ * interpreted; otherwise NOT_STAGE2. Read with the same range and mapping
+ * rules: CBAR, CBA2R, SCTLR, TCR and TTBR0. */
 void el2q_usb_smmu(struct el2q_usb *usb, const struct el2q_usb_hw *hw);
 
 /* Fixed-format report lines, empty past the last; see usbprobe.c. */

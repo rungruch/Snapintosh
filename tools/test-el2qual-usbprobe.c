@@ -342,6 +342,110 @@ static void test_bank(void)
     CHECK(u.cb == EL2Q_USB_CB_FAULT && u.cb_words == 0 && u.cb_at == SMMU(0x24));
 }
 
+/* Run 19's real values: ID1 6000007F (4 KiB pages, banks from page 128,
+ * 127 banks), bank 6 nested (CBAR 00037E03) with stage 1 off, naming bank
+ * 0x7E, whose page is (128 + 126) * 4 KiB = 0x150FE000 and whose GR1 words
+ * are CBAR(126) at 0x150011F8 and CBA2R(126) at 0x150019F8. Bank 126's
+ * values here are synthetic. */
+#define CB126(off) SMMU(0xfe000 + (off))
+static void nested_fixture(void)
+{
+    bank_fixture();
+    set(SMMU(0x24), 0x6000007f);
+    set(GR1(0x18), 0x00037e03);
+    set(CB6(0x00), 0x000000e0);
+    set(CB6(0x30), 0);
+    set(CB6(0x10), 0x00000060);
+    set(CB6(0x20), 0);
+    set(CB6(0x24), 0);
+    set(CB6(0x38), 0);
+    set(GR1(0x1f8), 0x00000003);                /* TYPE 0: stage 2, VMID 3 */
+    set(GR1(0x9f8), 0x00000001);
+    set(CB126(0x00), 0x00000061);
+    set(CB126(0x30), 0x80023559);
+    set(CB126(0x20), 0x9f700000);
+    set(CB126(0x24), 0x00030000);
+}
+
+static int s2_reads(void)
+{
+    int n = 0;
+    for (unsigned i = 0; i < hw_state.nlog; i++)
+        n += hw_state.log[i] == GR1(0x1f8) || hw_state.log[i] == GR1(0x9f8) ||
+             (hw_state.log[i] >= CB126(0) && hw_state.log[i] < CB126(0x1000));
+    return n;
+}
+
+static void test_stage2(void)
+{
+    struct el2q_usb u;
+    memset(&u, 0, sizeof u);
+
+    nested_fixture();
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_READ && u.cb_sctlr == 0xe0 && u.cbar == 0x00037e03);
+    CHECK(u.s2 == EL2Q_USB_CB_READ && u.s2_index == 0x7e && u.s2_page == SMMU(0xfe000));
+    CHECK(u.s2_cbar == 3 && u.s2_cba2r == 1 && u.s2_sctlr == 0x61 && u.s2_tcr == 0x80023559);
+    CHECK(u.s2_ttbr0 == 0x000300009f700000ull && u.s2_words == 6);
+
+    /* Not nested: no stage-2 bank, nothing of one read. */
+    nested_fixture();
+    set(GR1(0x18), 0x00017e03);                 /* TYPE 1: stage 2 bypassed */
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_READ && u.s2 == EL2Q_USB_CB_NOT_TRIED && s2_reads() == 0);
+
+    /* The named bank is not a stage-2 one: its CBAR alone is read. */
+    nested_fixture();
+    set(GR1(0x1f8), 0x00010003);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.s2 == EL2Q_USB_CB_NOT_STAGE2 && u.s2_cbar == 0x00010003 && s2_reads() == 1);
+
+    /* Past NUMCB, or its page unmapped: nothing of it read. */
+    nested_fixture();
+    set(SMMU(0x24), 0x60000040);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.s2 == EL2Q_USB_CB_OUT_OF_RANGE && s2_reads() == 0);
+    nested_fixture();
+    hw_state.unmapped[hw_state.nunmapped++] = CB126(0);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.s2 == EL2Q_USB_CB_UNMAPPED && s2_reads() == 0);
+
+    /* A fault in VTTBR's upper half keeps what came before. */
+    nested_fixture();
+    hw_state.fault[hw_state.nfault++] = CB126(0x24);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.s2 == EL2Q_USB_CB_FAULT && u.s2_words == 5 && u.s2_at == CB126(0x24) && u.s2_tcr == 0x80023559);
+
+    /* A fault in the stage-1 bank: no stage-2 read is attempted. */
+    nested_fixture();
+    hw_state.fault[hw_state.nfault++] = CB6(0x3c);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_FAULT && u.s2 == EL2Q_USB_CB_NOT_TRIED && s2_reads() == 0);
+
+    /* The lines: after the four stage-1 bank lines. */
+    char l[40][EL2Q_USB_LINE_COLS + 1];
+    memset(&u, 0, sizeof u);
+    nested_fixture();
+    el2q_usb_gcc(&u.after, &hw);
+    el2q_usb_smmu(&u, &hw);
+    unsigned n = 0;
+    for (; n < 40; n++) {
+        el2q_usb_line(&u, n, l[n]);
+        if (!l[n][0]) break;
+        CHECK(strlen(l[n]) <= EL2Q_USB_LINE_COLS);
+    }
+    CHECK(n == 4 + 1 + 2 + 4 + 3 + 1);
+    CHECK(!strcmp(l[8], "SMMU CB06 CBAR 00037E03 CBA2R 00000001 SCTLR 000000E0"));
+    CHECK(!strcmp(l[11], "SMMU S2 CB7E AT 150FE000 CBAR 00000003 CBA2R 00000001"));
+    CHECK(!strcmp(l[12], "SMMU S2 CB7E SCTLR 00000061 TCR 80023559"));
+    CHECK(!strcmp(l[13], "SMMU S2 CB7E TTBR0 000300009F700000"));
+    CHECK(!strcmp(l[14], "USB SERROR NONE"));
+    set(GR1(0x1f8), 0x00010003);
+    el2q_usb_smmu(&u, &hw);
+    el2q_usb_line(&u, 11, l[11]);
+    CHECK(!strcmp(l[11], "SMMU S2 NOT A STAGE-2 BANK, CBAR 00010003"));
+}
+
 static unsigned lines(const struct el2q_usb *u, char out[][EL2Q_USB_LINE_COLS + 1], unsigned max)
 {
     unsigned n = 0;
@@ -470,6 +574,7 @@ unsigned test_usbprobe(void)
     test_gate();
     test_smmu();
     test_bank();
+    test_stage2();
     test_lines();
     test_report();
     return checks;
