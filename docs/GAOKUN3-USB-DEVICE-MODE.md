@@ -282,6 +282,41 @@ repeated run 16 exactly. Both were read only, with no SError.
 outside q1n1's high-speed-only path. It is recorded as photographed; what
 moves it is not known.
 
+### Step 1c: the nested stage-2 bank (el2qual 7, read only)
+
+Run 19 found context bank 6 nested: `CBAR` type 3, stage 1 then stage 2,
+with stage 1 off. So USB0's DMA is whatever the stage-2 bank does. `usb-smmu`
+now reads that bank too.
+
+- **When.** Only after the stage-1 bank was read in full and its `CBAR` is
+  type 3.
+- **Which bank.** `CBAR` bits 15:8 of the stage-1 bank, `0x7E` = 126 on
+  the gaokun3. This reading is INFERRED from the SMMUv2 architecture.
+- **A check on that inference.** The named bank's own `CBAR` must be type 0,
+  a stage-2 bank. If it is not, only that `CBAR` is read, and the stage
+  reports `NOT A STAGE-2 BANK` instead of interpreting the rest.
+- **Refused without a read** under the same range and mapping rules as the
+  stage-1 bank: below `NUMCB`, inside the SMMU's 1 MiB window, mapped. On
+  the gaokun3, bank 126's page is `0x150FE000`, the second-last page of the
+  window.
+- **What it reads:** `CBAR`, `CBA2R`, `SCTLR` (`M`), `TCR` (in VTCR form)
+  and `TTBR0` (the VTTBR, as two 32-bit halves, INFERRED to be accepted as
+  before). A stage-2 bank has no MAIRs. Nothing is read after a fault.
+
+How the answer decides the next step:
+- `SCTLR.M` clear on bank 126: USB0's DMA reaches physical memory 1:1,
+  with no SMMU change needed.
+- `M` set: its tables, from `TCR`/`TTBR0`, need a software walk at the
+  addresses q1n1 will use. Firmware may well map stage 2 1:1 for normal
+  memory, but that is not assumed.
+- Otherwise: the bypass design.
+
+| Check | Result, 2026-10-26 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS, 61212 checks. A fixture with run 19's real `ID1`, `CBAR(6)` and bank-6 values covers: bank 126 found at `0x150FE000`; nothing of a stage 2 read for a bank that is not nested; only the `CBAR` read when the named bank is not stage 2; nothing read past `NUMCB` or with an unmapped page; a fault inside `VTTBR` keeps the words before it; a stage-1 fault stops everything; the exact lines. Seven broken variants (no nesting check, no stage-1-read check, no stage-2 type check, no `NUMCB` check, no mapping check, the wrong index field, `VTTBR` upper half dropped) each fail it. Writing the tests also caught a line-formatting bug, now fixed, that prefixed every later line with the stage-2 bank's name |
+| QEMU: all 13 configurations | PASS. No stage-2 lines on virt (no match). The checker requires stage-2 lines exactly after a read, nested bank; its self-test rejects both wrong combinations and accepts the right one |
+| gaokun3 | NOT RUN |
+
 ### Step 2: decided by step 1
 
 - **If USB0 stays powered after ExitBootServices,** the A16 path applies

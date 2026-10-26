@@ -198,7 +198,8 @@ recognises, [GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#vhe-hand-off)), `usb`
 and `usb-smmu` (since el2qual 5: whether the gaokun3's USB0 controller is
 powered before and after ExitBootServices, read from the clock controller,
 and only then its own state; `usb-smmu` adds the SMMU entry for its stream
-and, since el2qual 6, the context bank it translates through;
+and, since el2qual 6, the context bank it translates through and, since
+el2qual 7, the stage-2 bank a nested one names;
 read only, [GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#step-1-read-only-el2qual-stage-usb)),
 and four test-only options: `emulate-vhe` (recreates slbounce's `E2H|TGE` state on a machine
 that started at EL2), `emulate-rotated` (treats the firmware's GOP mode as
