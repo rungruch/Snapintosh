@@ -359,13 +359,17 @@ between.
 | 15 | 2026-10-26 | q1n1-foothold, entry 2 (`--el2 --exit-vhe`) | `3bf2020f` (as run 14) | PASS: as run 14, plus `VHE EXIT DONE PLAN MATCH`, with the entry and exit registers equal to runs 11 and 12 |
 | 16 | 2026-10-26 | usb-read, entry 8 (`nopac nosmp usb`) | `e1e58904` (`51800a1`, el2qual 5) | PASS, read only: USB0 powered and clocked before and after ExitBootServices (`GDSC F822F000`, master `00000221`, AXI and CNOC running); controller read: `GSNPSID 33313130`, `GVERNUM 3139312A`, `GCTL 00101005` (host), xHCI `CAPLENGTH 0x20`; no SError. Stick in the other port (USB1), charger in the power-button port (USB0), the operator's account ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#runs-16-and-17-2026-10-26)) |
 | 17 | 2026-10-26 | usb-read, entry 9 (`nopac nosmp exit-vhe usb-smmu`) | `e1e58904` (as run 16) | PASS, read only: the VHE exit as runs 11 and 12, then the same USB values as run 16; apps_smmu enabled (`sCR0 00240406`), 212 stream match groups, USB0's stream `0x820` matched by group 6 and **translated** through context bank 6 (`S2CR 00000006`); no SError; ports as run 16 |
+| 18 | 2026-10-26 | usb-read, entry 8 (`nopac nosmp usb`) | `6d0760c2` (el2qual 6, built before its commit; it rebuilds identically from the tree) | PASS, read only: as run 16, every USB value the same; no SError |
+| 19 | 2026-10-26 | usb-read, entry 9 (`nopac nosmp exit-vhe usb-smmu`) | `6d0760c2` (as run 18) | PASS, read only: as run 17, then context bank 6: `SCTLR 000000E0` (stage-1 translation **off**), `CBAR 00037E03` (stage 1 nested with stage 2, the stage-2 bank INFERRED to be 126), `TCR`/`TTBR0`/`MAIR` zero; one USB value differs from runs 16 to 18: `GUSB3PIPECTL 0B081402`; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-19-2026-10-26-context-bank-6)) |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
 recorded. Runs 11 and 12 were matched the same way: one CPU with PAuth
 `NOT RUN`, then eight with PAuth. Runs 14 and 15 likewise: without, then
 with the `VHE EXIT` lines. Runs 16 and 17 likewise: without, then with the
-`VHE EXIT` and `SMMU` lines. Every one ended in a complete report: no hang, no reboot, no
+`VHE EXIT` and `SMMU` lines, and runs 18 and 19 the same way. Which port held
+the stick for runs 18 and 19 was not restated; the instructions asked for
+run 16's arrangement. Every one ended in a complete report: no hang, no reboot, no
 unexpected exception.
 
 Full SHA-256 of run 3's `el2qual.efi`:

@@ -1,9 +1,11 @@
 # gaokun3 USB device mode: study
 
 Status, 2026-10-26: **step 1 ran on the gaokun3** ([runs 16 and
-17](#runs-16-and-17-2026-10-26)). USB0 stays powered after ExitBootServices,
-but its DMA is translated by the SMMU, and q1n1's identity check would refuse
-it as it stands. This document sets what q1n1's A16 USB device path assumes
+17](#runs-16-and-17-2026-10-26), [run 19](#run-19-2026-10-26-context-bank-6)).
+- USB0 stays powered after ExitBootServices.
+- Its DMA passes the SMMU's stage 1 untranslated, then a nested stage 2
+  whose mapping is not yet read.
+- q1n1's identity check would refuse the controller as it stands. This document sets what q1n1's A16 USB device path assumes
 against what the gaokun3 provides, and gives a staged plan whose first
 hardware step only reads.
 Phase 2 context: [GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#run-13-2026-10-26-usb-inventory).
@@ -205,6 +207,80 @@ also supplies power on that port.
 stream match groups, on the wrong belief that SMMUv2 allows no more. Linux
 uses `IDR0.NUMSMRG`, all 8 bits, and this SMMU reports 212. The cap is now
 255. Run 17's answer stands, because the match was group 6.
+
+### Step 1b: the context bank (el2qual 6, read only)
+
+Run 17 found USB0's stream translated through context bank 6. Whether that
+bank maps physical addresses 1:1 decides whether q1n1 must touch the SMMU.
+So `usb-smmu` now goes on to read the bank its matched `S2CR` names.
+
+- **When.** Only for a translating `S2CR` (`TYPE` 0). A bypassing or
+  faulting one reads no bank and reports `NOT TRANSLATED`.
+- **Where the bank is.** From `IDR1`, as Linux's `arm-smmu.c` computes it:
+  4 or 64 KiB pages from `PAGESIZE`, the banks starting
+  `1 << (NUMPAGENDXB + 1)` pages in, bank n at page `numpage + n`.
+- **Refused without a read** when the bank index is not below `NUMCB`, or
+  its page lies outside the SMMU's 1 MiB device-tree window
+  (`OUT OF RANGE`), or a page is unmapped.
+- **What it reads:**
+  - GR1's `CBAR(n)`, the bank's type: stage 1, stage 2 or both;
+  - `CBA2R(n)`, whether it uses 64-bit addressing;
+  - the bank's `SCTLR`, whose `M` bit says whether translation is on at all;
+  - `TCR` and `TCR2`, the table format and sizes;
+  - `TTBR0`, the table base;
+  - `MAIR0` and `MAIR1`, the memory attributes.
+
+  Nothing is read after a fault.
+- **Register facts** come from Linux `arm-smmu.h`, read as a reference.
+- **INFERRED:** `TTBR0` is 64-bit and is read as two 32-bit halves,
+  because el2qual's fault-catching read is 32-bit. That the SMMU accepts
+  32-bit accesses to its halves is not confirmed from a source here. A
+  refused access would show as a fault on that word, or as an SError.
+
+How the answer decides the next step:
+- `SCTLR.M` clear: translation is off and DMA passes 1:1, so no SMMU
+  change is needed.
+- `M` set: the tables at `TTBR0` decide. A software walk of them, which is
+  plain memory reads, would show whether they map q1n1's buffers 1:1.
+- Otherwise: the bypass design.
+
+| Check | Result, 2026-10-26 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS. Against the fake, with the gaokun3's group-6 match: the bank found at the right page for 4 and 64 KiB pages; no bank read for a bypassing or faulting `S2CR`, a bank past `NUMCB`, a page past the window or an unmapped page; a fault inside `TTBR0` keeps the words before it; the exact lines. Each of seven broken variants (no `TYPE` check, no `NUMCB` or window check, no mapping check, wrong `numpage`, `TTBR0` upper half dropped, page size ignored) fails it |
+| QEMU: all 13 configurations | PASS. The virt machine's SMMU window reads all ones, so no match and no bank lines. The checker requires bank lines exactly after a match, and `NOT TRANSLATED` exactly for a bypassing or faulting `S2CR`; its self-test rejects each wrong combination |
+| gaokun3 | PASS, run 19 (below) |
+
+#### Run 19, 2026-10-26: context bank 6
+
+From the `usb-read` stick: el2qual 6 `6d0760c2`, built from the tree before
+its commit, entry 9 (`nopac nosmp exit-vhe usb-smmu`). Run 18 (entry 8)
+repeated run 16 exactly. Both were read only, with no SError.
+
+| Word | Value | Reading |
+| --- | --- | --- |
+| `IDR1` | `6000007F` | 4 KiB pages; banks start 128 pages in; 127 banks. Bank 6 at `0x15086000`, as computed |
+| `CBAR(6)` | `00037E03` | `TYPE` 3: a stage-1 bank nested with stage 2. Bits 15:8 are `0x7E`, which the SMMUv2 architecture uses for a nested bank's stage-2 bank index: **bank 126**, the second-last (INFERRED; Linux defines no field there for this type) |
+| `CBA2R(6)` | `00000001` | AArch64 format (`VA64`) |
+| `SCTLR` | `000000E0` | **`M` clear: stage-1 translation off.** Fault reporting bits set |
+| `TCR`, `TCR2` | `00000000`, `00000060` | no stage-1 table format configured |
+| `TTBR0`, `MAIR0`, `MAIR1` | all zero | no stage-1 tables |
+
+**Reading it.**
+- **Stage 1 is off.** For USB0, a DMA address passes stage 1 unchanged.
+- **Stage 2 is not answered.** The bank nests a stage 2, INFERRED to be
+  bank 126, set up by the firmware or Qualcomm's hypervisor before
+  slbounce. Whether DMA reaches physical memory 1:1 now depends on that
+  bank: its `SCTLR.M`, and if that is set, its tables.
+- **Next, read only:** el2qual reads the stage-2 bank a nested `CBAR` names
+  (`CBAR`, `SCTLR`, `TCR`, `TTBR0`). The same ladder applies:
+  - `M` clear means identity, with no SMMU change;
+  - `M` set means a walk of its tables;
+  - otherwise, the bypass design.
+
+**One USB value changed.** `GUSB3PIPECTL` read `0B081402` in run 19 against
+`0B0C1402` in runs 16 to 18, which is bit 18. It is a USB3 PIPE setting,
+outside q1n1's high-speed-only path. It is recorded as photographed; what
+moves it is not known.
 
 ### Step 2: decided by step 1
 

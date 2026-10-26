@@ -321,7 +321,10 @@ q1n1 has no transport to the Mac yet.
     the A16's xHCI `CAPLENGTH` (`0x30`, the gaokun3's is `0x20`), and USB0's
     DMA is translated by the SMMU through context bank 6, so it is not known
     to be identity.
-  - **Next:** read context bank 6, or design a bypass for stream `0x820`.
+  - **Run 19:** context bank 6 has stage-1 translation off, but nests a
+    stage 2, INFERRED to be bank 126.
+  - **Next:** read that stage-2 bank, read only, to decide whether DMA is
+    1:1 or a bypass for stream `0x820` is needed.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has
