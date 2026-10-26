@@ -22,6 +22,11 @@
  *   nosmp       measure the boot CPU only
  *   emulate-vhe recreate slbounce's E2H|TGE handoff first; test only, and
  *               refused unless the machine started at EL2 without E2H
+ *   exit-vhe    leave slbounce's E2H|TGE state for the non-VHE EL2 q1n1 and
+ *               the monitor assume (vhe.c plans it, el2q_exit_vhe switches),
+ *               then measure there. Refused, with the reason reported, if
+ *               the entry state is not one the plan recognises. Off by
+ *               default.
  *   emulate-rotated  treat the firmware's GOP mode as having no framebuffer
  *               address, as the gaokun3's does; test only
  *   emulate-no-fb    treat every GOP mode that way; test only
@@ -42,6 +47,7 @@
 #include "el2qual.h"
 #include "report.h"
 #include "thermal.h"
+#include "vhe.h"
 
 /* idregs.h is the monitor's: id_register() is shared so both read exactly
  * the allocated encodings; its id_forge() is not used here. */
@@ -82,11 +88,20 @@ _Static_assert(offsetof(struct el2q_boot, ctx) == BOOT_CTX, "el2q_boot");
 _Static_assert(offsetof(struct el2q_boot, early) == BOOT_EARLY, "el2q_boot");
 _Static_assert(sizeof(struct el2q_boot) == BOOT_SIZE, "el2q_boot");
 
+_Static_assert(offsetof(struct el2q_vhe_regs, hcr) == VHE_HCR, "el2q_vhe_regs");
+_Static_assert(offsetof(struct el2q_vhe_regs, sctlr) == VHE_SCTLR, "el2q_vhe_regs");
+_Static_assert(offsetof(struct el2q_vhe_regs, tcr) == VHE_TCR, "el2q_vhe_regs");
+_Static_assert(offsetof(struct el2q_vhe_regs, ttbr0) == VHE_TTBR0, "el2q_vhe_regs");
+_Static_assert(offsetof(struct el2q_vhe_regs, cptr) == VHE_CPTR, "el2q_vhe_regs");
+_Static_assert(offsetof(struct el2q_vhe_regs, cnthctl) == VHE_CNTHCTL, "el2q_vhe_regs");
+_Static_assert(sizeof(struct el2q_vhe_regs) == VHE_SIZE, "el2q_vhe_regs");
+
 extern char el2q_vectors[];
 void el2q_secondary_entry(void);
 uint64_t el2q_smc(uint64_t function, uint64_t a1, uint64_t a2, uint64_t a3);
 void el2q_use_spx(void);
 void el2q_enter_vhe(uint64_t tcr);
+void el2q_exit_vhe(const struct el2q_vhe_regs *plan);
 uint64_t el2q_try_rndr(struct el2q_ctx *ctx, uint64_t *value);
 uint64_t el2q_try_vncr(struct el2q_ctx *ctx, uint64_t *value);
 uint64_t el2q_try_cntpoff(struct el2q_ctx *ctx, uint64_t *value);
@@ -247,7 +262,6 @@ static int guid_eq(const struct efi_guid *a, const struct efi_guid *b)
 #define ISB() __asm__ volatile("isb" ::: "memory")
 #define DSB() __asm__ volatile("dsb sy" ::: "memory")
 
-#define HCR_E2H        (1ull << 34)
 #define SCTLR_EL2_ENIA (1ull << 31)
 #define MPIDR_AFFINITY 0xff00ffffffull
 
@@ -287,31 +301,13 @@ static void dcache_range(const volatile void *start, size_t length, enum cache_o
     DSB();
 }
 
-/* The non-VHE TCR_EL2 the firmware programmed, rewritten in the layout E2H
- * gives the register (TCR_EL1's), keeping the same TTBR0 walk: T0SZ, the
- * cacheability, shareability and granule fields stay where they are; PS moves
- * to IPS, TBI to TBI0, HA/HD/HPD to their EL1 positions; TTBR1 walks are
- * disabled since UEFI's identity map lives in TTBR0 alone. */
-static uint64_t vhe_tcr(uint64_t tcr)
-{
-    uint64_t out = tcr & 0xff3full;                        /* T0SZ..TG0, not EPD0 */
-    out |= (tcr & 0x3f) << 16;                             /* T1SZ: unused, but sane */
-    out |= 1ull << 23;                                     /* EPD1 */
-    out |= 2ull << 30;                                     /* TG1 4K, unused */
-    out |= ((tcr >> 16) & 7) << 32;                        /* PS -> IPS */
-    out |= ((tcr >> 20) & 1) << 37;                        /* TBI -> TBI0 */
-    out |= ((tcr >> 21) & 3) << 39;                        /* HA, HD */
-    out |= ((tcr >> 24) & 1) << 41;                        /* HPD -> HPD0 */
-    return out;
-}
-
 /* ---- State ------------------------------------------------------------------ */
 
 static struct el2q_run run;
 static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
-    int thermal;
+    int thermal, exit_vhe;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -408,6 +404,11 @@ static void serial_report(void)
         uart_line(u, line);
         el2q_gic_line(&run, s, line);
         if (line[0]) uart_line(u, line);
+    }
+    for (unsigned i = 0;; i++) {
+        el2q_vhe_line(&run, i, line);
+        if (!line[0]) break;
+        uart_line(u, line);
     }
     for (unsigned i = 0;; i++) {
         el2q_tsens_line(&run, i, line);
@@ -529,10 +530,43 @@ static void measure(unsigned slot)
     /* tgran16 programs the EL1&0 regime; with E2H set only the _EL12
      * encodings reach it (probes/tgran16.c). */
     if (!slot) progress("16K WALK (PROBES/TGRAN16.C)");
-    if (c->hcr & HCR_E2H) tgran16_probe_el12(c->tgran, table);
+    if (c->hcr & EL2Q_HCR_E2H) tgran16_probe_el12(c->tgran, table);
     else tgran16_probe(c->tgran, table);
     measure_gic(slot);
     if (!opt.nopac) measure_pac(slot);
+}
+
+/* ---- The VHE exit (option "exit-vhe"; vhe.c) ------------------------------
+ * The boot CPU at EL2, alone, interrupts masked, VBAR_EL2 already ours (the
+ * switch must not take an exception into slbounce's leftover EL1 vectors). */
+
+static struct el2q_vhe_regs read_vhe_regs(void)
+{
+    return (struct el2q_vhe_regs){
+        .hcr = RD("hcr_el2"), .sctlr = RD("sctlr_el2"), .tcr = RD("tcr_el2"),
+        .ttbr0 = RD("ttbr0_el2"), .cptr = RD("cptr_el2"), .cnthctl = RD("cnthctl_el2"),
+    };
+}
+
+static void exit_vhe(void)
+{
+    run.vhe_in = read_vhe_regs();
+    run.vhe_exit = el2q_vhe_exit_plan(&run.vhe_in, &run.vhe_plan);
+    if (run.vhe_exit != EL2Q_VHE_EXIT_DONE) {
+        progress("VHE EXIT REFUSED: STAYING IN SLBOUNCE'S E2H STATE");
+        return;
+    }
+    progress("VHE EXIT: CLEARING E2H. A HANG OR RESET HERE IS THE SWITCH");
+    /* EL2's own timers. Whatever UEFI or slbounce left armed would fire once
+     * interrupts are unmasked, and after the switch the EL2 virtual timer is
+     * no longer reachable through the CNTV names. CNTHV_CTL_EL2, by encoding
+     * for the assembler, exists with FEAT_VHE, which E2H being set proves. */
+    WR("cnthp_ctl_el2", 0);
+    WR("s3_4_c14_c3_1", 0);
+    ISB();
+    el2q_exit_vhe(&run.vhe_plan);
+    run.vhe_out = read_vhe_regs();
+    progress("VHE EXIT: NON-VHE EL2");
 }
 
 /* ---- The tsens read (option "thermal"; thermal.c) ------------------------
@@ -701,6 +735,7 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "nopac")) opt.nopac = 1;
         if (word_is(w, len, "nosmp")) opt.nosmp = 1;
         if (word_is(w, len, "emulate-vhe")) opt.emulate_vhe = 1;
+        if (word_is(w, len, "exit-vhe")) opt.exit_vhe = 1;
         if (word_is(w, len, "emulate-rotated")) opt.emulate_rotated = 1;
         if (word_is(w, len, "emulate-no-fb")) opt.emulate_no_fb = 1;
         if (word_is(w, len, "emulate-dt-fb")) opt.emulate_dt_fb = 1;
@@ -962,12 +997,13 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     run.cpu_count = 1;
     run.cpu[0].target_mpidr = RD("mpidr_el1") & MPIDR_AFFINITY;
     run.cpu[0].psci_affinity = -1;
-    if (opt.emulate_vhe && run.start_el == 2 && !(RD("hcr_el2") & HCR_E2H)) {
-        el2q_enter_vhe(vhe_tcr(RD("tcr_el2")));
+    if (opt.emulate_vhe && run.start_el == 2 && !(RD("hcr_el2") & EL2Q_HCR_E2H)) {
+        el2q_enter_vhe(el2q_vhe_tcr(RD("tcr_el2")));
         run.emulated_vhe = 1;
     }
     run.hcr_entry = RD("hcr_el2");
     run.sctlr_entry = RD("sctlr_el2");
+    if (opt.exit_vhe) exit_vhe();
     run.psci_version = psci(PSCI_VERSION, 0, 0, 0);
     measure(0);
     run.cpu[0].state = EL2Q_CPU_DONE;

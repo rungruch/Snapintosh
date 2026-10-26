@@ -254,6 +254,16 @@ static void header(const struct el2q_run *r, struct el2q_text *t)
         b = new_line(t, EL2Q_YELLOW);
         put_s(&b, "TEST ONLY: SLBOUNCE E2H STATE EMULATED");
     }
+    if (r->vhe_exit != EL2Q_VHE_EXIT_NOT_ASKED) {
+        b = new_line(t, r->vhe_exit == EL2Q_VHE_EXIT_DONE ? EL2Q_GREEN
+                      : r->vhe_exit == EL2Q_VHE_EXIT_NOT_VHE ? EL2Q_WHITE : EL2Q_RED);
+        put_s(&b, "VHE EXIT .. ");
+        put_s(&b, el2q_vhe_exit_word(r->vhe_exit));
+        if (r->vhe_exit == EL2Q_VHE_EXIT_DONE) {
+            put_s(&b, "  HCR_EL2 ");
+            put_hex(&b, r->vhe_out.hcr, 16);
+        }
+    }
 
     enum el2q_color c = r->start_el == 2 ? EL2Q_WHITE
                       : r->dt_state == EL2Q_DT_ZAP_DISABLED ? EL2Q_GREEN : EL2Q_RED;
@@ -789,6 +799,42 @@ static void tsens_section(const struct el2q_tsens *s, struct el2q_text *t)
         b = new_line(t, EL2Q_RED);
         put_s(&b, "  SERROR PENDING AFTER THE READS, ISR_EL1 ");
         put_hex(&b, s->isr, 8);
+    }
+}
+
+static int vhe_same(const struct el2q_vhe_regs *a, const struct el2q_vhe_regs *b)
+{
+    return a->hcr == b->hcr && a->sctlr == b->sctlr && a->tcr == b->tcr &&
+           a->ttbr0 == b->ttbr0 && a->cptr == b->cptr && a->cnthctl == b->cnthctl;
+}
+
+static void vhe_regs(struct lb *b, const char *first, const char *second,
+                     const struct el2q_vhe_regs *v, unsigned half)
+{
+    put_s(b, half ? second : first);
+    put_s(b, half ? " TTBR0=" : " HCR=");
+    put_hex_short(b, half ? v->ttbr0 : v->hcr);
+    put_s(b, half ? " CPTR=" : " SCTLR=");
+    put_hex_short(b, half ? v->cptr : v->sctlr);
+    put_s(b, half ? " CNTHCTL=" : " TCR=");
+    put_hex_short(b, half ? v->cnthctl : v->tcr);
+}
+
+void el2q_vhe_line(const struct el2q_run *r, unsigned index, char out[EL2Q_TEXT_COLS + 1])
+{
+    struct lb b = {out, 0};
+    int done = r->vhe_exit == EL2Q_VHE_EXIT_DONE;
+    out[0] = 0;
+    if (r->vhe_exit == EL2Q_VHE_EXIT_NOT_ASKED) return;
+    if (index == 0) {
+        put_s(&b, "VHEX ");
+        put_s(&b, el2q_vhe_exit_word(r->vhe_exit));
+        put_s(&b, " PLAN=");
+        put_s(&b, !done ? "-" : vhe_same(&r->vhe_out, &r->vhe_plan) ? "MATCH" : "DIFF");
+    } else if (index <= 2) {
+        vhe_regs(&b, "VHEIN", "VHEIN2", &r->vhe_in, index - 1);
+    } else if (index <= 4 && done) {
+        vhe_regs(&b, "VHEOUT", "VHEOUT2", &r->vhe_out, index - 3);
     }
 }
 

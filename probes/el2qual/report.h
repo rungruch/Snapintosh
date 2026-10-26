@@ -10,9 +10,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "vhe.h"
 
-#define EL2Q_VERSION      3     /* 2: counter rate, GICv3 virtualization, SMBIOS;
-                                   3: the tsens read (option "thermal") */
+#define EL2Q_VERSION      4     /* 2: counter rate, GICv3 virtualization, SMBIOS;
+                                   3: the tsens read (option "thermal");
+                                   4: the VHE exit (option "exit-vhe") */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4
@@ -153,6 +155,10 @@ struct el2q_run {
     uint64_t ebs_status, ebs_tries;
     uint64_t hcr_entry, sctlr_entry; /* EL2 state as the bounce left it */
     uint32_t emulated_vhe;           /* the QEMU-only slbounce emulation ran */
+    uint32_t vhe_exit;               /* enum el2q_vhe_exit */
+    struct el2q_vhe_regs vhe_in;     /* EL2 as found, before the exit plan */
+    struct el2q_vhe_regs vhe_plan;   /* the planned non-VHE values (DONE only) */
+    struct el2q_vhe_regs vhe_out;    /* read back after the switch (DONE only) */
     uint32_t dt_state;
     struct el2q_acpi acpi;
     int64_t psci_version;            /* -1 when PSCI was not reachable */
@@ -264,6 +270,19 @@ void el2q_summary_line(const struct el2q_run *run, unsigned slot,
  * <hex> without leading zeros, <p> as above, <word> el2q_lr_word's. Empty for
  * a slot that did not finish. */
 void el2q_gic_line(const struct el2q_run *run, unsigned slot, char out[EL2Q_TEXT_COLS + 1]);
+
+/* Fixed-format lines for the VHE exit, for tools/qemu-el2qual.py; empty
+ * when "exit-vhe" was not given. index 0:
+ *   VHEX <word> PLAN=<MATCH|DIFF|->
+ * PLAN compares the registers read back after the switch with the plan.
+ * index 1 and 2, the registers as found:
+ *   VHEIN HCR=<hex> SCTLR=<hex> TCR=<hex>
+ *   VHEIN2 TTBR0=<hex> CPTR=<hex> CNTHCTL=<hex>
+ * index 3 and 4, read back after the switch (DONE only):
+ *   VHEOUT HCR=<hex> SCTLR=<hex> TCR=<hex>
+ *   VHEOUT2 TTBR0=<hex> CPTR=<hex> CNTHCTL=<hex>
+ * <hex> without leading zeros. Past the last line, out is empty. */
+void el2q_vhe_line(const struct el2q_run *run, unsigned index, char out[EL2Q_TEXT_COLS + 1]);
 
 /* Fixed-format lines for the tsens read, for tools/qemu-el2qual.py. index 0:
  *   TSENS <state> CHECKED=<n> UNMAPPED=<n> ADMIT=<n> POLLS=<n> VALID=<n>

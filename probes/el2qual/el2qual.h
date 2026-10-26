@@ -37,6 +37,16 @@
 #define BOOT_EARLY       0x48   /* base of the early-status array */
 #define BOOT_SIZE        0x50
 
+/* struct el2q_vhe_regs (vhe.h): the planned non-VHE values el2q_exit_vhe
+ * loads before it turns the MMU off. */
+#define VHE_HCR          0x00
+#define VHE_SCTLR        0x08
+#define VHE_TCR          0x10
+#define VHE_TTBR0        0x18
+#define VHE_CPTR         0x20
+#define VHE_CNTHCTL      0x28
+#define VHE_SIZE         0x30
+
 #define EL2Q_STACK_SIZE  0x4000
 #define EL2Q_EARLY_SHIFT 6      /* one 64-byte line per CPU */
 

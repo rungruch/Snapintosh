@@ -38,6 +38,7 @@ UNITS = [
     (SRC / 'firmware.c', 'firmware.o', []),
     (SRC / 'el2qual-asm.S', 'el2qual-asm.o', []),
     (SRC / 'thermal.c', 'thermal.o', []),
+    (SRC / 'vhe.c', 'vhe.o', []),
     # The Phase 1 guard itself, unchanged: the "thermal" option runs it live.
     (ROOT / 'compat' / 'sc8280xp-thermal.c', 'sc8280xp-thermal.o', []),
     (ROOT / 'probes' / 'tgran16.c', 'tgran16.o', []),

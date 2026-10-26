@@ -1433,6 +1433,9 @@ static void test_tsens(void)
     CHECK(text.count == EL2Q_TEXT_LINES && has_line("TSENS GUARD (READ ONLY) . PASSED"));
 }
 
+/* tools/test-el2qual-vhe.c: vhe.c and its report lines; returns its check count. */
+unsigned test_vhe(void);
+
 int main(void)
 {
     test_acpi();
@@ -1445,6 +1448,7 @@ int main(void)
     test_smbios();
     test_gic();
     test_tsens();
+    checks += test_vhe();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

@@ -179,6 +179,54 @@ el2q_enter_vhe:
     isb
     ret
 
+/* Leave slbounce's VHE state for the non-VHE EL2 q1n1 and the monitor
+ * assume. x0 points at the values vhe.c planned (struct el2q_vhe_regs).
+ * The boot CPU runs it alone, with interrupts masked, before any secondary
+ * starts.
+ *
+ * Writing HCR_EL2.E2H changes how TCR_EL2 and SCTLR_EL2 are read and which
+ * regime EL2 translates through, so no translation may happen between that
+ * write and the new values taking effect. Hence, in this order:
+ *  1. every load first: from step 2 to step 6 the MMU is off and a data
+ *     access would bypass the caches the C code wrote through;
+ *  2. DSB, then the MMU off with the current SCTLR_EL2 less M (bit 0 is M
+ *     in both layouts), and an ISB so no later instruction is translated;
+ *  3. TLBI ALLE2 while E2H is still set: with E2H set it removes the EL2&0
+ *     regime's entries for every ASID, which the new regime must not hit;
+ *  4. HCR_EL2, then an ISB, so the writes below use the non-VHE layouts;
+ *  5. TCR_EL2, TTBR0_EL2, CPTR_EL2 and CNTHCTL_EL2 in those layouts;
+ *  6. TLBI ALLE2 again, now for the EL2 regime, then DSB and ISB, so the
+ *     first walk with the MMU back on reads only the new controls;
+ *  7. the planned SCTLR_EL2, MMU on, and an ISB before returning.
+ * UEFI maps VA == PA, so execution carries on at the same addresses with
+ * the MMU off and on. tools/test-el2qual.py checks this order textually and
+ * rejects deliberately reordered copies. */
+.global el2q_exit_vhe
+.p2align 2
+el2q_exit_vhe:
+    ldp     x1, x2, [x0, #VHE_HCR]              /* x1 HCR, x2 SCTLR */
+    ldp     x3, x4, [x0, #VHE_TCR]              /* x3 TCR, x4 TTBR0 */
+    ldp     x5, x6, [x0, #VHE_CPTR]             /* x5 CPTR, x6 CNTHCTL */
+    mrs     x7, sctlr_el2
+    bic     x7, x7, #1
+    dsb     sy
+    msr     sctlr_el2, x7
+    isb
+    tlbi    alle2
+    dsb     sy
+    msr     hcr_el2, x1
+    isb
+    msr     tcr_el2, x3
+    msr     ttbr0_el2, x4
+    msr     cptr_el2, x5
+    msr     cnthctl_el2, x6
+    tlbi    alle2
+    dsb     sy
+    isb
+    msr     sctlr_el2, x2
+    isb
+    ret
+
 /* ---- Secondary entry -------------------------------------------------------
  * PSCI CPU_ON enters here with the MMU and caches off and x0 = the context ID
  * el2qual.c passed, the CPU's slot. Every load before SCTLR_EL2 is written

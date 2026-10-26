@@ -33,6 +33,12 @@ report it writes to the PL011:
                read's fault caught, and the CPU report must still follow
   max-vhe-thermal  the same after the slbounce handoff emulation, the
                state the gaokun3 runs the stage in
+  max-vhe-exit as max-vhe, then the "exit-vhe" switch back to non-VHE EL2
+               (vhe.c, el2q_exit_vhe): it must report DONE with the registers
+               read back equal to the plan and E2H clear, and every CPU must
+               then measure as on max, the 16K walk through the EL1&0 regime
+  max-exit-novhe  "exit-vhe" on a machine that starts at EL2 without E2H:
+               nothing to leave, so NOT-VHE, and the run as on max
 
 On every configuration that runs, all four CPUs must finish at EL2 without
 a fault, the report must name the GOP mode it drew on, and each feature's
@@ -90,6 +96,11 @@ CONFIGS = {
     'max-vhe-thermal': dict(cpu='max', options='emulate-vhe thermal', pac='Y', walk='Y', vhe=True,
                             thermal=True, features=dict.fromkeys(FEATURES, True),
                             routes=('CPU OK', 'CPU OK')),
+    'max-vhe-exit': dict(cpu='max', options='emulate-vhe exit-vhe', pac='Y', walk='Y', vhe=True,
+                         vhe_exit='DONE', features=dict.fromkeys(FEATURES, True),
+                         routes=('CPU OK', 'CPU OK')),
+    'max-exit-novhe': dict(cpu='max', options='exit-vhe', pac='Y', walk='Y', vhe_exit='NOT-VHE',
+                           features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
 }
 
 STOP_LINES = ('NO GOP MODE HAS A FRAMEBUFFER ADDRESS', 'DT FRAMEBUFFER: NO DEVICE TREE',
@@ -270,6 +281,41 @@ def check(log, expect, smp=SMP):
         problems.append('E2H set on a run that did not ask for VHE emulation')
     problems += check_gic(lines, smp)
     problems += check_tsens(lines, expect)
+    problems += check_vhe_exit(lines, expect)
+    return problems
+
+
+VHE_REGS = re.compile(r'^(VHEIN|VHEOUT) HCR=([0-9A-F]+) SCTLR=([0-9A-F]+) TCR=([0-9A-F]+)$')
+
+
+def check_vhe_exit(lines, expect):
+    """The "exit-vhe" lines: absent unless asked; when asked, the expected
+    outcome, and for DONE the registers read back equal to the plan, E2H and
+    TGE gone from HCR_EL2 (RW alone left), and E2H|TGE in the entry state."""
+    want = expect.get('vhe_exit')
+    got = next((line.split() for line in lines if line.startswith('VHEX ')), None)
+    regs = {m[1]: m for line in lines for m in [VHE_REGS.match(line)] if m}
+    if not want:
+        return ['VHEX line on a run that did not ask for exit-vhe'] if got else []
+    if not got or len(got) != 3:
+        return ['exit-vhe asked but no well-formed VHEX line']
+    problems = []
+    if got[1] != want:
+        problems.append(f'VHE exit {got[1]}, wanted {want}')
+    if 'VHEIN' not in regs:
+        problems.append('no VHEIN line')
+    if want == 'DONE':
+        if got[2] != 'PLAN=MATCH':
+            problems.append(f'registers after the switch: {got[2]}, wanted PLAN=MATCH')
+        hin = int(regs['VHEIN'][2], 16) if 'VHEIN' in regs else 0
+        if not (hin >> 34) & 1 or not (hin >> 27) & 1:
+            problems.append(f'VHEIN HCR {hin:#x} lacks E2H|TGE')
+        if 'VHEOUT' not in regs:
+            problems.append('no VHEOUT line')
+        elif int(regs['VHEOUT'][2], 16) != 1 << 31:
+            problems.append(f'VHEOUT HCR {regs["VHEOUT"][2]}, wanted RW alone (80000000)')
+    elif 'VHEOUT' in regs:
+        problems.append(f'VHEOUT line although the exit was {got[1]}')
     return problems
 
 
@@ -294,6 +340,16 @@ def synthetic(expect, smp=SMP):
              f'ENTRY HCR_EL2 {hcr:016X} SCTLR 0000000030C5183D']
     if expect.get('vhe'):
         lines.append('TEST ONLY: SLBOUNCE E2H STATE EMULATED')
+    if expect.get('vhe_exit') == 'DONE':
+        lines += ['VHEX DONE PLAN=MATCH',
+                  'VHEIN HCR=408000000 SCTLR=30C5183D TCR=500803510',
+                  'VHEIN2 TTBR0=BFFFF000 CPTR=33FF CNTHCTL=3',
+                  'VHEOUT HCR=80000000 SCTLR=30C5183D TCR=80853510',
+                  'VHEOUT2 TTBR0=BFFFF000 CPTR=33FF CNTHCTL=3']
+    elif expect.get('vhe_exit'):
+        lines += [f'VHEX {expect["vhe_exit"]} PLAN=-',
+                  'VHEIN HCR=80000000 SCTLR=30C5183D TCR=80853510',
+                  'VHEIN2 TTBR0=BFFFF000 CPTR=33FF CNTHCTL=3']
     if expect.get('thermal'):
         lines += ['TSENS GUARD (READ ONLY) . TRIPPED: READ AT 0C222000',
                   'TSENS TRIPPED CHECKED=58 UNMAPPED=0 ADMIT=1 POLLS=1 VALID=0',
@@ -403,6 +459,26 @@ def self_test():
             expect_result(f'{name} tsens unasked', good.replace(
                 'EL2QUAL END', 'TSENS UNMAPPED CHECKED=58 UNMAPPED=58 ADMIT=0 POLLS=0 VALID=0\n'
                 'EL2QUAL END'), expect, False)
+        if expect.get('vhe_exit') == 'DONE':
+            expect_result(f'{name} no VHEX', good.replace('VHEX DONE PLAN=MATCH\n', ''), expect, False)
+            expect_result(f'{name} refused', good.replace('VHEX DONE', 'VHEX REFUSED-TCR'),
+                          expect, False)
+            expect_result(f'{name} plan differs', good.replace('PLAN=MATCH', 'PLAN=DIFF'),
+                          expect, False)
+            expect_result(f'{name} E2H left', good.replace('VHEOUT HCR=80000000',
+                          'VHEOUT HCR=480000000'), expect, False)
+            expect_result(f'{name} no VHEOUT', good.replace('VHEOUT HCR', 'VHEXXX HCR'),
+                          expect, False)
+            expect_result(f'{name} entry not VHE', good.replace('VHEIN HCR=408000000',
+                          'VHEIN HCR=80000000'), expect, False)
+        elif expect.get('vhe_exit'):
+            expect_result(f'{name} switched anyway', good.replace(
+                'EL2QUAL END', 'VHEOUT HCR=80000000 SCTLR=0 TCR=0\nEL2QUAL END'), expect, False)
+            expect_result(f'{name} claimed DONE', good.replace(f'VHEX {expect["vhe_exit"]}',
+                          'VHEX DONE'), expect, False)
+        else:
+            expect_result(f'{name} exit unasked', good.replace(
+                'EL2QUAL END', 'VHEX DONE PLAN=MATCH\nEL2QUAL END'), expect, False)
         if expect.get('vhe'):
             expect_result(f'{name} E2H missing', good.replace(
                 f'{1 << 34 | 1 << 27:016X}', f'{1 << 31:016X}'), expect, False)
