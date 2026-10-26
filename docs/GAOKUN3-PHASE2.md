@@ -200,7 +200,8 @@ q1n1 (`../q1n1`, cloned at `5b440d4`) carries the same hand-off. Its
 | QEMU `--uart-proxy` after the exit | PASS: the proxy answers, and a chainloaded stage runs at EL2 |
 | gaokun3 | NOT RUN |
 
-The q1n1 change is uncommitted in that checkout and pushed nowhere.
+The q1n1 change is committed locally in that checkout as `31147ab` (the code
+and its test) and `660dfbb` (its docs), and pushed nowhere.
 
 ### Next
 
