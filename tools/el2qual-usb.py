@@ -8,6 +8,7 @@
                                        (--dtb F | --always-switch)
   python3 tools/el2qual-usb.py thermal (the same inputs as stage2)
   python3 tools/el2qual-usb.py vhe-exit (the same inputs as stage2)
+  python3 tools/el2qual-usb.py usb-inventory --systemd-boot F --usb-probe F
 
 This only builds a directory tree, by default build/el2qual-usb/<stage>/.
 It never writes to a disk or a mounted volume: copying the tree onto a
@@ -24,6 +25,9 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
            (load option "thermal"; docs/GAOKUN3-PHASE1-GUARDS.md).
   vhe-exit stage2's files with the two Phase 2 VHE-exit entries only (load
            option "exit-vhe"; docs/GAOKUN3-PHASE2.md).
+  usb-inventory  systemd-boot and q1n1's holding USB protocol inventory
+           (q1n1-usb-probe-hold.efi) only: no slbounce, tcblaunch.exe or
+           device tree, so nothing on it can attempt a Secure Launch.
 
 Every input is checked before anything is written (PE machine and
 subsystem, FDT header), and a manifest records the SHA-256 of each file
@@ -80,6 +84,13 @@ VHE_EXIT_ENTRIES = [
 ]
 STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRIES,
                  'vhe-exit': VHE_EXIT_ENTRIES}
+
+# Phase 2's USB question (docs/GAOKUN3-PHASE2.md): which USB protocols the
+# gaokun3's firmware installs. q1n1's passive inventory, built to hold its
+# screen, since a boot menu redraws over an application that returns.
+USB_PROBE_PATH = 'EFI/q1n1/q1n1-usb-probe-hold.efi'
+USB_INVENTORY_ENTRY = ('q1n1-usb-inventory.conf', 'q1n1: USB protocol inventory (read only, no EL2 switch)')
+STAGES = ('stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit', 'usb-inventory')
 
 
 class LayoutError(Exception):
@@ -138,8 +149,8 @@ def check_destination(out, replace=False):
     return out
 
 
-def entry_text(title, options, dtb_name):
-    lines = [f'title {title}', 'efi /EFI/el2qual/el2qual.efi']
+def entry_text(title, options, dtb_name, efi='/EFI/el2qual/el2qual.efi'):
+    lines = [f'title {title}', f'efi {efi}']
     if options:
         lines.append(f'options {options}')
     if dtb_name:
@@ -148,10 +159,15 @@ def entry_text(title, options, dtb_name):
 
 
 def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=None,
-                 dtb=None, always_switch=False, replace=False):
+                 dtb=None, always_switch=False, replace=False, usb_probe=None):
     """Validate every input, then write the tree; returns the manifest."""
-    if stage not in ('stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit'):
+    if stage not in STAGES:
         raise LayoutError(f'unknown stage {stage}')
+    if stage == 'usb-inventory':
+        return build_usb_inventory(out, systemd_boot, usb_probe, replace,
+                                   any((slbounce, tcblaunch, dtb, always_switch, efi)))
+    if usb_probe:
+        raise LayoutError('--usb-probe belongs to the usb-inventory stage only')
     switches = stage in ('stage2', 'thermal', 'vhe-exit')
     require_pe(efi, 'el2qual', {SUBSYSTEM_EFI_APPLICATION})
     if stage != 'stage1':
@@ -218,9 +234,36 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
     return manifest
 
 
+def build_usb_inventory(out, systemd_boot, usb_probe, replace, extra):
+    if extra:
+        raise LayoutError('usb-inventory takes only --systemd-boot and --usb-probe: '
+                          'no slbounce, tcblaunch.exe, device tree or el2qual')
+    if not systemd_boot or not usb_probe:
+        raise LayoutError('usb-inventory needs --systemd-boot and --usb-probe')
+    require_pe(systemd_boot, 'systemd-boot', {SUBSYSTEM_EFI_APPLICATION})
+    require_pe(usb_probe, 'q1n1-usb-probe-hold.efi', {SUBSYSTEM_EFI_APPLICATION})
+    out = check_destination(out, replace)
+    if out.exists() and any(out.iterdir()):
+        shutil.rmtree(out)
+    placed = {}
+    def put(rel, data):
+        dest = out / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        placed[rel] = hashlib.sha256(data).hexdigest()
+    put('EFI/BOOT/BOOTAA64.EFI', Path(systemd_boot).read_bytes())
+    put(USB_PROBE_PATH, Path(usb_probe).read_bytes())
+    name, title = USB_INVENTORY_ENTRY
+    put('loader/loader.conf', f'timeout 15\ndefault {name}\neditor no\n'.encode())
+    put(f'loader/entries/{name}', entry_text(title, '', None, '/' + USB_PROBE_PATH).encode())
+    manifest = {'stage': 'usb-inventory', 'always_switch': False, 'files': placed}
+    (out / MANIFEST).write_text(json.dumps(manifest, indent=2) + '\n')
+    return manifest
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('stage', choices=['stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit'])
+    ap.add_argument('stage', choices=list(STAGES))
     ap.add_argument('--out', help='destination directory (default build/el2qual-usb/<stage>)')
     ap.add_argument('--efi', help='a built el2qual.efi (default: build it now)')
     ap.add_argument('--llvm', help='passed to probes/el2qual/build.py')
@@ -231,16 +274,19 @@ def main():
     ap.add_argument('--always-switch', action='store_true',
                     help='slbounce was built with SLBOUNCE_ALWAYS_SWITCH=1 (no --dtb)')
     ap.add_argument('--replace', action='store_true', help='replace an existing tree')
+    ap.add_argument('--usb-probe', help="q1n1's q1n1-usb-probe-hold.efi (usb-inventory only)")
     a = ap.parse_args()
     efi = a.efi
-    if not efi:
+    if a.stage == 'usb-inventory':
+        pass
+    elif not efi:
         sys.path.insert(0, str(ROOT / 'probes' / 'el2qual'))
         import build as el2qual_build
         efi = el2qual_build.build(llvm=a.llvm)
     out = Path(a.out) if a.out else DEFAULT_OUT / a.stage
     try:
         manifest = build_layout(a.stage, out, efi, a.systemd_boot, a.slbounce, a.tcblaunch,
-                                a.dtb, a.always_switch, a.replace)
+                                a.dtb, a.always_switch, a.replace, a.usb_probe)
     except (LayoutError, OSError) as error:
         print(f'REFUSED: {error}')
         return 1

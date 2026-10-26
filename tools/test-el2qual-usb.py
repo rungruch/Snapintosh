@@ -172,6 +172,42 @@ class Layout(unittest.TestCase):
         self.refused('vhe-exit needs --systemd-boot', stage='vhe-exit', systemd_boot=None)
         self.refused('vhe-exit needs --dtb, or --always-switch', stage='vhe-exit', dtb=None)
 
+    def test_usb_inventory_holds_only_the_probe(self):
+        probe = self.file('q1n1-usb-probe-hold.efi', pe(payload=b'usb-probe'))
+        m = usb.build_layout('usb-inventory', self.out(), None, self.sdboot, usb_probe=probe)
+        out = self.out()
+        self.assert_manifest_complete(out, m)
+        self.assertEqual(m['stage'], 'usb-inventory')
+        self.assertEqual(sorted(m['files']), sorted([
+            'EFI/BOOT/BOOTAA64.EFI', 'EFI/q1n1/q1n1-usb-probe-hold.efi', 'loader/loader.conf',
+            'loader/entries/q1n1-usb-inventory.conf']))
+        # Nothing that could attempt a Secure Launch, and no el2qual.
+        self.assertFalse(any(k in rel for rel in m['files']
+                             for k in ('slbounce', 'tcblaunch', 'dtb/', 'el2qual')))
+        text = (out / 'loader/entries/q1n1-usb-inventory.conf').read_text()
+        self.assertIn('efi /EFI/q1n1/q1n1-usb-probe-hold.efi\n', text)
+        self.assertNotIn('devicetree', text)
+        self.assertNotIn('options', text)
+        self.assertIn('default q1n1-usb-inventory.conf', (out / 'loader/loader.conf').read_text())
+
+    def test_usb_inventory_input_rules(self):
+        probe = self.file('q1n1-usb-probe-hold.efi', pe(payload=b'usb-probe'))
+        for extra in (dict(slbounce=self.slb), dict(tcblaunch=self.tcb), dict(dtb=self.dtb),
+                      dict(always_switch=True), dict(efi=self.efi)):
+            args = dict(usb_probe=probe, systemd_boot=self.sdboot, efi=None)
+            args.update(extra)
+            with self.assertRaises(usb.LayoutError):
+                usb.build_layout('usb-inventory', self.out('x'), **args)
+        with self.assertRaises(usb.LayoutError):
+            usb.build_layout('usb-inventory', self.out('y'), None, self.sdboot)       # no probe
+        with self.assertRaises(usb.LayoutError):
+            usb.build_layout('usb-inventory', self.out('z'), None, None, usb_probe=probe)
+        with self.assertRaises(usb.LayoutError):                                     # wrong stage
+            usb.build_layout('stage2', self.out('w'), self.efi, self.sdboot, self.slb, self.tcb,
+                             self.dtb, usb_probe=probe)
+        with self.assertRaises(usb.LayoutError):                                     # not a PE app
+            usb.build_layout('usb-inventory', self.out('v'), None, self.sdboot, usb_probe=self.slb)
+
     def test_stage1b_has_no_slbounce(self):
         m = usb.build_layout('stage1b', self.out(), self.efi, self.sdboot, dtb=self.dtb)
         self.assertFalse(any('slbounce' in rel or 'tcblaunch' in rel for rel in m['files']))
