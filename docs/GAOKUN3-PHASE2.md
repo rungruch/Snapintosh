@@ -325,11 +325,17 @@ q1n1 has no transport to the Mac yet.
     stage 2, INFERRED to be bank 126.
   - **Run 20:** el2qual 7 could not read that stage-2 bank. Its page is not
     in UEFI's page tables, so it was refused unread.
-  - **Next:** el2qual 8's `usb-smmu-map` (stick entry 10) adds its own
-    Device map of the SMMU window, then reads that bank (built, host and
-    QEMU tested, [step 1d](GAOKUN3-USB-DEVICE-MODE.md#step-1d-el2quals-own-map-of-the-smmu-window-el2qual-8-entry-10)).
-    A supervised run decides whether DMA is 1:1, or a bypass for stream
-    `0x820` is needed.
+  - **Run 21:** el2qual 8 mapped the SMMU window itself
+    ([step 1d](GAOKUN3-USB-DEVICE-MODE.md#step-1d-el2quals-own-map-of-the-smmu-window-el2qual-8-entry-10))
+    and read bank 126: a stage-2 bank, VMID 3, with translation **on** and
+    its tables at `0xB7609000`, inside a `no-map` reserved region
+    ([run 21](GAOKUN3-USB-DEVICE-MODE.md#run-21-2026-10-27-bank-126-translates)).
+  - **Next:** el2qual 9's `usb-s2-walk` (stick entry 11) walks those
+    tables, read only, for a DMA arena allocated as q1n1 allocates its own
+    (built, host and QEMU tested,
+    [step 1e](GAOKUN3-USB-DEVICE-MODE.md#step-1e-walking-bank-126s-tables-el2qual-9-entry-11)).
+    A supervised run decides whether USB0's DMA is 1:1 there, or the bypass
+    for stream `0x820`, the first SMMU write, is needed.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has

@@ -395,6 +395,157 @@ afterwards. Neither window is read.
 | Host: `python3 tools/test-el2qual.py` | PASS, 63846 checks (ASan+UBSan). Against a fake that logs every write and maintenance step in order: building writes only the clone; publication is exactly the order above; the gaokun3's run-20 shape gives a clone that keeps UEFI's three leaves and fills the rest; the regime's leaf bits for E2H 0 and 1; the table limits kept; every refusal above writes nothing; a reserved `MAIR` byte is never taken as Device; a start at level 1; a second window cloning the first. 13 deliberately broken copies of `pagemap.c` (slot written while building, `PXN` as execute-never at EL2, `AP[1]` clear, table limits dropped, a bit-carrying invalid entry replaced, no break, no `TLBI`, the clone not cleaned first, no ISB, a valid entry rewritten, a non-identity entry kept, a Normal `MAIR` byte taken as Device, the start level ignored) are each rejected; the suite runs them every time |
 | Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entry 9 unchanged, entry 10 `nopac nosmp exit-vhe usb-smmu-map` |
 | QEMU: all 16 configurations | PASS. `max-vhe-usb-smmu-map`: `SMMU MAP NOT NEEDED`. `max-vhe-usb-smmu-map-hole` (after the VHE exit) and `max-vhe-usb-smmu-map-hole-e2h` (E2H kept): `SMMU MAP OK CLONE KEPT 0/256 (TEST WINDOW)`. The checker requires each configuration's exact outcome; its self-test rejects a missing, doubled, malformed or refused line, an unnamed test window, and a write where nothing was needed. TCG does not model a walker that misses the cache, so it cannot show the cleaning is needed; the host tests check the order |
+| gaokun3 | run 21 (below): PASS, `SMMU MAP OK CLONE KEPT 208/256`, bank 126 read |
+
+#### Run 21, 2026-10-27: bank 126 translates
+
+From the `usb-read` stick: el2qual 8 `04f5361b` from `b74bbce`, entry 10
+(`nopac nosmp exit-vhe usb-smmu-map`), with no SError. Only `SMMU MAP` names
+the entry: entry 9 does not print it.
+
+- **The map worked.** `SMMU MAP OK CLONE KEPT 208/256`: UEFI's level-3
+  table for the window's 2 MiB region was cloned. 208 of the window's 256
+  pages were already Device identity and were kept; the other 48, bank 126's
+  page among them, were added. All 256 passed the `AT` check afterwards, and
+  the report went on to the end: no hang, no exception after the swap.
+- **Up to bank 6, as runs 19 and 20:** stream `0x820` to group 6, bank 6
+  nested (`CBAR 00037E03`), stage 1 off (`SCTLR 000000E0`).
+- **Bank 126, at `0x150FE000`:**
+
+| Word | Value | Reading |
+| --- | --- | --- |
+| `CBAR(126)` | `00000003` | `TYPE` 0: a stage-2 bank, so the check on run 19's inference passed. `VMID` 3, in bits 7:0 because `sCR0.VMID16EN` is clear. Bits 7:0 of `CBAR(6)` are also 3 |
+| `CBA2R(126)` | `00000001` | AArch64 format (`VA64`) |
+| `SCTLR` | `00CF00E1` | **`M` set: stage-2 translation on.** `CFRE`, `CFIE` and `CFCFG` set (a fault is reported, interrupts, and stalls the transaction). Bits 23:16 not decoded |
+| `TCR` (VTCR form) | `0001355C` | `T0SZ` 28: 36-bit input addresses. `SL0` 1: the walk starts at level 1. `TG0` 0: 4 KiB granule. `PS` 1: 36-bit output. Walks write-back write-allocate, inner shareable. Bit 31, which Linux writes as RES1, reads 0 |
+| `TTBR0` | `00000000B7609000` | the table root at physical `0xB7609000` |
+
+**Reading it.**
+- **USB0's DMA is translated.** Stage 1 passes the address through, and
+  stage 2 is on. Whether that is 1:1 depends on the tables at `0xB7609000`,
+  which nothing has read.
+- **Bank 6 and bank 126 belong together.** The type check passed and both
+  `CBAR`s carry VMID 3. The index reading of `CBAR(6)` bits 15:8 is still
+  INFERRED, but nothing contradicts it.
+- **VMID 3 is the OS's own (INFERRED).** Linux's
+  `include/dt-bindings/firmware/qcom,scm.h` names Qualcomm's VMID 3
+  `QCOM_SCM_VMID_HLOS`. That the SMMU's VMID field uses the same numbering
+  is not shown. An HLOS stage 2 that maps the OS's memory 1:1, with holes
+  for protected regions, would fit, but is not assumed.
+- **The tables sit in a `no-map` region.** `0xB7609000` lies in the gaokun3
+  device tree's `reserved-region@aeb00000` (`0xAEB00000`, size
+  `0x16600000`), which Linux never maps. Reading it may be refused by the
+  security controller (XPU), possibly as an asynchronous SError.
+
+**Two ways on.**
+- **Keep measuring** (chosen, step 1e): a bounded, read-only walk of bank
+  126's tables for the addresses q1n1 would use for DMA, with the SError
+  risk above.
+- **Stop measuring:** the bypass for stream `0x820`. This is the first SMMU
+  write, and it needs its own go-ahead. It makes the tables irrelevant,
+  but replaces the firmware's protection for USB0's DMA.
+
+### Step 1e: walking bank 126's tables (el2qual 9, entry 11)
+
+Load option `usb-s2-walk` (`probes/el2qual/s2walk.c`) runs `usb-smmu`, then
+walks the stage 2 it read, page by page, for the memory q1n1 would give the
+DWC3. It reads descriptors and nothing else, and writes nothing, not even
+RAM. On the stick it is entry 11: entry 10's options plus `usb-s2-walk`, so
+a hang or reset on 11 names the walk.
+
+- **Which addresses.** q1n1 hands the DWC3 physical addresses in a 1 MiB
+  arena (`QDWC3_ARENA_SIZE`) that UEFI allocates as `EfiLoaderData` below
+  4 GiB, wherever it has room (q1n1 `platform/uefi/usb-ebs.c`). el2qual
+  allocates its arena the same way before ExitBootServices and walks all
+  256 of its pages. The answer covers that boot's arena, which UEFI places
+  where q1n1's would likely go. It does not cover all memory below 4 GiB.
+- **Which format.** The bank's own registers, as run 21 read them:
+  - `CBA2R.VA64` must be set, the granule 4 KiB, and `SL0` with `T0SZ` a
+    start level that needs no concatenated tables;
+  - `PS` bounds every address followed;
+  - the root comes from `TTBR0` bits 47:1 (bit 0 is CnP) and must be
+    aligned to its table.
+
+  Anything else is `NOT RUN: FORMAT`, with nothing read. With `SCTLR.M`
+  clear the answer is `NOT NEEDED: STAGE 2 OFF`, again unread.
+- **How each page is classed** (the Arm ARM's stage-2 descriptors):
+  - **`RW`:** identity, access flag set, `S2AP` read and write;
+  - **`LIMITED`:** identity, but not both read and write;
+  - **`MOVED`:** a valid leaf at another address;
+  - **`FAULTS`:** invalid, a reserved encoding (bits 1:0 `0b01` at level
+    3, a block at level 0), past the input or output size, or the access
+    flag clear (bank 126 has `SCTLR.AFFD` clear, so that faults).
+
+  A table descriptor past the output size is not followed (`REFUSED:
+  DESCRIPTOR`).
+
+**The SError risk, and how the walk contains it.** The tables are in a
+`no-map` region. If the security controller protects it, a read may
+return a synchronous external abort, which the fixup catches, or raise an
+asynchronous SError, which no fixup can catch. It may also do something
+the walk cannot see at all, such as a reset by the secure world.
+- **No new mapping.** A table page is read only through a mapping
+  UEFI's tables already have, and only if `AT S1E2R` reports it as identity,
+  Normal write-back inner and outer, and inner shareable. The SMMU walks
+  these tables coherently, so their latest contents may sit in the CPU's
+  caches: a non-cacheable read could see stale memory, and nothing may
+  invalidate those lines. If a page fails, nothing of it is read, and the
+  line names the page and its `PAR`. If UEFI already maps the region as
+  Normal memory, the CPU may already reach it speculatively, so the walk's
+  explicit reads add the least new exposure. Adding a mapping is a
+  separate decision, after this run shows whether one is needed.
+- **An SError already pending refuses the walk** (`NOT RUN: SERROR ALREADY
+  PENDING`), since a new one could not be told apart.
+- **One load per descriptor.** Each is a single 64-bit load behind the
+  fault fixup (`el2q_try_read64`), then a DSB, so the load has completed,
+  then a check of `ISR_EL1.A`, with SErrors masked since ExitBootServices
+  so they stay pending. The walk stops at the first fault (`FAULT AT`) or
+  SError (`SERROR PENDING AFTER`), naming the descriptor.
+- **Bounded.** Each descriptor is read once, since the addresses only
+  increase, and the walk stops at 264 reads: 256 level-3 descriptors, plus
+  the levels above for an arena crossing a 2 MiB and a 1 GiB boundary.
+  For bank 126's layout that is 258 to 260 reads.
+- **The first read is the probe.** It is level 1's descriptor for the
+  arena, at `0xB7609000` plus `8 × (arena >> 30)`. If it is refused, the
+  run ends there with one read made.
+
+The lines (after bank 126's, before `USB SERROR`):
+
+```
+SMMU WALK ARENA <8 hex> READS <n>
+SMMU WALK RW <n> LIMITED <n> MOVED <n> FAULTS <n>
+SMMU WALK LEAF L<level> <descriptor>        the arena's first page
+SMMU WALK ODD <address> L<level> <descriptor>   the first page not RW
+```
+
+The second line is replaced by `REFUSED: TABLE <page> PAR <par>`, `FAULT
+AT`, `SERROR PENDING AFTER`, `REFUSED: DESCRIPTOR` or `REFUSED: OVER 264
+READS` when the walk stops early.
+
+How the answer decides the next step:
+- `RW 256` with no odd page: USB0's DMA reaches the arena 1:1, and q1n1 can
+  use stage 2 as it is. That is for this boot's arena; q1n1 would repeat
+  the same walk as a guard before enabling DMA.
+- `MOVED`, `LIMITED` or `FAULTS` pages: the bypass, or q1n1 allocating
+  where stage 2 is identity.
+- `REFUSED: TABLE`: UEFI does not map the tables as cacheable memory. The
+  `PAR` says how: absent, or with other attributes. Then decide whether to
+  extend el2qual's own map to them, or go to the bypass.
+- `FAULT` or `SERROR`: the tables are protected from the CPU. Reading them
+  is not possible from here; the bypass.
+
+QEMU's virt machine has no stage-2 bank, so test-only options make el2qual
+build its own table set for its arena, laid out like bank 126's (`VTCR
+0x1355C`, tables at levels 1 to 3). The walk then runs through the real
+`AT` checks, guarded loads and SError checks. `emulate-s2-odd` changes three
+pages (moved, invalid, read-only). `emulate-s2-device` points the root at
+virt's PL011, a Device page the walk must refuse unread.
+
+| Check | Result, 2026-10-27 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS, 265791 checks (ASan+UBSan). Against a fake that answers `AT` per page and logs every load: run 21's layout (258 reads), arenas crossing 2 MiB (259) and 1 GiB (260) boundaries, each read preceded by a passing `AT` of its page and none repeated; every class above, 2 MiB and 1 GiB blocks, reserved encodings, an arena past the input size (no read); each format refusal, translation off, no stage 2, no arena, an SError already pending, all with no `AT` and no read; a root or level-3 page that is absent, Device, non-cacheable, write-through, outer non-cacheable, outer shareable or not identity, refused unread; a fault and an SError, with nothing read after; a table past the output size not followed; every line's exact text. 25 deliberately broken copies of `s2walk.c` (each check above removed, a reserved encoding accepted, a block compared page by page, `SL0` or CnP mishandled, and others) are each rejected; the suite runs them every time |
+| Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 10 unchanged, entry 11 `nopac nosmp exit-vhe usb-smmu-map usb-s2-walk` |
+| QEMU: all 20 configurations | PASS. `max-vhe-usb-s2walk-stick` (entry 11's options): `NOT RUN: NO STAGE 2`. `max-vhe-usb-s2walk`: arena `7C121000`, 259 reads, `RW 256`, the first leaf at the arena. `-odd`: `RW 253 LIMITED 1 MOVED 1 FAULTS 1`, the odd page at arena + `0x1000`. `-device`: `REFUSED: TABLE 0000000009000000 PAR 0000000009000B00`, 0 reads. No SError on any. The checker's self-test rejects a missing or refused walk, an SError stop, unnamed test tables, over 264 reads, a first leaf elsewhere, classes not adding up to 256, and the wrong odd page. TCG raises no external aborts, so the fault and SError paths are shown by the host tests only |
 | gaokun3 | NOT RUN |
 
 ### Step 2: decided by step 1
@@ -438,6 +589,12 @@ afterwards. Neither window is read.
   protects could raise an asynchronous SError the fixup cannot catch.
   el2qual reports SError state, and holding the power button ends any run,
   as before.
+- **Step 1e writes nothing, but reads memory the firmware reserved.** Its
+  descriptor reads may be refused by the security controller. A refusal
+  may come as an SError, which the walk stops on and reports. It may also
+  come as a reset or hang the walk cannot report: the screen then ends at
+  the walk's progress line. Nothing persistent is touched, so a power
+  cycle without the stick returns to Windows, as after every earlier run.
 - **No PD or UCSI request is sent, ever,** in either step. The EC owns
   Type-C.
 - **Linux is a reference only.** The GCC offsets and bit meanings come from

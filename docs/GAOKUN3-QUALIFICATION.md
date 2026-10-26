@@ -362,6 +362,7 @@ between.
 | 18 | 2026-10-26 | usb-read, entry 8 (`nopac nosmp usb`) | `6d0760c2` (el2qual 6, built before its commit; it rebuilds identically from the tree) | PASS, read only: as run 16, every USB value the same; no SError |
 | 19 | 2026-10-26 | usb-read, entry 9 (`nopac nosmp exit-vhe usb-smmu`) | `6d0760c2` (as run 18) | PASS, read only: as run 17, then context bank 6: `SCTLR 000000E0` (stage-1 translation **off**), `CBAR 00037E03` (stage 1 nested with stage 2, the stage-2 bank INFERRED to be 126), `TCR`/`TTBR0`/`MAIR` zero; one USB value differs from runs 16 to 18: `GUSB3PIPECTL 0B081402`; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-19-2026-10-26-context-bank-6)) |
 | 20 | 2026-10-26 | usb-read, entry 9 (`nopac nosmp exit-vhe usb-smmu`) | `5a367e0e` (`23effe8`, el2qual 7) | PASS, read only: as run 19 (bank 6 nested, stage 1 off), then `SMMU S2 NOT READ: UNMAPPED`: the stage-2 bank's page, INFERRED `0x150FE000`, is not mapped as Device at its own address in the page tables el2qual runs on, so nothing of it was read; `GUSB3PIPECTL` `0B0C1402` again; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-20-2026-10-26-the-stage-2-page-is-unmapped)) |
+| 21 | 2026-10-27 | usb-read, entry 10 (`nopac nosmp exit-vhe usb-smmu-map`) | `04f5361b` (`b74bbce`, el2qual 8) | PASS, SMMU read only (writes only el2qual's own page tables): `SMMU MAP OK CLONE KEPT 208/256`, then as run 20 up to bank 6, then bank 126 read: `CBAR 00000003` (a stage-2 bank, VMID 3), `SCTLR 00CF00E1` (stage-2 translation **on**), `TCR 0001355C` (4 KiB, 36-bit), `TTBR0 B7609000`; `GUSB3PIPECTL 0B081402`; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-21-2026-10-27-bank-126-translates)) |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
@@ -370,7 +371,8 @@ recorded. Runs 11 and 12 were matched the same way: one CPU with PAuth
 with the `VHE EXIT` lines. Runs 16 and 17 likewise: without, then with the
 `VHE EXIT` and `SMMU` lines, and runs 18 and 19 the same way. Which port held
 the stick for runs 18 and 19 was not restated; the instructions asked for
-run 16's arrangement. Every one ended in a complete report: no hang, no reboot, no
+run 16's arrangement. Run 21 was matched by its `SMMU MAP` line, which only
+entry 10 prints. Every one ended in a complete report: no hang, no reboot, no
 unexpected exception.
 
 Full SHA-256 of run 3's `el2qual.efi`:
