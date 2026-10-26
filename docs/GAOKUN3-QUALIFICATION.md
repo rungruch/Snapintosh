@@ -363,6 +363,7 @@ between.
 | 19 | 2026-10-26 | usb-read, entry 9 (`nopac nosmp exit-vhe usb-smmu`) | `6d0760c2` (as run 18) | PASS, read only: as run 17, then context bank 6: `SCTLR 000000E0` (stage-1 translation **off**), `CBAR 00037E03` (stage 1 nested with stage 2, the stage-2 bank INFERRED to be 126), `TCR`/`TTBR0`/`MAIR` zero; one USB value differs from runs 16 to 18: `GUSB3PIPECTL 0B081402`; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-19-2026-10-26-context-bank-6)) |
 | 20 | 2026-10-26 | usb-read, entry 9 (`nopac nosmp exit-vhe usb-smmu`) | `5a367e0e` (`23effe8`, el2qual 7) | PASS, read only: as run 19 (bank 6 nested, stage 1 off), then `SMMU S2 NOT READ: UNMAPPED`: the stage-2 bank's page, INFERRED `0x150FE000`, is not mapped as Device at its own address in the page tables el2qual runs on, so nothing of it was read; `GUSB3PIPECTL` `0B0C1402` again; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-20-2026-10-26-the-stage-2-page-is-unmapped)) |
 | 21 | 2026-10-27 | usb-read, entry 10 (`nopac nosmp exit-vhe usb-smmu-map`) | `04f5361b` (`b74bbce`, el2qual 8) | PASS, SMMU read only (writes only el2qual's own page tables): `SMMU MAP OK CLONE KEPT 208/256`, then as run 20 up to bank 6, then bank 126 read: `CBAR 00000003` (a stage-2 bank, VMID 3), `SCTLR 00CF00E1` (stage-2 translation **on**), `TCR 0001355C` (4 KiB, 36-bit), `TTBR0 B7609000`; `GUSB3PIPECTL 0B081402`; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-21-2026-10-27-bank-126-translates)) |
+| 22 | 2026-10-27 | usb-read, entry 11 (`nopac nosmp exit-vhe usb-smmu-map usb-s2-walk`) | `1378959f` (`9214752`, el2qual 9) | PASS, read only (writes only el2qual's own page tables): as run 21 through bank 126, then the stage-2 walk of a 1 MiB arena at `0xEFD41000`: `READS 3`, `RW 0 LIMITED 0 MOVED 0 FAULTS 256`. The level-1 descriptor was a table, and both level-2 descriptors under it read 0 (invalid), so stage 2 does not map the arena; the tables read without a fault; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-22-2026-10-27-stage-2-does-not-map-the-arena)) |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
@@ -372,7 +373,8 @@ with the `VHE EXIT` lines. Runs 16 and 17 likewise: without, then with the
 `VHE EXIT` and `SMMU` lines, and runs 18 and 19 the same way. Which port held
 the stick for runs 18 and 19 was not restated; the instructions asked for
 run 16's arrangement. Run 21 was matched by its `SMMU MAP` line, which only
-entry 10 prints. Every one ended in a complete report: no hang, no reboot, no
+entry 10 prints, and run 22 by its `SMMU WALK` lines, which only entry 11
+prints. Every one ended in a complete report: no hang, no reboot, no
 unexpected exception.
 
 Full SHA-256 of run 3's `el2qual.efi`:

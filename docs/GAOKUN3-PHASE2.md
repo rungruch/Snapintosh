@@ -330,12 +330,18 @@ q1n1 has no transport to the Mac yet.
     and read bank 126: a stage-2 bank, VMID 3, with translation **on** and
     its tables at `0xB7609000`, inside a `no-map` reserved region
     ([run 21](GAOKUN3-USB-DEVICE-MODE.md#run-21-2026-10-27-bank-126-translates)).
-  - **Next:** el2qual 9's `usb-s2-walk` (stick entry 11) walks those
-    tables, read only, for a DMA arena allocated as q1n1 allocates its own
-    (built, host and QEMU tested,
-    [step 1e](GAOKUN3-USB-DEVICE-MODE.md#step-1e-walking-bank-126s-tables-el2qual-9-entry-11)).
-    A supervised run decides whether USB0's DMA is 1:1 there, or the bypass
-    for stream `0x820`, the first SMMU write, is needed.
+  - **Run 22:** el2qual 9 walked those tables
+    ([step 1e](GAOKUN3-USB-DEVICE-MODE.md#step-1e-walking-bank-126s-tables-el2qual-9-entry-11))
+    for a DMA arena allocated as q1n1 allocates its own, at `0xEFD41000`.
+    The tables read without a fault, but stage 2 does not map the arena:
+    both level-2 descriptors are 0, so all 256 pages would fault
+    ([run 22](GAOKUN3-USB-DEVICE-MODE.md#run-22-2026-10-27-stage-2-does-not-map-the-arena)).
+  - **Next:** el2qual 10's `usb-s2-survey` (stick entry 12) surveys what
+    stage 2 maps at its top two levels, read only, so q1n1 could place its
+    arena inside an identity region (built, host and QEMU tested,
+    [step 1f](GAOKUN3-USB-DEVICE-MODE.md#step-1f-surveying-bank-126s-top-two-levels-el2qual-10-entry-12)).
+    If nothing usable is mapped, the bypass for stream `0x820`, the first
+    SMMU write, is next.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has

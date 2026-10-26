@@ -546,6 +546,142 @@ virt's PL011, a Device page the walk must refuse unread.
 | Host: `python3 tools/test-el2qual.py` | PASS, 265791 checks (ASan+UBSan). Against a fake that answers `AT` per page and logs every load: run 21's layout (258 reads), arenas crossing 2 MiB (259) and 1 GiB (260) boundaries, each read preceded by a passing `AT` of its page and none repeated; every class above, 2 MiB and 1 GiB blocks, reserved encodings, an arena past the input size (no read); each format refusal, translation off, no stage 2, no arena, an SError already pending, all with no `AT` and no read; a root or level-3 page that is absent, Device, non-cacheable, write-through, outer non-cacheable, outer shareable or not identity, refused unread; a fault and an SError, with nothing read after; a table past the output size not followed; every line's exact text. 25 deliberately broken copies of `s2walk.c` (each check above removed, a reserved encoding accepted, a block compared page by page, `SL0` or CnP mishandled, and others) are each rejected; the suite runs them every time |
 | Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 10 unchanged, entry 11 `nopac nosmp exit-vhe usb-smmu-map usb-s2-walk` |
 | QEMU: all 20 configurations | PASS. `max-vhe-usb-s2walk-stick` (entry 11's options): `NOT RUN: NO STAGE 2`. `max-vhe-usb-s2walk`: arena `7C121000`, 259 reads, `RW 256`, the first leaf at the arena. `-odd`: `RW 253 LIMITED 1 MOVED 1 FAULTS 1`, the odd page at arena + `0x1000`. `-device`: `REFUSED: TABLE 0000000009000000 PAR 0000000009000B00`, 0 reads. No SError on any. The checker's self-test rejects a missing or refused walk, an SError stop, unnamed test tables, over 264 reads, a first leaf elsewhere, classes not adding up to 256, and the wrong odd page. TCG raises no external aborts, so the fault and SError paths are shown by the host tests only |
+| gaokun3 | run 22 (below): the walk ran; every arena page `FAULTS` |
+
+#### Run 22, 2026-10-27: stage 2 does not map the arena
+
+From the `usb-read` stick: el2qual 9 `1378959f` from `9214752`, entry 11
+(`nopac nosmp exit-vhe usb-smmu-map usb-s2-walk`), with no SError. Only
+`SMMU WALK` names the entry.
+
+Everything up to bank 126 is as run 21: the map `OK CLONE KEPT 208/256`,
+then bank 126 the same, word for word. `GUSB3PIPECTL` read `0B081402`.
+Then:
+
+```
+SMMU WALK ARENA EFD41000 READS 3
+SMMU WALK RW 0 LIMITED 0 MOVED 0 FAULTS 256
+SMMU WALK LEAF L2 0000000000000000
+SMMU WALK ODD EFD41000 L2 0000000000000000
+```
+
+**Reading it.**
+- **The tables are readable from EL2.** The root page passed the `AT`
+  check, so UEFI maps it as cacheable, inner-shareable identity memory, and
+  the level-2 table's page passed too. No read faulted, and no SError was
+  pending afterwards. The XPU concern did not show here.
+- **The arena is not mapped.** UEFI put it at `0xEFD41000`, so it spans the
+  2 MiB regions at `0xEFC00000` and `0xEFE00000`. The walk read three
+  descriptors:
+  - the level-1 descriptor for `0xC0000000`–`0xFFFFFFFF`, at
+    `0xB7609018`. It was a valid table descriptor, since the walk went on to
+    level 2. Its value is not on the screen;
+  - the level-2 descriptors for both regions, slots 382 and 383 of that
+    table. Both read 0, which is invalid.
+
+  So USB0's DMA to any of the 256 pages would take a stage-2 translation
+  fault.
+- **A zero is not proven to be memory (not shown).** A read the security
+  controller answers with zeros instead of an abort would look the same.
+  Against that: the root page in the same reserved region returned a valid
+  descriptor, and nothing faulted.
+- **What stage 2 does map is not known.** Bank 126 may map only regions the
+  firmware or Qualcomm's hypervisor assigned to devices, rather than all of
+  the OS's memory. This run shows only that this arena is outside them.
+
+**What it decides.** As planned for `FAULTS` pages, q1n1 cannot hand the DWC3
+an arena UEFI places freely and rely on stage 2 as it is. Two ways remain:
+- **Find what stage 2 does map** (read only). Survey the root's 64 level-1
+  descriptors and the level-2 table under the arena's 1 GiB: 576 more reads
+  from pages run 22 already read without harm. Then q1n1 could allocate its
+  arena inside an identity region, if a suitable one exists. That also
+  shows whether the tables hold anything besides zeros.
+- **The bypass for stream `0x820`:** the first SMMU write, which needs its
+  own go-ahead.
+
+### Step 1f: surveying bank 126's top two levels (el2qual 10, entry 12)
+
+Load option `usb-s2-survey` (`el2q_s2w_survey` in `s2walk.c`) runs the walk
+of entry 11, then surveys what the same stage 2 maps. That is enough to
+choose where q1n1 could put its arena. On the stick it is entry 12: entry
+11's options with `usb-s2-survey` in place of `usb-s2-walk`, which it
+implies. Entry 11 stays what run 22 ran.
+
+- **What it reads.**
+  - Every entry of the root: on bank 126 that is 64 level-1 entries, one
+    per GiB of the 36-bit space.
+  - When the arena's level-1 entry is a table, all 512 entries of that
+    level-2 table, one per 2 MiB of that GiB.
+
+  Level-3 tables are not read. A survey needs a walk that starts at level
+  1, as bank 126's does; otherwise `NOT RUN: FORMAT`.
+- **Bounded:** 576 reads on bank 126, and never more than 1,024. Every read
+  is in the root page, which run 22 read without harm, or in the level-2
+  table under the arena's GiB. That is the table run 22 also read, if UEFI
+  again places the arena in `0xC0000000`–`0xFFFFFFFF`; the `GIB` line
+  shows which.
+- **The same guards as the walk**, from the same code:
+  - the format checks, and refusal if an SError is already pending;
+  - the `AT` check of each table page before its first read;
+  - one guarded load per descriptor, then a check for a pending SError;
+  - a stop at the first fault or SError. A descriptor followed by an
+    SError is not trusted and stays unread (`-`).
+- **The map.** One character per entry, classed as the walk classes a page:
+
+| Character | Entry |
+| --- | --- |
+| `.` | invalid |
+| `T` | a table (only the arena's level-1 table is followed) |
+| `X` | a table past the output size |
+| `I` | an identity block, access flag set, read and write |
+| `L` | an identity block, access flag set, not both read and write |
+| `M` | a block at another address, access flag set |
+| `F` | a block that faults: access flag clear, or past the output size |
+| `-` | not read: the survey stopped first |
+
+The lines (after the walk's, before `USB SERROR`):
+
+```
+SMMU SURVEY READS <n>
+SMMU SURVEY L1 000 <entries 0 to 31>
+SMMU SURVEY L1 020 <entries 32 to 63>
+SMMU SURVEY GIB <index> <the arena's level-1 descriptor>
+SMMU SURVEY L2 AT <its level-2 table> EMPTY ROWS <n>
+SMMU SURVEY L2 <IPA of the row's first entry> <32 entries>
+```
+
+Only level-2 rows that are neither all `.` nor all `-` are printed: at most
+16 lines, and fewer when the map is sparse. `EMPTY ROWS` counts the rows
+left out as all `.`. When the survey stops early, a stop line like the
+walk's follows `READS`. When the arena's entry is not a table, `L2 NONE:
+NOT A TABLE` replaces the level-2 lines. The report has room for 112 lines;
+the survey adds at most 22 on bank 126, so at most the bottom of the ID
+register table, already recorded in earlier runs, gives way to `...
+TRUNCATED`.
+
+How the answer decides the next step:
+- **`I` entries (identity blocks):** stage 2 maps those GiBs or 2 MiB
+  regions 1:1, read and write. q1n1 could allocate its arena inside one
+  with `AllocatePages(AllocateAddress)`, if UEFI's memory map has free
+  memory there, and keep the walk as a guard.
+- **`T` entries only, apart from the arena's:** the mapping is finer than
+  2 MiB, and level 3 would need surveying where it matters.
+- **Nothing but `.`, or nothing usable:** the bypass.
+- **All `.` everywhere, including where entries must exist:** this would
+  hint that the reads return zeros rather than memory. The level-1 entry
+  run 22 found to be a table argues against that.
+
+QEMU has no stage-2 bank, so the survey runs over el2qual's own test tables
+as in step 1e. `emulate-s2-odd` adds a 1 GiB identity block at level 1
+entry 0, and a moved, a read-only and an identity 2 MiB block at level-2
+entries 0 to 2 of the arena's GiB, to exercise the classes. The checker
+derives every map character from the arena address el2qual prints.
+
+| Check | Result, 2026-10-27 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS, 600882 checks (ASan+UBSan). The survey over run 22's layout: 576 reads, each once and each after its page's `AT` check. Exact lines for the fixture, the odd fixture's `I`, `M`, `L`, `I`, an arena across 1 GiB, and every character class at both levels from hand-built tables, with no level-3 page read. The arena's entry a block or invalid: no level-2 read. An arena past the input size. A 512-entry root of 16 rows, at exactly the 1,024-read bound. A level-2 start refused with no `AT` and no read, as are no stage 2, translation off and an SError already pending. A fault on a level-1 entry (earlier entries kept, the rest `-`), an SError on a level-2 entry (that entry not trusted, unread rows left out), and a refused level-2 page (nothing of it read). The walk's tests are unchanged and pass on the shared code. 35 deliberately broken copies of `s2walk.c` are rejected, 10 of them aimed at the survey: a level-2 table surveyed under a non-table, a level-2 start accepted, `X` shown as `T`, the walk's bound, the wrong arena entry, the table address unmasked, level-2 entries classed as pages, empty or unread rows printed, and wrong row addresses |
+| Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 11 unchanged, entry 12 `nopac nosmp exit-vhe usb-smmu-map usb-s2-survey` |
+| QEMU: all 24 configurations | PASS. `max-vhe-usb-s2survey-stick` (entry 12's options): both passes `NOT RUN: NO STAGE 2`. `max-vhe-usb-s2survey`: arena `7C120000`, 576 survey reads, level 1 `.T…`, `GIB 01` pointing at the surveyed level-2 table, 15 empty rows and the row at `7C000000` `TT…`. `-odd`: level 1 `IT…`, and the row at `40000000` `MLI…`. `-device`: both refused with 0 reads. No SError. The checker's self-test rejects a missing or refused survey, a wrong level-1 character, a wrong empty-row count, a level-1 descriptor pointing elsewhere, a missing level-2 row, and an unasked survey |
 | gaokun3 | NOT RUN |
 
 ### Step 2: decided by step 1
@@ -595,6 +731,10 @@ virt's PL011, a Device page the walk must refuse unread.
   come as a reset or hang the walk cannot report: the screen then ends at
   the walk's progress line. Nothing persistent is touched, so a power
   cycle without the stick returns to Windows, as after every earlier run.
+- **Step 1f is the same kind of read,** in the root page run 22 read without
+  harm and in one level-2 table, the one run 22 read if the arena lands in
+  the same GiB. A hang or reset there leaves its own progress line on the
+  screen, `USB: STAGE-2 SURVEY, READ ONLY. A HANG OR RESET HERE IS IT`.
 - **No PD or UCSI request is sent, ever,** in either step. The EC owns
   Type-C.
 - **Linux is a reference only.** The GCC offsets and bit meanings come from
