@@ -315,6 +315,86 @@ How the answer decides the next step:
 | --- | --- |
 | Host: `python3 tools/test-el2qual.py` | PASS, 61212 checks. A fixture with run 19's real `ID1`, `CBAR(6)` and bank-6 values covers: bank 126 found at `0x150FE000`; nothing of a stage 2 read for a bank that is not nested; only the `CBAR` read when the named bank is not stage 2; nothing read past `NUMCB` or with an unmapped page; a fault inside `VTTBR` keeps the words before it; a stage-1 fault stops everything; the exact lines. Seven broken variants (no nesting check, no stage-1-read check, no stage-2 type check, no `NUMCB` check, no mapping check, the wrong index field, `VTTBR` upper half dropped) each fail it. Writing the tests also caught a line-formatting bug, now fixed, that prefixed every later line with the stage-2 bank's name |
 | QEMU: all 13 configurations | PASS. No stage-2 lines on virt (no match). The checker requires stage-2 lines exactly after a read, nested bank; its self-test rejects both wrong combinations and accepts the right one |
+| gaokun3 | run 20 (below): refused, page unmapped |
+
+#### Run 20, 2026-10-26: the stage-2 page is unmapped
+
+From the `usb-read` stick: el2qual 7 `5a367e0e` from `23effe8`, entry 9,
+read only, no SError, the operator naming the entry.
+
+- **What it showed.** Everything up to bank 6 is as run 19: nested,
+  stage 1 off, `CBAR 00037E03`. Then `SMMU S2 NOT READ: UNMAPPED`, so
+  nothing of the stage-2 bank was read.
+- **Which mapping failed (INFERRED).** The GR1 page `0x15001000`, where
+  `CBAR(126)` and `CBA2R(126)` live, is the page bank 6's `CBAR(6)` was
+  read from. So the refused one is bank 126's own page, `0x150FE000`. The
+  page tables el2qual runs on are UEFI's, and they do not map it as Device
+  at its own address. Bank 6's page, `0x15086000`, is mapped.
+- **Not shown.** Whether the page is absent from the tables or present
+  with other attributes: the stage records no PAR for this refusal.
+- **`GUSB3PIPECTL`** read `0B0C1402` again, so run 19's `0B081402` stands
+  as a one-off.
+
+The read-only approach has reached UEFI's map. Reading bank 126 now needs
+el2qual to reach that page itself. One way is to add a Device mapping for
+the SMMU window to its own EL2 tables, which changes only el2qual's own
+memory. The other is a bounded read with its MMU off, where every data
+access is Device at its physical address. Both still read the SMMU only.
+
+The alternative is to stop measuring and design the bypass for stream
+`0x820`, which q1n1 would need if stage 2 is not 1:1 anyway. That is the
+first SMMU write, and it needs its own go-ahead.
+
+### Step 1d: el2qual's own map of the SMMU window (el2qual 8, entry 10)
+
+Load option `usb-smmu-map` (`probes/el2qual/pagemap.c`) runs `usb-smmu`
+after first adding the SMMU's 1 MiB window to the EL2 page tables el2qual
+runs on, so bank 126's page can be read. It writes RAM, never hardware: one
+table page el2qual allocates, and the one level-2 descriptor in UEFI's
+leftover tables that points at it. The SMMU is still only read. On the stick
+it is a new entry 10; entry 9 stays what runs 17, 19 and 20 ran, so a hang
+on 10 names the map.
+
+- **How.** Walk `TTBR0_EL2` (4K granule only) to the window's level-2
+  entry. Clone its level-3 table into the new page, fill only the invalid
+  window entries, and swap the level-2 entry to the clone. If there is no
+  table there, the new page starts empty.
+- **New leaves.** Device memory (the first Device index in `MAIR_EL2`, read
+  at runtime), identity, read-only and execute-never, with the bits of the
+  regime the tables are walked in. After the VHE exit that is the EL2
+  regime: `AP[2:1] 0b11` (`AP[1]` is RES1 there) and `XN`, bit 54, while
+  bit 53 is RES0. With E2H still set: `AP[2:1] 0b10`, `UXN` and `PXN`.
+- **Kept.** Every valid entry of UEFI's table, verbatim, and the original
+  level-2 entry's hierarchical limits (bits 63:59), which bound UEFI's
+  leaves too.
+- **Refused without a write:** another granule, a `T0SZ` the window is
+  outside, no Device byte in `MAIR_EL2`, a missing or block entry above
+  level 2, a 2 MiB block that is not Device identity, an invalid level-2
+  entry that still carries bits, or a valid window entry that is not a
+  Device identity page. If every window page is already Device identity,
+  nothing is written (`NOT NEEDED`).
+- **Swap, break-before-make.** Clean the clone to the point of coherency,
+  DSB. Write 0 to the level-2 entry, clean it, DSB, `TLBI ALLE2`, DSB.
+  Write the new entry, clean it, DSB, ISB. Nothing el2qual uses is in the
+  entry's 2 MiB region: the window is MMIO.
+- **Checked.** Every window page must then pass the same `AT S1E2R` check
+  the read uses. The line is `SMMU MAP OK CLONE KEPT <n>/256` (or
+  `NEW TABLE`), `NOT NEEDED`, or `REFUSED: <why>`. If the map is refused,
+  the SMMU read runs as on entry 9.
+
+On QEMU's virt machine EDK2 already maps `0x15000000` as Device (PCIe
+MMIO), so there the map is `NOT NEEDED`. The test-only option
+`emulate-map-hole` maps two 1 MiB windows in flash0's space instead, at
+`0x02000000` and `0x02100000`, which EDK2's tables leave absent (OBSERVED).
+The first creates a new table, the second clones it, so the swap of a valid
+entry with its break runs too, and the first window must still pass
+afterwards. Neither window is read.
+
+| Check | Result, 2026-10-27 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS, 63846 checks (ASan+UBSan). Against a fake that logs every write and maintenance step in order: building writes only the clone; publication is exactly the order above; the gaokun3's run-20 shape gives a clone that keeps UEFI's three leaves and fills the rest; the regime's leaf bits for E2H 0 and 1; the table limits kept; every refusal above writes nothing; a reserved `MAIR` byte is never taken as Device; a start at level 1; a second window cloning the first. 13 deliberately broken copies of `pagemap.c` (slot written while building, `PXN` as execute-never at EL2, `AP[1]` clear, table limits dropped, a bit-carrying invalid entry replaced, no break, no `TLBI`, the clone not cleaned first, no ISB, a valid entry rewritten, a non-identity entry kept, a Normal `MAIR` byte taken as Device, the start level ignored) are each rejected; the suite runs them every time |
+| Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entry 9 unchanged, entry 10 `nopac nosmp exit-vhe usb-smmu-map` |
+| QEMU: all 16 configurations | PASS. `max-vhe-usb-smmu-map`: `SMMU MAP NOT NEEDED`. `max-vhe-usb-smmu-map-hole` (after the VHE exit) and `max-vhe-usb-smmu-map-hole-e2h` (E2H kept): `SMMU MAP OK CLONE KEPT 0/256 (TEST WINDOW)`. The checker requires each configuration's exact outcome; its self-test rejects a missing, doubled, malformed or refused line, an unnamed test window, and a write where nothing was needed. TCG does not model a walker that misses the cache, so it cannot show the cleaning is needed; the host tests check the order |
 | gaokun3 | NOT RUN |
 
 ### Step 2: decided by step 1
@@ -349,7 +429,10 @@ How the answer decides the next step:
 
 ## Safety
 
-- **Step 1 writes nothing.** Its only risk is a read the hardware refuses.
+- **Step 1 writes no hardware.** Only step 1d writes at all: RAM, one
+  table page of el2qual's own and one descriptor in UEFI's leftover tables,
+  after ExitBootServices, with only the boot CPU running. Its only other
+  risk is a read the hardware refuses.
   The mapping check, the fault fixup and the power gate cover the known ways
   that happens. A GCC or SMMU register that the security controller (XPU)
   protects could raise an asynchronous SError the fixup cannot catch.

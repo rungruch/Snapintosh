@@ -323,9 +323,13 @@ q1n1 has no transport to the Mac yet.
     to be identity.
   - **Run 19:** context bank 6 has stage-1 translation off, but nests a
     stage 2, INFERRED to be bank 126.
-  - **Next:** el2qual 7's `usb-smmu` reads that stage-2 bank (built, host
-    and QEMU tested). A supervised run decides whether DMA is 1:1, or a
-    bypass for stream `0x820` is needed.
+  - **Run 20:** el2qual 7 could not read that stage-2 bank. Its page is not
+    in UEFI's page tables, so it was refused unread.
+  - **Next:** el2qual 8's `usb-smmu-map` (stick entry 10) adds its own
+    Device map of the SMMU window, then reads that bank (built, host and
+    QEMU tested, [step 1d](GAOKUN3-USB-DEVICE-MODE.md#step-1d-el2quals-own-map-of-the-smmu-window-el2qual-8-entry-10)).
+    A supervised run decides whether DMA is 1:1, or a bypass for stream
+    `0x820` is needed.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has
