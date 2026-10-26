@@ -70,6 +70,16 @@ report it writes to the PL011:
                invalid, one read-only, and the first odd page named
   max-vhe-usb-s2walk-device  the same tables with the root pointed at
                virt's PL011, a Device page: refused with nothing read
+  max-vhe-usb-s2survey-stick  the gaokun3 stick entry 12's options ("usb-
+               smmu-map usb-s2-survey"): NOT RUN: NO STAGE 2 for both passes
+  max-vhe-usb-s2survey  "usb-s2-survey" over el2qual's own tables: the walk
+               as max-vhe-usb-s2walk, then every level-1 entry and the
+               level-2 table under the arena, each map character equal to
+               what the checker derives from the arena address printed
+  max-vhe-usb-s2survey-odd  the same over the odd tables, whose extra
+               1 GiB and 2 MiB blocks must appear as I, M, L and I
+  max-vhe-usb-s2survey-device  the root at virt's PL011: both passes
+               refused with nothing read
 
 On every configuration that runs, all four CPUs must finish at EL2 without
 a fault, the report must name the GOP mode it drew on, and each feature's
@@ -193,6 +203,47 @@ CONFIGS = {
                                                   'SMMU WALK LEAF L3 000000007E6007FF\n'
                                                   'SMMU WALK ODD 7E601000 L3 000000007E8017FF'),
                                    features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The survey (s2walk.c). s2survey names what the checker expects:
+    # 'tables' or 'odd' (derived from the walk's arena), or a list of exact
+    # lines (regexes).
+    'max-vhe-usb-s2survey-stick': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu-map usb-s2-survey',
+                                       pac='Y', walk='Y', vhe=True, vhe_exit='DONE',
+                                       usb=True, smmu=True, smmumap='NOT NEEDED',
+                                       s2walk=r'SMMU WALK NOT RUN: NO STAGE 2',
+                                       s2survey=[r'SMMU SURVEY NOT RUN: NO STAGE 2'],
+                                       features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-vhe-usb-s2survey': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-survey emulate-s2-tables',
+                                 pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
+                                 s2walk=(r'SMMU WALK ARENA [0-9A-F]{8} READS (258|259|260) \(TEST TABLES\)\n'
+                                         r'SMMU WALK RW 256 LIMITED 0 MOVED 0 FAULTS 0\n'
+                                         r'SMMU WALK LEAF L3 [0-9A-F]{16}'),
+                                 s2walk_sample=('SMMU WALK ARENA 7E600000 READS 258 (TEST TABLES)\n'
+                                                'SMMU WALK RW 256 LIMITED 0 MOVED 0 FAULTS 0\n'
+                                                'SMMU WALK LEAF L3 000000007E6007FF'),
+                                 s2survey='tables',
+                                 features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-vhe-usb-s2survey-odd': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-survey emulate-s2-odd',
+                                     pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
+                                     s2walk=(r'SMMU WALK ARENA [0-9A-F]{8} READS (258|259|260) \(TEST TABLES\)\n'
+                                             r'SMMU WALK RW 253 LIMITED 1 MOVED 1 FAULTS 1\n'
+                                             r'SMMU WALK LEAF L3 [0-9A-F]{16}\n'
+                                             r'SMMU WALK ODD [0-9A-F]{8} L3 [0-9A-F]{16}'),
+                                     s2walk_odd=0x1000,
+                                     s2walk_sample=('SMMU WALK ARENA 7E600000 READS 258 (TEST TABLES)\n'
+                                                    'SMMU WALK RW 253 LIMITED 1 MOVED 1 FAULTS 1\n'
+                                                    'SMMU WALK LEAF L3 000000007E6007FF\n'
+                                                    'SMMU WALK ODD 7E601000 L3 000000007E8017FF'),
+                                     s2survey='odd',
+                                     features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-vhe-usb-s2survey-device': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-survey emulate-s2-device',
+                                        pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
+                                        s2walk=(r'SMMU WALK ARENA [0-9A-F]{8} READS 0 \(TEST TABLES\)\n'
+                                                r'SMMU WALK REFUSED: TABLE 0000000009000000 PAR [0-9A-F]{16}'),
+                                        s2walk_sample=('SMMU WALK ARENA 7E600000 READS 0 (TEST TABLES)\n'
+                                                       'SMMU WALK REFUSED: TABLE 0000000009000000 PAR 0000000009000000'),
+                                        s2survey=[r'SMMU SURVEY READS 0 \(TEST TABLES\)',
+                                                  r'SMMU SURVEY REFUSED: TABLE 0000000009000000 PAR [0-9A-F]{16}'],
+                                        features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
     'max-vhe-usb-s2walk-device': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-walk emulate-s2-device',
                                       pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
                                       s2walk=(r'SMMU WALK ARENA [0-9A-F]{8} READS 0 \(TEST TABLES\)\n'
@@ -432,7 +483,7 @@ def check_usb(lines, expect):
                             f'{power.get("A")}: {core}')
     smmu = [line for line in lines if line.startswith('SMMU ')]
     smmu = [line for line in smmu
-            if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 ', 'SMMU MAP', 'SMMU WALK'))]
+            if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 ', 'SMMU MAP', 'SMMU WALK', 'SMMU SURVEY'))]
     if expect.get('smmu') and len(smmu) != 2:
         problems.append(f'usb-smmu asked but {len(smmu)} SMMU lines')
     if not expect.get('smmu') and smmu:
@@ -477,6 +528,7 @@ def check_usb(lines, expect):
         elif translate and 'SMMU CB NOT TRANSLATED' in bank:
             problems.append('a translating S2CR reported as not translated')
     problems += check_s2walk(lines, expect)
+    problems += check_s2survey(lines, expect)
     if 'USB SERROR NONE' not in lines:
         problems.append('the USB read left an SError pending, or no SERROR line')
     return problems
@@ -512,6 +564,63 @@ def check_s2walk(lines, expect):
                                    int(odd[1], 16) != int(arena[1], 16) + expect['s2walk_odd']):
         problems.append(f'the first odd page is not the arena\'s page at +{expect["s2walk_odd"]:X}')
     return problems
+
+
+def survey_lines(arena, odd, table):
+    """The survey lines el2qual's own test tables must give for arena
+    (s2walk.c's el2q_s2w_build_test), as regexes; table is the level-2
+    table's address, or None to accept any 16 hex digits there."""
+    last = arena + 0x100000 - 1
+    gib = arena >> 30
+    l1 = ['.'] * 64
+    for a in (arena, last):
+        l1[a >> 30] = 'T'
+    if odd and arena >> 30 and last >> 30:
+        l1[0] = 'I'
+    l2 = ['.'] * 512
+    for a in (arena, last):
+        if a >> 30 == gib:
+            l2[(a >> 21) & 511] = 'T'
+    if odd:
+        for e, c in enumerate('MLI'):
+            ipa = (gib << 30) + (e << 21)
+            if ipa >> 21 not in (arena >> 21, last >> 21):
+                l2[e] = c
+    rows = [''.join(l2[r * 32:(r + 1) * 32]) for r in range(16)]
+    at = f'{table:016X}' if table is not None else '[0-9A-F]{16}'
+    desc = f'{table | 3:016X}' if table is not None else '[0-9A-F]{16}'
+    # The map rows are compared as regexes, where '.' is not literal.
+    out = [r'SMMU SURVEY READS 576 \(TEST TABLES\)',
+           'SMMU SURVEY L1 000 ' + re.escape(''.join(l1[:32])),
+           'SMMU SURVEY L1 020 ' + re.escape(''.join(l1[32:])),
+           f'SMMU SURVEY GIB {gib:02X} {desc}',
+           f'SMMU SURVEY L2 AT {at} EMPTY ROWS {sum(r == "." * 32 for r in rows)}']
+    out += [f'SMMU SURVEY L2 {(gib << 30) + (r * 32 << 21):08X} {re.escape(rows[r])}'
+            for r in range(16) if rows[r] != '.' * 32]
+    return out
+
+
+def check_s2survey(lines, expect):
+    """The survey's lines: present exactly when asked, and, over el2qual's
+    own tables, exactly the map those tables give for the arena the walk
+    printed, with the arena's level-1 descriptor pointing at the level-2
+    table surveyed."""
+    survey = [line for line in lines if line.startswith('SMMU SURVEY ')]
+    want = expect.get('s2survey')
+    if not want:
+        return [f'SMMU SURVEY lines although usb-s2-survey was not asked: {survey[0]}'] if survey else []
+    if want in ('tables', 'odd'):
+        arena = next((m for line in lines for m in [re.match(r'^SMMU WALK ARENA ([0-9A-F]{8}) ', line)] if m), None)
+        if not arena:
+            return ['a survey over test tables without the walk\'s arena line']
+        want = survey_lines(int(arena[1], 16), want == 'odd', None)
+        gib = next((m for line in survey for m in [re.match(r'^SMMU SURVEY GIB [0-9A-F]{2} ([0-9A-F]{16})$', line)] if m), None)
+        at = next((m for line in survey for m in [re.match(r'^SMMU SURVEY L2 AT ([0-9A-F]{16}) ', line)] if m), None)
+        if gib and at and int(gib[1], 16) != int(at[1], 16) | 3:
+            return [f'the arena\'s level-1 descriptor {gib[1]} is not a table at {at[1]}']
+    if len(survey) != len(want) or not all(re.fullmatch(w, line) for w, line in zip(want, survey)):
+        return [f'the survey said {survey!r}, not {want!r}']
+    return []
 
 
 VHE_REGS = re.compile(r'^(VHEIN|VHEOUT) HCR=([0-9A-F]+) SCTLR=([0-9A-F]+) TCR=([0-9A-F]+)$')
@@ -592,6 +701,12 @@ def synthetic(expect, smp=SMP):
             lines += ['SMMU SCR0 FFFFFFFF IDR0 FFFFFFFF', 'SMMU STREAM 820 NOT READ: ALL ONES']
         if expect.get('s2walk'):
             lines += expect.get('s2walk_sample', expect['s2walk']).split('\n')
+        if expect.get('s2survey') in ('tables', 'odd'):
+            lines += [line.replace('\\', '') for line in
+                      survey_lines(0x7E600000, expect['s2survey'] == 'odd', 0x40001000)]
+        elif expect.get('s2survey'):
+            lines += [line.replace('\\', '').replace('[0-9A-F]{16}', '0000000009000B00')
+                      for line in expect['s2survey']]
         lines.append('USB SERROR NONE')
     if expect.get('thermal'):
         lines += ['TSENS GUARD (READ ONLY) . TRIPPED: READ AT 0C222000',
@@ -814,7 +929,26 @@ def self_test():
                     if 's2walk_odd' in expect:
                         expect_result(f'{name} the wrong odd page', good.replace(
                             'ODD 7E601000', 'ODD 7E602000'), expect, False)
+                if expect.get('s2survey'):
+                    first = next(line for line in good.split('\n') if line.startswith('SMMU SURVEY '))
+                    expect_result(f'{name} survey missing', '\n'.join(
+                        line for line in good.split('\n') if not line.startswith('SMMU SURVEY ')),
+                        expect, False)
+                    expect_result(f'{name} survey refused', good.replace(
+                        first, 'SMMU SURVEY NOT RUN: FORMAT'), expect, False)
+                    if expect['s2survey'] in ('tables', 'odd'):
+                        expect_result(f'{name} a level-1 entry wrong', re.sub(
+                            r'SMMU SURVEY L1 000 (.)', r'SMMU SURVEY L1 000 X', good), expect, False)
+                        expect_result(f'{name} an empty-row count wrong', re.sub(
+                            r'EMPTY ROWS (\d+)', lambda m: f'EMPTY ROWS {int(m[1]) + 1}', good), expect, False)
+                        expect_result(f'{name} level 1 pointing elsewhere', good.replace(
+                            'GIB 01 0000000040001003', 'GIB 01 0000000040002003'), expect, False)
+                        expect_result(f'{name} a level-2 row missing', re.sub(
+                            r'SMMU SURVEY L2 [0-9A-F]{8} .*\n', '', good, count=1), expect, False)
                 else:
+                    expect_result(f'{name} survey unasked', good.replace(
+                        'USB SERROR NONE', 'SMMU SURVEY NOT RUN: NO STAGE 2\nUSB SERROR NONE'), expect, False)
+                if not expect.get('s2walk'):
                     expect_result(f'{name} walk unasked', good.replace(
                         'USB SERROR NONE', 'SMMU WALK NOT RUN: NO STAGE 2\nUSB SERROR NONE'), expect, False)
             else:

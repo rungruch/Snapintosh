@@ -417,6 +417,222 @@ static void test_usb_lines(void)
     CHECK(!strcmp(prev, "USB SERROR NONE"));
 }
 
+/* ---- The survey ------------------------------------------------------------ */
+
+static void sline(const struct el2q_s2w_survey *sv, unsigned i, const char *want)
+{
+    char out[EL2Q_S2W_LINE_COLS + 1];
+    el2q_s2w_survey_line(sv, i, out);
+    if (strcmp(out, want)) fprintf(stderr, "survey line %u: got \"%s\", want \"%s\"\n", i, out, want);
+    CHECK(!strcmp(out, want));
+}
+
+/* "<prefix><32 characters>": fill everywhere, then each (index, char) pair. */
+static const char *row(const char *prefix, char fill, unsigned n, const unsigned *at, const char *c)
+{
+    static char t[EL2Q_S2W_LINE_COLS + 1];
+    size_t p = strlen(prefix);
+    memcpy(t, prefix, p);
+    memset(t + p, fill, 32);
+    t[p + 32] = 0;
+    for (unsigned i = 0; i < n; i++) t[p + at[i]] = c[i];
+    return t;
+}
+
+static const struct el2q_s2w_bank bank126 = {.sctlr = 0xe1, .tcr = 0x1355c, .cba2r = 1, .ttbr = POOL};
+#define BLOCK (1ull | 0xfull << 2 | 3ull << 6 | 3ull << 8 | 1ull << 10)
+
+static void test_survey_fixture(void)
+{
+    struct el2q_s2w_survey sv;
+    /* Run 22's shape: the arena's 1 GiB (entry 2) a table, its 2 MiB
+     * (level-2 entry 251) a table. 64 + 512 reads, each once. */
+    freset();
+    fixture(ARENA, POOL, 0);
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_DONE);
+    CHECK(sv.reads == 576 && f.nreads == 576 && sv.l1_entries == 64 && sv.gib == 2);
+    CHECK(sv.gib_read && sv.gib_desc == ((POOL + 0x1000) | 3) && sv.l2_table == POOL + 0x1000);
+    CHECK(sv.l2_state == EL2Q_S2W_L2_READ);
+    check_reads_disciplined();
+    sline(&sv, 0, "SMMU SURVEY READS 576");
+    sline(&sv, 1, row("SMMU SURVEY L1 000 ", '.', 1, (unsigned[]){2}, "T"));
+    sline(&sv, 2, row("SMMU SURVEY L1 020 ", '.', 0, 0, ""));
+    sline(&sv, 3, "SMMU SURVEY GIB 02 00000000B760A003");
+    sline(&sv, 4, "SMMU SURVEY L2 AT 00000000B760A000 EMPTY ROWS 15");
+    sline(&sv, 5, row("SMMU SURVEY L2 9C000000 ", '.', 1, (unsigned[]){27}, "T"));
+    sline(&sv, 6, "");
+    sv.test = 1;
+    sline(&sv, 0, "SMMU SURVEY READS 576 (TEST TABLES)");
+
+    /* The odd fixture's blocks: a 1 GiB identity block at entry 0, and a
+     * moved, a read-only and an identity 2 MiB block at entries 0 to 2. */
+    freset();
+    fixture(ARENA, POOL, 1);
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_DONE);
+    sline(&sv, 1, row("SMMU SURVEY L1 000 ", '.', 2, (unsigned[]){0, 2}, "IT"));
+    sline(&sv, 4, "SMMU SURVEY L2 AT 00000000B760A000 EMPTY ROWS 14");
+    sline(&sv, 5, row("SMMU SURVEY L2 80000000 ", '.', 3, (unsigned[]){0, 1, 2}, "MLI"));
+    sline(&sv, 6, row("SMMU SURVEY L2 9C000000 ", '.', 1, (unsigned[]){27}, "T"));
+    sline(&sv, 7, "");
+    /* The walk over the same tables is unchanged by those blocks. */
+    struct el2q_s2w_result r;
+    CHECK(el2q_s2w_walk(&bank126, ARENA, &hw, &r) == EL2Q_S2W_DONE && r.pages[EL2Q_S2W_RW] == 253);
+
+    /* An arena across a 1 GiB boundary: both level-1 entries are tables;
+     * the level-2 table surveyed is the first one's. */
+    freset();
+    fixture(0xbff80000, POOL, 0);
+    CHECK(el2q_s2w_survey(&bank126, 0xbff80000, &hw, &sv) == EL2Q_S2W_DONE && sv.reads == 576);
+    sline(&sv, 1, row("SMMU SURVEY L1 000 ", '.', 2, (unsigned[]){2, 3}, "TT"));
+    sline(&sv, 5, row("SMMU SURVEY L2 BC000000 ", '.', 1, (unsigned[]){31}, "T"));
+}
+
+static void test_survey_classes(void)
+{
+    struct el2q_s2w_survey sv;
+    freset();
+    fwrite64(0, POOL + 0 * 8, (0ull << 30) | BLOCK);                 /* identity */
+    fwrite64(0, POOL + 1 * 8, (2ull << 30) | BLOCK);                 /* elsewhere */
+    fwrite64(0, POOL + 2 * 8, (POOL + 0x1000) | 3);                  /* the arena's table */
+    fwrite64(0, POOL + 3 * 8, ((3ull << 30) | BLOCK) & ~(1ull << 10));  /* access flag clear */
+    fwrite64(0, POOL + 4 * 8, (1ull << 36) | 3);                     /* table past 36 bits */
+    fwrite64(0, POOL + 5 * 8, ((5ull << 30) | BLOCK) & ~(1ull << 7));   /* read only */
+    fwrite64(0, POOL + 6 * 8, (1ull << 36) | BLOCK);                 /* block past 36 bits */
+    fwrite64(0, POOL + 0x1000 + 0 * 8, (2ull << 30) | BLOCK);
+    fwrite64(0, POOL + 0x1000 + 2 * 8, (1ull << 36) | 3);
+    fwrite64(0, POOL + 0x1000 + 511 * 8, (POOL + 0x2000) | 3);
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_DONE && sv.reads == 576);
+    check_reads_disciplined();
+    sline(&sv, 1, row("SMMU SURVEY L1 000 ", '.', 7, (unsigned[]){0, 1, 2, 3, 4, 5, 6}, "IMTFXLF"));
+    sline(&sv, 4, "SMMU SURVEY L2 AT 00000000B760A000 EMPTY ROWS 14");
+    sline(&sv, 5, row("SMMU SURVEY L2 80000000 ", '.', 2, (unsigned[]){0, 2}, "IX"));
+    sline(&sv, 6, row("SMMU SURVEY L2 BC000000 ", '.', 1, (unsigned[]){31}, "T"));
+    /* No level-3 table is read: every read is in the root or level 2. */
+    for (unsigned i = 0; i < f.nreads; i++) CHECK((f.reads[i] & ~0xfffull) != POOL + 0x2000);
+
+    /* The arena's level-1 entry a block: no level-2 survey. */
+    freset();
+    fwrite64(0, POOL + 2 * 8, (2ull << 30) | BLOCK);
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_DONE);
+    CHECK(sv.reads == 64 && f.nreads == 64 && sv.l2_state == EL2Q_S2W_L2_NOT_TABLE);
+    sline(&sv, 1, row("SMMU SURVEY L1 000 ", '.', 1, (unsigned[]){2}, "I"));
+    sline(&sv, 3, "SMMU SURVEY GIB 02 00000000800007FD");
+    sline(&sv, 4, "SMMU SURVEY L2 NONE: NOT A TABLE");
+    sline(&sv, 5, "");
+    /* Invalid there too. */
+    freset();
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_DONE && sv.reads == 64);
+    sline(&sv, 4, "SMMU SURVEY L2 NONE: NOT A TABLE");
+
+    /* An arena past the input size (31 bits, two entries). */
+    freset();
+    struct el2q_s2w_bank b = {.sctlr = 0xe1, .tcr = 33 | 1u << 6 | 0x3500 | 1u << 16, .cba2r = 1, .ttbr = POOL};
+    CHECK(el2q_s2w_survey(&b, ARENA, &hw, &sv) == EL2Q_S2W_DONE);
+    CHECK(sv.reads == 2 && sv.l1_entries == 2 && sv.l2_state == EL2Q_S2W_L2_NO_ENTRY && !sv.gib_read);
+    sline(&sv, 1, "SMMU SURVEY L1 000 ..");
+    sline(&sv, 2, "SMMU SURVEY L2 NONE: OUTSIDE THE INPUT SIZE");
+    sline(&sv, 3, "");
+
+    /* A 512-entry root (39 bits from level 1): 16 rows, and 1024 reads,
+     * exactly the bound. */
+    freset();
+    b = (struct el2q_s2w_bank){.sctlr = 0xe1, .tcr = 25 | 1u << 6 | 0x3500 | 2u << 16, .cba2r = 1, .ttbr = POOL};
+    fwrite64(0, POOL + 2 * 8, (POOL + 0x1000) | 3);
+    CHECK(el2q_s2w_survey(&b, ARENA, &hw, &sv) == EL2Q_S2W_DONE && sv.reads == 1024);
+    sline(&sv, 16, row("SMMU SURVEY L1 1E0 ", '.', 0, 0, ""));
+    sline(&sv, 17, "SMMU SURVEY GIB 02 00000000B760A003");
+    sline(&sv, 18, "SMMU SURVEY L2 AT 00000000B760A000 EMPTY ROWS 16");
+    sline(&sv, 19, "");
+}
+
+static void test_survey_refusals(void)
+{
+    struct el2q_s2w_survey sv;
+    freset();
+    fixture(ARENA, POOL, 0);
+    /* A walk that starts at level 2 has no level-1 entries to survey. */
+    struct el2q_s2w_bank b = {.sctlr = 0xe1, .tcr = 34 | 0x3500 | 1u << 16, .cba2r = 1, .ttbr = POOL};
+    struct el2q_s2w_result r;
+    CHECK(el2q_s2w_walk(&b, ARENA, &hw, &r) == EL2Q_S2W_DONE);
+    f.nreads = f.nasked = 0;
+    CHECK(el2q_s2w_survey(&b, ARENA, &hw, &sv) == EL2Q_S2W_FORMAT && f.nreads == 0 && f.nasked == 0);
+    sline(&sv, 0, "SMMU SURVEY NOT RUN: FORMAT");
+    sline(&sv, 1, "");
+    CHECK(el2q_s2w_survey(0, ARENA, &hw, &sv) == EL2Q_S2W_NO_STAGE2 && f.nreads == 0);
+    sv.test = 1;
+    sline(&sv, 0, "SMMU SURVEY NOT RUN: NO STAGE 2 (TEST TABLES)");
+    b = bank126;
+    b.sctlr = 0;
+    CHECK(el2q_s2w_survey(&b, ARENA, &hw, &sv) == EL2Q_S2W_NOT_NEEDED && f.nreads == 0);
+    f.serror_before = 1;
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_PENDING && f.nreads == 0);
+    sv.state = EL2Q_S2W_NOT_ASKED;
+    sline(&sv, 0, "");
+}
+
+static void test_survey_stops(void)
+{
+    struct el2q_s2w_survey sv;
+    char dashes[] = "SMMU SURVEY L1 020 ................................";
+    memset(dashes + 19, '-', 32);
+
+    /* A fault on level-1 entry 5: entries 0 to 4 kept, nothing after. */
+    freset();
+    fixture(ARENA, POOL, 0);
+    f.fault_at = POOL + 5 * 8;
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_FAULT);
+    CHECK(sv.reads == 6 && f.nreads == 6 && sv.l2_state == EL2Q_S2W_L2_NOT_REACHED);
+    sline(&sv, 0, "SMMU SURVEY READS 6");
+    sline(&sv, 1, "SMMU SURVEY FAULT AT 00000000B7609028 ESR 96000010");
+    sline(&sv, 2, "SMMU SURVEY L1 000 ..T..---------------------------");
+    sline(&sv, 3, dashes);
+    sline(&sv, 4, "SMMU SURVEY GIB 02 00000000B760A003");
+    sline(&sv, 5, "");
+
+    /* An SError after level-2 entry 10: entry 10 itself is not trusted,
+     * so it stays unread, and the unread rows are left out. */
+    freset();
+    fixture(ARENA, POOL, 0);
+    f.serror_at = POOL + 0x1000 + 10 * 8;
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_SERROR);
+    CHECK(sv.reads == 75 && f.nreads == 75 && f.reads[74] == POOL + 0x1000 + 80);
+    sline(&sv, 0, "SMMU SURVEY READS 75");
+    sline(&sv, 1, "SMMU SURVEY SERROR PENDING AFTER 00000000B760A050");
+    sline(&sv, 5, "SMMU SURVEY L2 AT 00000000B760A000 EMPTY ROWS 0");
+    sline(&sv, 6, "SMMU SURVEY L2 80000000 ..........----------------------");
+    sline(&sv, 7, "");
+
+    /* The level-2 table's page refused: nothing of it read. */
+    freset();
+    fixture(ARENA, POOL, 0);
+    fpar(POOL + 0x1000, (POOL + 0x1000) | 0x44ull << 56 | 3ull << 7);
+    CHECK(el2q_s2w_survey(&bank126, ARENA, &hw, &sv) == EL2Q_S2W_TABLE_REFUSED);
+    CHECK(sv.reads == 64 && f.nreads == 64 && sv.at == POOL + 0x1000);
+    sline(&sv, 1, "SMMU SURVEY REFUSED: TABLE 00000000B760A000 PAR 44000000B760A180");
+    sline(&sv, 5, "SMMU SURVEY L2 AT 00000000B760A000 EMPTY ROWS 0");
+    sline(&sv, 6, "");
+    check_reads_disciplined();
+}
+
+/* The survey's lines follow the walk's, before the SError line. */
+static void test_survey_usb_lines(void)
+{
+    struct el2q_usb u;
+    memset(&u, 0, sizeof u);
+    u.after.ran = 1;
+    u.walk.state = EL2Q_S2W_NOT_NEEDED;
+    u.survey.state = EL2Q_S2W_NOT_NEEDED;
+    char out[EL2Q_USB_LINE_COLS + 1], prev[2][EL2Q_USB_LINE_COLS + 1] = {"", ""};
+    for (unsigned i = 0;; i++) {
+        el2q_usb_line(&u, i, out);
+        if (!out[0]) break;
+        strcpy(prev[0], prev[1]);
+        strcpy(prev[1], out);
+        if (!strcmp(out, "USB SERROR NONE")) CHECK(!strcmp(prev[0], "SMMU SURVEY NOT NEEDED: STAGE 2 OFF"));
+    }
+    CHECK(!strcmp(prev[1], "USB SERROR NONE"));
+}
+
 unsigned test_s2walk(void)
 {
     test_fixture_identity();
@@ -425,5 +641,10 @@ unsigned test_s2walk(void)
     test_table_mapping();
     test_stops();
     test_usb_lines();
+    test_survey_fixture();
+    test_survey_classes();
+    test_survey_refusals();
+    test_survey_stops();
+    test_survey_usb_lines();
     return checks;
 }

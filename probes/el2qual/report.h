@@ -13,7 +13,7 @@
 #include "vhe.h"
 #include "usbprobe.h"
 
-#define EL2Q_VERSION      9     /* 2: counter rate, GICv3 virtualization, SMBIOS;
+#define EL2Q_VERSION      10    /* 2: counter rate, GICv3 virtualization, SMBIOS;
                                    3: the tsens read (option "thermal");
                                    4: the VHE exit (option "exit-vhe");
                                    5: the USB read (options "usb", "usb-smmu");
@@ -22,7 +22,9 @@
                                    8: "usb-smmu-map" adds el2qual's own Device map
                                       of the SMMU window first (pagemap.c);
                                    9: "usb-s2-walk" walks that stage 2 for a
-                                      q1n1-style DMA arena (s2walk.c) */
+                                      q1n1-style DMA arena (s2walk.c);
+                                   10: "usb-s2-survey" surveys its top two
+                                      levels */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4

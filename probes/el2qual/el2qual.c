@@ -58,6 +58,10 @@
  *               (s2walk.c): descriptor reads only, through mappings UEFI's
  *               tables already have, stopping at the first fault or
  *               SError. Off by default.
+ *   usb-s2-survey  "usb-s2-walk", then survey that stage 2's top two
+ *               levels: every level-1 entry, and the level-2 table under
+ *               the arena (s2walk.c), with the walk's guards. Off by
+ *               default.
  *   emulate-s2-tables  with "usb-s2-walk", walk a stage-2 table set
  *               el2qual builds for its arena instead of the SMMU's, every
  *               page identity read-write; test only, reported as such
@@ -252,7 +256,7 @@ static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
     int thermal, exit_vhe, usb, usb_smmu, usb_smmu_map, emulate_map_hole;
-    int usb_s2_walk, emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
+    int usb_s2_walk, usb_s2_survey, emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -705,6 +709,11 @@ static void walk_stage2(void)
     }
     el2q_s2w_walk(walked, s2w_arena, &hw, &run.usb.walk);
     run.usb.walk.test = opt.emulate_s2_tables;
+    if (opt.usb_s2_survey) {
+        progress("USB: STAGE-2 SURVEY, READ ONLY. A HANG OR RESET HERE IS IT");
+        el2q_s2w_survey(walked, s2w_arena, &hw, &run.usb.survey);
+        run.usb.survey.test = opt.emulate_s2_tables;
+    }
 }
 
 static void measure_usb_before(void)
@@ -907,6 +916,7 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "usb-smmu-map")) opt.usb = opt.usb_smmu = opt.usb_smmu_map = 1;
         if (word_is(w, len, "emulate-map-hole")) opt.emulate_map_hole = 1;
         if (word_is(w, len, "usb-s2-walk")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = 1;
+        if (word_is(w, len, "usb-s2-survey")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = opt.usb_s2_survey = 1;
         if (word_is(w, len, "emulate-s2-tables")) opt.emulate_s2_tables = 1;
         if (word_is(w, len, "emulate-s2-odd")) opt.emulate_s2_tables = opt.emulate_s2_odd = 1;
         if (word_is(w, len, "emulate-s2-device")) opt.emulate_s2_tables = opt.emulate_s2_device = 1;

@@ -22,7 +22,8 @@
    tools/test-el2qual.c fail.
 5. The same for probes/el2qual/s2walk.c: the table mapping check, the
    SError checks, stopping at a fault, reading each descriptor once, the
-   format refusals and the page classes.
+   format refusals and the page classes, and the survey's choice of
+   table, bound and map rows.
 """
 import argparse
 import os
@@ -245,11 +246,11 @@ S2WALK_MUTATIONS = [
     ('a table page at another address accepted', '!((par ^ page) & PAR_PA) && ', '!((par ^ page) & PAR_PA & 0) && '),
     ('non-cacheable taken as write-back', '((nibble & 0xc) == 0x4 && (nibble & 3))', '(nibble & 0xc) == 0x4'),
     ('no SError check after a read', 'if (w->hw->serror(w->hw->ctx)) {', 'if (0) {'),
-    ('an SError already pending ignored', '    if (hw->serror(hw->ctx)) return out->state = EL2Q_S2W_PENDING;\n', ''),
+    ('an SError already pending ignored', '    if (hw->serror(hw->ctx)) return EL2Q_S2W_PENDING;\n', ''),
     ('the walk continued past a fault', '    if (esr) {', '    if (0) {'),
     ('a descriptor read again', 'if (w->desc_valid[level] && w->desc_at[level] == address) {', 'if (0) {'),
-    ('the access flag ignored', 'if (!(desc & S2_AF) || (oa >> oas)) break;', 'if (oa >> oas) break;'),
-    ('a leaf past the output size accepted', 'if (!(desc & S2_AF) || (oa >> oas)) break;', 'if (!(desc & S2_AF)) break;'),
+    ('the access flag ignored', 'if (!(desc & S2_AF) || (oa >> oas)) return', 'if ((oa >> oas)) return'),
+    ('a leaf past the output size accepted', 'if (!(desc & S2_AF) || (oa >> oas)) return', 'if (!(desc & S2_AF) || ((oa >> oas) && 0)) return'),
     ('S2AP ignored', '(desc & S2_AP_RW) == S2_AP_RW ? EL2Q_S2W_RW : EL2Q_S2W_LIMITED', 'EL2Q_S2W_RW'),
     ('a block compared page by page', 'oa != (ipa & ~(size - 1))', 'oa != ipa'),
     ('a reserved level-3 encoding taken as a page', '(level == 3 && type != S2_TYPE) || ', ''),
@@ -261,9 +262,23 @@ S2WALK_MUTATIONS = [
     ('VA64 ignored', '!(bank->cba2r & 1) || ', ''),
     ('the granule ignored', '((bank->tcr >> 14) & 3) || ', ''),
     ('SL0 ignored', 'unsigned start = 2 - sl0,', 'unsigned start = 1,'),
-    ('translation off walked anyway', '    if (!(bank->sctlr & 1)) return out->state = EL2Q_S2W_NOT_NEEDED;\n', ''),
+    ('translation off walked anyway', '    if (!(bank->sctlr & 1)) return EL2Q_S2W_NOT_NEEDED;\n', ''),
     ('an arena above 4 GiB accepted', 'arena + EL2Q_S2W_ARENA_SIZE > (1ull << 32)', '0'),
     ('CnP taken as an address bit', '#define TTBR_BADDR 0x0000fffffffffffeull', '#define TTBR_BADDR 0x0000ffffffffffffull'),
+    # The survey.
+    ('a level-2 table surveyed under an entry that is not a table', "if (out->l1[out->gib] != 'T') {", 'if (0) {'),
+    ('a survey started below level 1', '    if (f.start != 1) return out->state = EL2Q_S2W_FORMAT;\n', ''),
+    ('a table past the output size shown as a table', "(desc & S2_OA) >> oas ? 'X' : 'T'", "'T'"),
+    ('the survey bounded by the walk\'s limit', '.limit = EL2Q_S2W_SURVEY_MAX_READS', '.limit = EL2Q_S2W_MAX_READS'),
+    ('the wrong level-1 entry kept as the arena\'s', 'if (i == out->gib) {', 'if (i == 0) {'),
+    ('the level-2 table address with its low bits', 'out->l2_table = out->gib_desc & S2_OA;',
+     'out->l2_table = out->gib_desc;'),
+    ('level-2 entries classed as pages', '((uint64_t)out->gib << 30) + (i << 21)', '((uint64_t)out->gib << 30) + (i << 12)'),
+    ('empty rows printed', "if (row_all(s->l2, r, '.') || row_all(s->l2, r, '-')) continue;",
+     "if (row_all(s->l2, r, '-')) continue;"),
+    ('unread rows printed', "if (row_all(s->l2, r, '.') || row_all(s->l2, r, '-')) continue;",
+     "if (row_all(s->l2, r, '.')) continue;"),
+    ('a row labelled with the wrong address', '((uint64_t)r * ROW << 21)', '((uint64_t)r * ROW << 20)'),
 ]
 
 

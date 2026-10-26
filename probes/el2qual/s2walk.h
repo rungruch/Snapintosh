@@ -112,12 +112,58 @@ struct el2q_s2w_result {
 uint32_t el2q_s2w_walk(const struct el2q_s2w_bank *bank, uint64_t arena,
                        const struct el2q_s2w_hw *hw, struct el2q_s2w_result *out);
 
+/* The survey (load option "usb-s2-survey"): what the stage 2 maps at its
+ * top two levels, for choosing where a DMA arena could go, since run 22
+ * found the arena UEFI chose unmapped. Every entry of the root (level 1:
+ * the survey requires a level-1 start, else FORMAT), then, when the
+ * arena's level-1 entry is a table, all 512 entries of that level-2 table.
+ * The same checks, guards and stops as the walk; each descriptor read
+ * once, at most EL2Q_S2W_SURVEY_MAX_READS. Level-3 tables are not read.
+ * Each entry becomes one character:
+ *   '.' invalid                 'T' a table (not followed, except as above)
+ *   'X' a table past the output size
+ *   'I' an identity block, access flag set, read and write
+ *   'L' an identity block, access flag set, not both read and write
+ *   'M' a block at another address, access flag set
+ *   'F' a block that faults (access flag clear, or past the output size)
+ *   '-' not read (the survey stopped first) */
+#define EL2Q_S2W_SURVEY_MAX_READS 1024u
+#define EL2Q_S2W_SURVEY_ROW       32u
+
+enum el2q_s2w_l2 {
+    EL2Q_S2W_L2_NOT_REACHED,     /* the survey stopped before the arena's level-1 entry */
+    EL2Q_S2W_L2_NO_ENTRY,        /* the arena lies past the input size */
+    EL2Q_S2W_L2_NOT_TABLE,       /* the arena's level-1 entry is not a table */
+    EL2Q_S2W_L2_READ             /* its level-2 table was surveyed (in full when DONE) */
+};
+
+struct el2q_s2w_survey {
+    uint32_t state;                          /* enum el2q_s2w */
+    uint32_t test;                           /* the tables are el2qual's own fixture */
+    uint32_t reads;
+    uint32_t l1_entries;                     /* entries in the root */
+    uint32_t gib;                            /* the arena's level-1 index */
+    uint32_t gib_read;
+    uint64_t gib_desc;                       /* its descriptor, when gib_read */
+    uint32_t l2_state;                       /* enum el2q_s2w_l2 */
+    uint64_t l2_table;                       /* L2_READ: the table's address */
+    char l1[512], l2[512];                   /* one character per entry, as above */
+    uint64_t at, detail;                     /* as in struct el2q_s2w_result */
+};
+
+uint32_t el2q_s2w_survey(const struct el2q_s2w_bank *bank, uint64_t arena,
+                         const struct el2q_s2w_hw *hw, struct el2q_s2w_survey *out);
+
 /* Test only ("emulate-s2-tables", QEMU): build a stage-2 table set for
  * arena in pool, laid out like the gaokun3's bank 126 (VTCR 0x1355C: 4 KiB,
  * 36-bit, start level 1), with every arena page an identity read-write
  * leaf through tables at every level. With odd set, arena pages 1, 2 and 3
- * become moved, invalid and read-only. pool must hold EL2Q_S2W_TEST_PAGES
- * pages. Returns 0 and fills bank, or 1 when the arena is out of range. */
+ * become moved, invalid and read-only, and for the survey level-1 entry 0
+ * becomes a 1 GiB identity block (unless the arena is in that 1 GiB) and
+ * level-2 entries 0 to 2 of the arena's 1 GiB a moved, a read-only and an
+ * identity 2 MiB block (each unless the arena is there). pool must hold
+ * EL2Q_S2W_TEST_PAGES pages. Returns 0 and fills bank, or 1 when the arena
+ * is out of range. */
 #define EL2Q_S2W_TEST_PAGES 5u
 int el2q_s2w_build_test(uint64_t arena, uint64_t pool, int odd,
                         void (*write64)(void *ctx, uint64_t address, uint64_t value), void *ctx,
@@ -126,5 +172,8 @@ int el2q_s2w_build_test(uint64_t arena, uint64_t pool, int odd,
 /* Fixed-format report lines, empty past the last; see s2walk.c. */
 #define EL2Q_S2W_LINE_COLS 64
 void el2q_s2w_line(const struct el2q_s2w_result *r, unsigned index, char out[EL2Q_S2W_LINE_COLS + 1]);
+#define EL2Q_S2W_SURVEY_LINES 36   /* at most: 2 status, 16 + 1 level-1, 1 + 16 level-2 */
+void el2q_s2w_survey_line(const struct el2q_s2w_survey *s, unsigned index,
+                          char out[EL2Q_S2W_LINE_COLS + 1]);
 
 #endif
