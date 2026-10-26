@@ -203,11 +203,78 @@ q1n1 (`../q1n1`, cloned at `5b440d4`) carries the same hand-off. Its
 The q1n1 change is committed locally in that checkout as `31147ab` (the code
 and its test) and `660dfbb` (its docs), and pushed nowhere.
 
+### Run 13, 2026-10-26: USB inventory
+
+**Why.** On the A16, q1n1's link to the Mac starts from the firmware's own
+USB-function (device mode) driver. Whether the gaokun3's firmware installs
+one decides how Phase 2's link is built.
+
+**How.**
+- **The probe:** q1n1's passive `usb-probe.efi`, in the `usb-probe-hold`
+  build (`0366c947`, built from q1n1 `660dfbb` plus its hold option), on the
+  `usb-inventory` stick.
+- **The stick:** systemd-boot and the probe only, with no slbounce,
+  `tcblaunch.exe` or device tree, so no Secure Launch was attempted.
+- **What it reads:** standard UEFI protocol lookups only: no controller
+  methods, MMIO or ExitBootServices.
+- **QEMU control** (`python3 tools/test-q1n1-usb-probe-qemu.py`, in q1n1):
+  PASS.
+
+**Result (VERIFIED, photographed): PASS, read only.**
+
+| Protocol | gaokun3, firmware 2.18 |
+| --- | --- |
+| USB function (`EFI_USBFN_IO_PROTOCOL`) | not installed |
+| USB2 host controller | 3 handles: `Pci(0x80,0x0)`, `Pci(0x81,0x0)`, `Pci(0x82,0x0)` |
+| Serial I/O | not installed |
+
+Entry was at EL1. The probe returned to the boot menu after its hold.
+
+**Reading it.**
+
+- **There is no firmware device-mode driver to start from.** On the A16,
+  q1n1's boot window has the firmware's USB-function driver bring USB0 up in
+  device mode, and q1n1 takes the controller over after ExitBootServices
+  from a snapshot of that state. None of that is available here.
+- **The three host controllers are, INFERRED, the three DWC3s.** The
+  gaokun-android inventory (OBSERVED under Linux, 2026-10-05) maps them:
+  - `a600000` (`usb_0`) serves the USB-C port next to the power button,
+    and is the only one that can be a device (role switch; Android's adb
+    used it);
+  - `a800000` (`usb_1`) is the other port, host only;
+  - `a400000` is the keyboard cover.
+
+  The device paths are firmware-made, as with the A16's `XhciPciEmulation`
+  (q1n1 `docs/A16-USB-BINDING.md`). Which handle is which controller is not
+  shown.
+- **No serial path either.** No serial driver exists, matching the missing
+  SPCR UART.
+
+**What it decides.** Phase 2's USB link must be q1n1's own DWC3
+device-mode driver (`qcom-dwc3.c`, which passed after ExitBootServices on
+the A16) on `a600000`, the power-button port. It starts from a controller
+the firmware left in host mode, with no firmware snapshot to adopt. That
+means q1n1 must:
+- switch the controller to device mode itself;
+- set up whatever PHY and Type-C data-role state device mode needs;
+- not rely on a boot-window snapshot.
+
+None of this is designed yet. It is the next host-side study.
+
 ### Next
 
-- **Run q1n1's `--el2 --exit-vhe` foothold on the gaokun3.** It is the only
-  q1n1 mode meaningful there today. It needs a stick that boots the
-  `-DQ1N1_VHE_EXIT` `q1n1.efi` under slbounce, as el2qual's stick does.
+- **The USB link to the Mac** (below). It must be built on q1n1's own
+  DWC3 device-mode driver, from a controller the firmware leaves in host
+  mode.
+- **q1n1's `--el2 --exit-vhe` foothold on the gaokun3: blocked.** q1n1
+  draws only on a GOP mode with a framebuffer address, and the gaokun3 has
+  none (runs 2 and 3), so it would stop before ExitBootServices, showing
+  nothing. It first needs el2qual's device-tree simple-framebuffer
+  fallback, opt-in:
+  - the framebuffer checked against the firmware memory map;
+  - every draw cleaned to the point of coherency, since nothing says how
+    firmware maps that buffer. q1n1's drawing code does no cleaning
+    today.
 - **The rest of Phase 2:**
   - USB device mode on DWC3 `a600000.usb`, including whether q1n1 must set
     the Type-C role through the EC itself;
