@@ -243,6 +243,25 @@ class Layout(unittest.TestCase):
         with self.assertRaises(usb.LayoutError):                    # so is the gate's tree
             usb.build_layout('q1n1-foothold', self.out('z'), good, self.sdboot, self.slb, self.tcb)
 
+    def test_usb_read_stage_has_its_two_entries(self):
+        m = usb.build_layout('usb-read', self.out(), self.efi, self.sdboot, self.slb, self.tcb,
+                             self.dtb)
+        out = self.out()
+        self.assert_manifest_complete(out, m)
+        self.assertEqual(m['stage'], 'usb-read')
+        self.assertIn('EFI/systemd/drivers/slbounceaa64.efi', m['files'])
+        entries = sorted((out / 'loader/entries').iterdir())
+        self.assertEqual([e.name for e in entries], ['el2qual-8-usb.conf', 'el2qual-9-usb-smmu.conf'])
+        texts = [e.read_text() for e in entries]
+        self.assertIn('options nopac nosmp usb\n', texts[0])            # no SMMU, no VHE exit first
+        self.assertIn('options nopac nosmp exit-vhe usb-smmu\n', texts[1])
+        for text in texts:
+            self.assertIn('efi /EFI/el2qual/el2qual.efi\n', text)
+            self.assertIn('devicetree /dtb/gaokun3-el2.dtb\n', text)
+            self.assertNotIn('emulate', text)
+        self.assertIn('default el2qual-8-usb.conf', (out / 'loader/loader.conf').read_text())
+        self.refused('usb-read needs --slbounce', stage='usb-read', slbounce=None)
+
     def test_stage1b_has_no_slbounce(self):
         m = usb.build_layout('stage1b', self.out(), self.efi, self.sdboot, dtb=self.dtb)
         self.assertFalse(any('slbounce' in rel or 'tcblaunch' in rel for rel in m['files']))
