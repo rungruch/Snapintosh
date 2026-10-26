@@ -1,8 +1,9 @@
 # gaokun3 USB device mode: study
 
-Status, 2026-10-26: **study only.** Nothing here has been built or run.
-It sets what q1n1's A16 USB device path assumes against what the gaokun3
-provides, and proposes a staged plan whose first hardware step only reads.
+Status, 2026-10-26: **step 1 is built and tested on the host and in QEMU;
+nothing has run on the gaokun3.** This document sets what q1n1's A16 USB
+device path assumes against what the gaokun3 provides, and gives a staged
+plan whose first hardware step only reads.
 Phase 2 context: [GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#run-13-2026-10-26-usb-inventory).
 
 ## Goal
@@ -88,7 +89,7 @@ interconnect, and so can reading it. Nothing may touch `0x0a600000` or
 
 ## Plan
 
-### Step 1: read only (el2qual stage `usb`, not yet built)
+### Step 1: read only (el2qual stage `usb`)
 
 An opt-in el2qual load option, `usb`, built like the `thermal` stage:
 every address checked against UEFI's page tables (`AT S1E2R`, Device, at
@@ -110,6 +111,32 @@ still runs) and after ExitBootServices at EL2 (after `exit-vhe` if given).
 The screen shows each value, and `NOT READ` with the reason where a gate
 stopped it. The run needs no cable. A second run with the Mac connected to
 the power-button port would show whether an attached host changes anything.
+
+**As built (el2qual 5).** The logic is in `probes/el2qual/usbprobe.{h,c}`,
+with no hardware access of its own; `el2qual.c` supplies the reads.
+- **The options.** `usb` reads GCC and, when it is safe, the controller;
+  `usb-smmu` adds the SMMU.
+- **Before ExitBootServices** only the eight GCC words are read: USB0's
+  six, and USB1's GDSC and master clock for comparison. Each comes after a
+  mapping check at the current EL. There is no fault fixup then, because
+  the vectors are the firmware's.
+- **After ExitBootServices,** following the VHE exit if `exit-vhe` is
+  given, every read is behind el2qual's fixup.
+- **The power gate.** The controller is read only when the GDSC is on and
+  the master and both AXI clocks run. Sleep and mock UTMI are reported but
+  not required.
+- **SMMU reads** stop at the first fault. If `sCR0` or `IDR0` reads all
+  ones, they stop there and report `NOT READ: ALL ONES` rather than search
+  noise. QEMU's empty PCIe window reads exactly that at `0x15000000`.
+- **The lines** (`USB0 GCC …`, `USB0 POWER …`, `USB0 CORE …`, `SMMU …`,
+  `USB SERROR …`) sit near the top of the screen report, which also goes
+  to serial.
+
+| Check | Result, 2026-10-26 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` (`tools/test-el2qual-usbprobe.c`, ASan+UBSan) | PASS. Against a fake that logs every read: no controller word is read unless the gate is open, for every closed gate (GDSC off; master, AXI or CNOC off; a needed word unmapped or faulting); USB1's words decide nothing; one unmapped controller word means none is read; a fault stops the reads; the SMMU match with and without extended stream IDs, masks, invalid entries, the 128-group cap, faults, unmapped pages and all-ones reads; the exact report lines, and their place and colour on the screen. Each of eight deliberately broken variants of the gate and the SMMU search fails the test |
+| QEMU: `python3 tools/qemu-el2qual.py` (`max-usb`, `max-vhe-usb-smmu`, and the eleven existing configurations) | PASS. The virt machine has none of these blocks: every GCC word `UNMAPPED`, power `UNREAD`, the controller not read, the SMMU `NOT READ: ALL ONES`, no SError, the CPU report intact. The checker recomputes each power decision from the words printed and fails a controller read while not ON; its self-test rejects wrong logs |
+| gaokun3 | NOT RUN |
 
 ### Step 2: decided by step 1
 

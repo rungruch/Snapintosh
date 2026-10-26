@@ -182,7 +182,8 @@ python3 probes/el2qual/build.py            # build/el2qual/el2qual.efi
 python3 tools/test-el2qual.py              # report code, host
 python3 tools/qemu-el2qual.py              # max, max-vhe, max-nopauth, cortex-a76,
                                            # max-rotated, max-dt-fb, max-no-fb, max-thermal,
-                                           # max-vhe-thermal, max-vhe-exit, max-exit-novhe
+                                           # max-vhe-thermal, max-vhe-exit, max-exit-novhe,
+                                           # max-usb, max-vhe-usb-smmu
 ```
 
 `build.py` finds LLVM from `--llvm`, `SNAP_LLVM`, Homebrew, then `PATH`;
@@ -193,8 +194,12 @@ options: `serial` (also write to an SPCR PL011/SBSA UART), `poweroff` (PSCI
 [GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md#el2-tsens-read)),
 `exit-vhe` (since el2qual 4: leave slbounce's `E2H|TGE` state for non-VHE
 EL2 before measuring, refused with a reason if the state is not one it
-recognises, [GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#vhe-hand-off)), and
-four test-only options: `emulate-vhe` (recreates slbounce's `E2H|TGE` state on a machine
+recognises, [GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#vhe-hand-off)), `usb`
+and `usb-smmu` (since el2qual 5: whether the gaokun3's USB0 controller is
+powered before and after ExitBootServices, read from the clock controller,
+and only then its own state; `usb-smmu` adds the SMMU entry for its stream;
+read only, [GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#step-1-read-only-el2qual-stage-usb)),
+and four test-only options: `emulate-vhe` (recreates slbounce's `E2H|TGE` state on a machine
 that started at EL2), `emulate-rotated` (treats the firmware's GOP mode as
 having no framebuffer address), `emulate-no-fb` (treats every mode so) and
 `emulate-dt-fb` (hands the real GOP framebuffer to the device-tree fallback
