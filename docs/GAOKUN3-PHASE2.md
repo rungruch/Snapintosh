@@ -1,10 +1,11 @@
 # gaokun3 Phase 2: EL2 entry and host link
 
-Status, 2026-10-26: **started, host only.** Phase 0C accepted Route B on
-2026-10-26 ([decision](GAOKUN3-PHASE0C.md#decision)). Phase 2's goal is q1n1
-running at EL2 on the gaokun3 and serving its proxy over USB. Its first
-piece, the VHE hand-off below, is built and tested on the host. Nothing in
-this phase has run on the gaokun3 yet.
+Status, 2026-10-26: **started.** Phase 0C accepted Route B on 2026-10-26
+([decision](GAOKUN3-PHASE0C.md#decision)). Phase 2's goal is q1n1 running at
+EL2 on the gaokun3 and serving its proxy over USB. Its first piece, the VHE
+hand-off below, passed on the gaokun3 in el2qual
+([runs 11 and 12](#runs-11-and-12-2026-10-26)). q1n1 itself is not changed
+yet.
 
 ## VHE hand-off
 
@@ -53,8 +54,9 @@ Two parts. One decides the values, the other switches the registers.
   the `CNTV` names.
 
 **What the plan converts, and what it refuses.** It fails closed: anything
-it does not recognise stops the exit. Of slbounce's state, `TCR_EL2`,
-`TTBR0_EL2`, `CPTR_EL2` and `CNTHCTL_EL2` are UNMEASURED.
+it does not recognise stops the exit. It was designed before slbounce's
+`TCR_EL2`, `TTBR0_EL2`, `CPTR_EL2` and `CNTHCTL_EL2` had been measured.
+Runs 11 and 12 measured them, and the plan accepts them unchanged.
 
 | Register | Exit value | Refused when |
 | --- | --- | --- |
@@ -90,14 +92,20 @@ default, and without it el2qual behaves exactly as before.
 | Switch order, host: the same command | PASS. `el2q_exit_vhe` follows the order above, and 14 deliberately wrong copies are rejected: HCR after TCR, a missing ISB, DSB or TLBI, the MMU back on before the TLBI, a load with the MMU off, the MMU turned off with the planned value, a missing CPTR write, an unplanned VBAR write, the wrong TLBI. QEMU's TCG does not fault on a misordered barrier, so this check, not a QEMU run, carries the order |
 | QEMU: `python3 tools/qemu-el2qual.py --config max-vhe-exit --config max-exit-novhe --config max --config max-vhe` | PASS, 2026-10-26 (OBSERVED, TCG, 4 CPUs). `max-vhe-exit` goes from emulated slbounce state (`HCR 0x408000000`) to `HCR 0x80000000`, with the registers read back equal to the plan and `TCR_EL2` back at EDK2's own `0x80853510`. All four CPUs then pass PAC and the 16K walk. `max-exit-novhe` reports `NOT-VHE` and changes nothing. `max` and `max-vhe` are unchanged |
 | The QEMU checker's self-test | PASS. It rejects a missing `VHEX`, a refusal, `PLAN=DIFF`, E2H left set, a missing `VHEOUT`, a non-VHE entry, a switch that was not asked for, and a `DONE` claimed on a do-nothing run |
-| gaokun3 | NOT RUN |
+| gaokun3: el2qual `exit-vhe` | PASS, 2026-10-26, runs 11 and 12 (VERIFIED). The switch completed, and the registers read back equal the plan computed from the entry state the same run recorded. All 8 CPUs then ran in non-VHE EL2 with PAuth and the 16K walk ([below](#runs-11-and-12-2026-10-26)) |
+| Plan against the measured state, host | PASS. The runs' `VHEIN`/`VHEIN2` values are a fixture in `tools/test-el2qual-vhe.c`, and the plan must reproduce their `VHEOUT`/`VHEOUT2` |
 
 ### Limits
 
 - **The QEMU emulation of the entry is not slbounce.** It sets only E2H and
   TGE and converts only `TCR_EL2`. Its `CPTR_EL2` (0) and `CNTHCTL_EL2` are
-  EDK2's leftovers. Whether the plan accepts the gaokun3's real `TCR_EL2`
-  is UNKNOWN until a hardware run records it.
+  EDK2's leftovers. slbounce's real state differs: `CPTR_EL2` is `0x300000`
+  and `TCR_EL2` describes a 40-bit walk. That state is now a host fixture,
+  so QEMU is no longer the only check on it.
+- **One firmware, one slbounce build.** The measured state is firmware 2.18
+  with the slbounce and `tcblaunch.exe` of runs 8 to 12. Another firmware
+  or slbounce build may hand over something else; the plan would then
+  refuse, and say why.
 - **Secondary CPUs.** On the gaokun3, PSCI starts them at EL2 in a state
   slbounce's code chose. el2qual's secondary entry writes the boot CPU's
   `HCR_EL2` first, then the other controls. That is correct for el2qual's
@@ -106,24 +114,70 @@ default, and without it el2qual behaves exactly as before.
 - **The switch is single-CPU.** It must run before any secondary starts, as
   el2qual does.
 - **q1n1 is not changed yet.** No q1n1 checkout exists beside this
-  repository (`../q1n1`, README). `vhe.{h,c}` and `el2q_exit_vhe` are meant
-  to be adopted there once the gaokun3 run passes.
+  repository (`../q1n1`, README). `vhe.{h,c}` and `el2q_exit_vhe` are ready
+  to be adopted there, now that the gaokun3 run has passed.
 
-### Next: one supervised run
+### Runs 11 and 12, 2026-10-26
 
-el2qual with `serial exit-vhe` (and optionally `thermal`) from the existing
-stick, under slbounce, as in
-[Stage 2](GAOKUN3-QUALIFICATION.md#stage-2-secure-launch-to-el2).
+**How they were run.** From the `vhe-exit` stick. Its systemd-boot,
+slbounce, `tcblaunch.exe` and device tree are run 10's files (same
+SHA-256), with el2qual 4 (`558cc4ff`, which rebuilds identically from the
+tree). Each run was a cold boot, run as
+[Stage 2](GAOKUN3-QUALIFICATION.md#stage-2-secure-launch-to-el2) is, and
+photographed. The runs were matched to their entries by what the photos
+show.
 
-- **Risk:** el2qual touches no storage, clocks or voltages.
-- **If the switch hangs,** the last on-screen line is `VHE EXIT: CLEARING
-  E2H. A HANG OR RESET HERE IS THE SWITCH`. Holding the power button ends
-  the run, the same recovery as every el2qual run.
-- **It records,** for the first time, slbounce's `TCR_EL2`, `TTBR0_EL2`,
-  `CPTR_EL2` and `CNTHCTL_EL2`.
-- **What passing means:** `VHEX DONE PLAN=MATCH`, then all eight CPUs
-  `DONE` with PAC and the 16K walk.
-- **What a refusal means:** the plan met state it does not recognise. That
-  is a finding to record, not a failure to work around.
+```sh
+python3 tools/el2qual-usb.py vhe-exit --systemd-boot <systemd-bootaa64.efi> \
+    --slbounce <slbounce.efi> --tcblaunch <tcblaunch.exe> --dtb <gaokun3-el2.dtb>
+```
 
-The run is the owner's to make.
+| Run | Entry | Options | Result |
+| --- | --- | --- | --- |
+| 11 | `el2qual 6: VHE exit, boot CPU, no PAuth` | `nopac nosmp exit-vhe` | PASS: `VHE EXIT .. DONE  HCR_EL2 0000000080000000`; boot CPU `DONE`, 16K `WALKS` (`PAR 004001B00`, controls `A OK  B FAULT  C FAULT`); PAuth `NOT RUN`, as asked |
+| 12 | `el2qual 7: VHE exit, all CPUs and PAuth` | `exit-vhe` | PASS: the same exit; all 8 CPUs `DONE` at EL2 through PSCI, PAC `YES` and 16K `YES` on each; PAuth signs (4/4), keys and round trip OK, `PACGA` OK; only MIDR differs between cores (cores 4 to 7 are `0x410FD4C0`), as in run 9; `VIRTUALMAC ROUTE (EL1) .. CPU OK` |
+
+No hang, no reboot and no unexpected exception occurred. The rest of each
+report (firmware 2.18, `CNTFRQ_EL0` 19200000, the GIC virtual interface,
+NV2, ECV, FGT and RNDR absent, the ID registers) matches run 9.
+
+**slbounce's EL2 state, measured for the first time** (VERIFIED, both runs,
+from the `VHEIN` lines):
+
+| Register | Value | Decoded (E2H set, so the EL1 layouts) |
+| --- | --- | --- |
+| `HCR_EL2` | `0x488000000` | E2H, RW, TGE, as runs 4 to 10 showed |
+| `SCTLR_EL2` | `0x30C5183D` | M, C, SA, I; EL0 controls SA0, CP15BEN, EOS, nTWI, nTWE, EIS, SPAN, nTLSMD, LSMAOE |
+| `TCR_EL2` | `0x280803518` | T0SZ 24 (a 40-bit VA), 4K granule, inner-shareable write-back walks, TTBR1 walks off (EPD1), IPS 40-bit |
+| `TTBR0_EL2` | `0x9F519000` | UEFI's identity map, ASID 0 |
+| `CPTR_EL2` | `0x300000` | FPEN `0b11`: FP/SIMD untrapped; ZEN and SMEN 0: SVE and SME trapped |
+| `CNTHCTL_EL2` | `0x3` | EL0PCTEN, EL0VCTEN |
+
+**After the switch** (`VHEOUT`): `HCR_EL2 0x80000000`, `SCTLR_EL2
+0x30C5183D`, `TCR_EL2 0x80823518` (the same 40-bit 4K walk, PS 40-bit),
+`TTBR0_EL2 0x9F519000`, `CPTR_EL2 0x33FF`, `CNTHCTL_EL2 0x3`. Every value
+equals what `el2q_vhe_exit_plan()` computes from the entry state above.
+The `PLAN=MATCH` line goes to serial only, so this was checked on the host
+from the photographed numbers, and the pair is now a host fixture.
+
+**What it shows.**
+
+- On this machine's firmware and slbounce, EL2 can leave VHE for the
+  non-VHE EL2 q1n1 and the monitor assume.
+- Translation, PAuth and PSCI secondary start-up all work afterwards, on
+  every core.
+- It does not show q1n1 or the monitor running in that state. Neither has
+  run on the gaokun3.
+
+### Next
+
+- **Adopt the hand-off in q1n1.** This needs a q1n1 checkout beside this
+  repository. Take `vhe.{h,c}` as they are and `el2q_exit_vhe`'s sequence,
+  and run the exit at q1n1's EL2 entry, before its own setup reads any
+  E2H-dependent register.
+- **The rest of Phase 2:**
+  - USB device mode on DWC3 `a600000.usb`, including whether q1n1 must set
+    the Type-C role through the EC itself;
+  - the board adapter behind `HostRuntime`;
+  - the acceptance run: the proxy answering over NCM, and `probes/run.py
+    idregs` and `tgran16` matching Phase 0A.

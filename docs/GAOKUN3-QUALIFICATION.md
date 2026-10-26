@@ -352,10 +352,13 @@ between.
 | 8 | 2026-10-23 | 2, entry 3 (`nopac`) | `15dfd800`, with the `tgran16.c` table cleaning | 16K WALKS on all 8 cores: controls `A OK  B FAULT  C FAULT`, boot CPU D `PAR 0x4001B00` (PA `0x4001000`, the address only a 16K walk reaches) |
 | 9 | 2026-10-23 | 3, entry 3 (`nopac`) | `2738da9b` (`c2c7122`, el2qual 2) | PASS: firmware 2.18; `CNTFRQ_EL0` 19200000 on all 8 cores; GIC system registers and virtual CPU interface usable at EL2 on all 8 (4 list registers, `LR0 RW`); no hang (stage 3 results below) |
 | 10 | 2026-10-23 | thermal, entry 5 (`nopac nosmp thermal`) | `5c28c4ee` (el2qual 3, built before its commit; it rebuilds identically from the tree) | PASS: the Phase 1 thermal guard ran on the live tsens at EL2 for 12 s, nothing tripped; version `0x30000000` on all four controllers, 46/46 sensors valid, peak 39.4 °C; no fault, no SError ([GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md#run-10-2026-10-23)) |
+| 11 | 2026-10-26 | vhe-exit, entry 6 (`nopac nosmp exit-vhe`) | `558cc4ff` (el2qual 4, built before its commit; it rebuilds identically from the tree) | PASS: `VHE EXIT .. DONE  HCR_EL2 0000000080000000`; slbounce's full entry state recorded and the registers read back equal to the plan; boot CPU `DONE` in non-VHE EL2 with 16K `WALKS` (`PAR 004001B00`, controls `A OK  B FAULT  C FAULT`) ([GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#runs-11-and-12-2026-10-26)) |
+| 12 | 2026-10-26 | vhe-exit, entry 7 (`exit-vhe`) | `558cc4ff` (as run 11) | PASS: the same exit, then all 8 CPUs `DONE` at EL2 through PSCI with PAuth (signs 4/4, keys and round trip OK, `PACGA` OK) and 16K `WALKS`; only MIDR differs between cores, as in run 9; `VIRTUALMAC ROUTE (EL1) .. CPU OK` |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
-recorded. Every one ended in a complete report: no hang, no reboot, no
+recorded. Runs 11 and 12 were matched the same way: one CPU with PAuth
+`NOT RUN`, then eight with PAuth. Every one ended in a complete report: no hang, no reboot, no
 unexpected exception.
 
 Full SHA-256 of run 3's `el2qual.efi`:
