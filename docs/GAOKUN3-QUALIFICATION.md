@@ -355,11 +355,14 @@ between.
 | 11 | 2026-10-26 | vhe-exit, entry 6 (`nopac nosmp exit-vhe`) | `558cc4ff` (el2qual 4, built before its commit; it rebuilds identically from the tree) | PASS: `VHE EXIT .. DONE  HCR_EL2 0000000080000000`; slbounce's full entry state recorded and the registers read back equal to the plan; boot CPU `DONE` in non-VHE EL2 with 16K `WALKS` (`PAR 004001B00`, controls `A OK  B FAULT  C FAULT`) ([GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#runs-11-and-12-2026-10-26)) |
 | 12 | 2026-10-26 | vhe-exit, entry 7 (`exit-vhe`) | `558cc4ff` (as run 11) | PASS: the same exit, then all 8 CPUs `DONE` at EL2 through PSCI with PAuth (signs 4/4, keys and round trip OK, `PACGA` OK) and 16K `WALKS`; only MIDR differs between cores, as in run 9; `VIRTUALMAC ROUTE (EL1) .. CPU OK` |
 | 13 | 2026-10-26 | usb-inventory (q1n1 `usb-probe-hold`, no slbounce) | q1n1-usb-probe-hold.efi `0366c947` (built from q1n1 `660dfbb` plus the uncommitted hold option) | PASS, read only: entry EL1; `USB FUNCTION: not installed`; `USB2 HOST` 3 handles, paths `Pci(0x80,0x0)`, `Pci(0x81,0x0)`, `Pci(0x82,0x0)`; `SERIAL IO: not installed`; returned to the boot menu after its hold ([GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#run-13-2026-10-26-usb-inventory)) |
+| 14 | 2026-10-26 | q1n1-foothold, entry 1 (`--el2`) | q1n1.efi `3bf2020f` (q1n1 `6865a21`, `-DQ1N1_VHE_EXIT -DQ1N1_DT_FRAMEBUFFER`) | PASS: q1n1's first boot on the gaokun3. Green bar, `EL2 CONFIRMED AFTER EXITBOOTSERVICES`, entry EL1, current EL2, MIDR `0x410FD4B0`; `SCREEN: DT SIMPLE-FB - CLEANED DRAWS` at `0xC6200000`, its text legible; SPCR names a UART at `0xA90000`, type `0x11`, that q1n1 does not drive ([GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#runs-14-and-15-2026-10-26-q1n1s-first-boot)) |
+| 15 | 2026-10-26 | q1n1-foothold, entry 2 (`--el2 --exit-vhe`) | `3bf2020f` (as run 14) | PASS: as run 14, plus `VHE EXIT DONE PLAN MATCH`, with the entry and exit registers equal to runs 11 and 12 |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
 recorded. Runs 11 and 12 were matched the same way: one CPU with PAuth
-`NOT RUN`, then eight with PAuth. Every one ended in a complete report: no hang, no reboot, no
+`NOT RUN`, then eight with PAuth. Runs 14 and 15 likewise: without, then
+with the `VHE EXIT` lines. Every one ended in a complete report: no hang, no reboot, no
 unexpected exception.
 
 Full SHA-256 of run 3's `el2qual.efi`:

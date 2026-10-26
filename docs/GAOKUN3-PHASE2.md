@@ -247,8 +247,11 @@ Entry was at EL1. The probe returned to the boot menu after its hold.
   The device paths are firmware-made, as with the A16's `XhciPciEmulation`
   (q1n1 `docs/A16-USB-BINDING.md`). Which handle is which controller is not
   shown.
-- **No serial path either.** No serial driver exists, matching the missing
-  SPCR UART.
+- **No serial path either.** No Serial I/O driver is installed. The ACPI
+  SPCR table does name a UART. Corrected 2026-10-26 after runs 14 and 15,
+  which displayed it: this line had said the SPCR UART was missing. It is at
+  `0xA90000` with interface type `0x11`, not the PL011/SBSA types el2qual
+  and q1n1 drive. Whether it is reachable on this machine is UNKNOWN.
 
 **What it decides.** Phase 2's USB link must be q1n1's own DWC3
 device-mode driver (`qcom-dwc3.c`, which passed after ExitBootServices on
@@ -261,26 +264,57 @@ means q1n1 must:
 
 None of this is designed yet. It is the next host-side study.
 
+### Runs 14 and 15, 2026-10-26: q1n1's first boot
+
+**How.** From the `q1n1-foothold` stick.
+- **q1n1:** q1n1.efi `3bf2020f`, built from q1n1 `6865a21` with
+  `-DQ1N1_VHE_EXIT -DQ1N1_DT_FRAMEBUFFER`. The same binary passed q1n1's
+  `tools/test-q1n1-dt-fb-qemu.py` just before.
+- **The other files:** systemd-boot, slbounce, `tcblaunch.exe` and the EL2
+  device tree are run 10's (same SHA-256).
+- **Procedure:** each run was a cold boot, photographed. The runs were
+  matched to their entries by the photos.
+
+```sh
+python3 tools/el2qual-usb.py q1n1-foothold --q1n1 ../q1n1/build/uefi-gaokun3/q1n1.efi \
+    --systemd-boot <systemd-bootaa64.efi> --slbounce <slbounce.efi> \
+    --tcblaunch <tcblaunch.exe> --dtb <gaokun3-el2.dtb>
+```
+
+| Run | Entry | Options | Result |
+| --- | --- | --- | --- |
+| 14 | `q1n1 1: EL2 foothold (no VHE exit)` | `--el2` | PASS: green bar; `EL2 CONFIRMED AFTER EXITBOOTSERVICES`; entry EL1, current EL2; MIDR `0x410FD4B0`; `FRAMEBUFFER 0xC6200000`; `SCREEN: DT SIMPLE-FB - CLEANED DRAWS`; 43 memory descriptors |
+| 15 | `q1n1 2: EL2 foothold after the VHE exit` | `--el2 --exit-vhe` | PASS: as run 14, plus `VHE EXIT DONE PLAN MATCH`. `VHE IN` `HCR 0x488000000`, `TCR 0x280803518`, `CPTR 0x300000`, `CNTHCTL 0x3`; `VHE OUT` `HCR 0x80000000`, `TCR 0x80823518`, `SCTLR 0x30C5183D`, all equal to runs 11 and 12; 45 memory descriptors |
+
+Both screens also show `SPCR UART 0xA90000`, `TYPE 0x11`, `GSI 0x182`,
+`BAUD CODE 7` and `UART TX DISABLED OR UNAVAILABLE`.
+
+**Reading it (VERIFIED unless marked).**
+
+- **q1n1 runs on the gaokun3.** slbounce's Secure Launch takes it to EL2,
+  and its foothold runs there.
+- **It draws on the device tree's framebuffer.** The fallback accepted
+  `/chosen/framebuffer@c6200000` against the firmware's memory map, and
+  every line q1n1 drew after its full-screen fill is legible.
+- **The cleaned draws reach the display.** Whether the cleaning is
+  *necessary* is not shown: no run drew uncleaned for comparison.
+- **The VHE exit behaves in q1n1 as in el2qual,** on the same state.
+- **Not in the photos:** the logo (top right) and the heartbeat (bottom
+  left). Both photos crop the screen's right side and lower half, so this
+  is INFERRED to be framing, not a failed draw.
+- **The serial port:** the firmware's SPCR names a UART at `0xA90000` with
+  interface type `0x11`, which q1n1 does not drive (PL011/SBSA only). This
+  corrects the earlier "missing SPCR UART" (run 13's reading, above).
+
+**What it does not show.** The proxy (`--boot`) and any USB. On the gaokun3
+q1n1 has no transport to the Mac yet.
+
 ### Next
 
-- **The USB link to the Mac** (below). It must be built on q1n1's own
+- **The USB link to the Mac** ([run 13](#run-13-2026-10-26-usb-inventory)). It must be built on q1n1's own
   DWC3 device-mode driver, from a controller the firmware leaves in host
   mode.
-- **q1n1's `--el2 --exit-vhe` foothold on the gaokun3: unblocked on the
-  host.** q1n1 drew only on a GOP mode with a framebuffer address, and the
-  gaokun3 has none.
-  - **The fix:** with `-DQ1N1_DT_FRAMEBUFFER` it falls back to the device
-    tree's `/chosen` simple-framebuffer, accepted only when the node is
-    self-consistent and inside one Reserved region of the memory map. Every
-    draw on it is cleaned to the point of coherency. `simplefb.c` is el2qual's
-    `firmware.c` code, function for function. Details: q1n1
-    `docs/GAOKUN3-DT-FRAMEBUFFER.md`.
-  - **Evidence:**
-    - the default build is byte-identical apart from the PE timestamp;
-    - 55 host checks pass, and 5 broken variants fail them;
-    - on QEMU, the full gaokun3 path (no GOP address, the fallback, the VHE
-      exit, the foothold) draws correctly, confirmed by a screendump.
-  - **Not shown by QEMU:** whether the cleaning is needed or enough, since
-    TCG is coherent. Not run on the gaokun3.
-  - **Next:** a stick that boots the `-DQ1N1_VHE_EXIT -DQ1N1_DT_FRAMEBUFFER`
-    `q1n1.efi` with `--el2 --exit-vhe` under slbounce.
+- **q1n1's foothold on the gaokun3: done** ([runs 14 and
+  15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
+  framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has
+  the fallback's design and host evidence.
