@@ -27,8 +27,8 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
            (load option "thermal"; docs/GAOKUN3-PHASE1-GUARDS.md).
   vhe-exit stage2's files with the two Phase 2 VHE-exit entries only (load
            option "exit-vhe"; docs/GAOKUN3-PHASE2.md).
-  usb-read stage2's files with the two read-only USB entries only (load
-           options "usb", "usb-smmu"; docs/GAOKUN3-USB-DEVICE-MODE.md).
+  usb-read stage2's files with the three USB entries only (load options
+           "usb", "usb-smmu", "usb-smmu-map"; docs/GAOKUN3-USB-DEVICE-MODE.md).
   q1n1-foothold  stage2's files with q1n1 (its -DQ1N1_VHE_EXIT
            -DQ1N1_DT_FRAMEBUFFER build) in place of el2qual: its --el2
            foothold under slbounce, then the same after --exit-vhe.
@@ -92,12 +92,17 @@ VHE_EXIT_ENTRIES = [
 # The read-only USB stage (docs/GAOKUN3-USB-DEVICE-MODE.md), in order, each
 # adding one thing so a hang names it: the clock controller's status before
 # and after ExitBootServices, and USB0 only if that says it is powered; then
-# the same after the VHE exit, with apps_smmu read last. Boot CPU and no
+# the same after the VHE exit, with apps_smmu read last; then the same again
+# through el2qual's own map of the SMMU window, the one entry that writes
+# (RAM only: one table page of its own and one descriptor). Boot CPU and no
 # PAuth, the steps run 9 cleared.
 USB_READ_ENTRIES = [
     ('el2qual-8-usb.conf', 'el2qual 8: USB read (read only)', 'nopac nosmp usb'),
     ('el2qual-9-usb-smmu.conf', 'el2qual 9: USB and SMMU read after the VHE exit (read only)',
      'nopac nosmp exit-vhe usb-smmu'),
+    ('el2qual-10-usb-smmu-map.conf',
+     'el2qual 10: as 9, through its own map of the SMMU window (SMMU read only)',
+     'nopac nosmp exit-vhe usb-smmu-map'),
 ]
 STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRIES,
                  'vhe-exit': VHE_EXIT_ENTRIES, 'usb-read': USB_READ_ENTRIES}

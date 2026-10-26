@@ -569,6 +569,55 @@ static void test_report(void)
     CHECK(text.color[on] == EL2Q_GREEN && text.color[off] == EL2Q_YELLOW && text.color[core] == EL2Q_WHITE);
 }
 
+/* The "usb-smmu-map" line: one line after the core lines, only when the
+ * option ran (el2qual.c sets u.map; pagemap.c's outcomes are covered in
+ * tools/test-el2qual-pagemap.c). */
+static void test_map(void)
+{
+    static struct el2q_usb u;
+    char l[40][EL2Q_USB_LINE_COLS + 1];
+
+    memset(&u, 0, sizeof u);
+    powered();
+    el2q_usb_gcc(&u.after, &hw);
+    el2q_usb_core(&u.after, &hw);
+    unsigned base = lines(&u, l, 40);
+    CHECK(base == 4 + 6 + 1);                  /* no map line when not asked */
+
+    static const struct {
+        uint32_t map, test, cloned, kept;
+        uint64_t arg;
+        const char *line;
+    } cases[] = {
+        {EL2Q_PM_NOT_NEEDED, 0, 0, 0, 0, "SMMU MAP NOT NEEDED"},
+        {EL2Q_PM_OK, 0, 1, 3, 0, "SMMU MAP OK CLONE KEPT 3/256"},
+        {EL2Q_PM_OK, 0, 0, 0, 0, "SMMU MAP OK NEW TABLE KEPT 0/256"},
+        {EL2Q_PM_OK, 1, 1, 0, 0, "SMMU MAP OK CLONE KEPT 0/256 (TEST WINDOW)"},
+        {EL2Q_PM_NOT_NEEDED, 1, 0, 0, 0, "SMMU MAP NOT NEEDED (TEST WINDOW)"},
+        {EL2Q_PM_REFUSED_REGIME, 0, 0, 0, 0, "SMMU MAP REFUSED: REGIME"},
+        {EL2Q_PM_REFUSED_DEVICE, 0, 0, 0, 0, "SMMU MAP REFUSED: DEVICE"},
+        {EL2Q_PM_REFUSED_ALLOC, 0, 0, 0, 0, "SMMU MAP REFUSED: ALLOC"},
+        {EL2Q_PM_REFUSED_STRUCT, 0, 0, 0, 0x150FE000 | 3ull, "SMMU MAP REFUSED: STRUCTURE 00000000150FE003"},
+        {EL2Q_PM_REFUSED_STRUCT, 1, 0, 0, ~0ull,
+         "SMMU MAP REFUSED: STRUCTURE FFFFFFFFFFFFFFFF (TEST WINDOW)"},  /* the longest line */
+        {EL2Q_PM_REFUSED_VERIFY, 0, 0, 0, 250, "SMMU MAP REFUSED: VERIFY 250/256"},
+    };
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        memset(&u, 0, sizeof u);
+        el2q_usb_gcc(&u.after, &hw);
+        el2q_usb_core(&u.after, &hw);
+        u.map = cases[i].map;
+        u.map_test = cases[i].test;
+        u.map_cloned = cases[i].cloned;
+        u.map_kept = cases[i].kept;
+        u.map_arg = cases[i].arg;
+        unsigned n = lines(&u, l, 40);
+        CHECK(n == base + 1);
+        CHECK(!strcmp(l[10], cases[i].line));  /* after the six core lines */
+        CHECK(!strcmp(l[11], "USB SERROR NONE"));
+    }
+}
+
 unsigned test_usbprobe(void)
 {
     test_gate();
@@ -577,5 +626,6 @@ unsigned test_usbprobe(void)
     test_stage2();
     test_lines();
     test_report();
+    test_map();
     return checks;
 }

@@ -44,6 +44,15 @@
  *   usb-smmu    "usb", then also apps_smmu's state for USB0's stream and,
  *               when it translates, the context bank it names, and the
  *               stage-2 bank that one nests, if any. Off by default.
+ *   usb-smmu-map  "usb-smmu", but first add the SMMU's 1 MiB register
+ *               window to el2qual's own EL2 tables as Device, read-only
+ *               identity pages (pagemap.c), so the nested stage-2 bank the
+ *               UEFI tables leave unmapped can be read too. Writes RAM (one
+ *               table page of el2qual's own and one descriptor in UEFI's
+ *               leftover tables), never hardware. Off by default.
+ *   emulate-map-hole  with "usb-smmu-map", map two test windows QEMU's
+ *               EDK2 leaves unmapped instead of the SMMU's, so the map is
+ *               written and checked there; test only, reported as such
  *
  * With no GOP mode that has a framebuffer address, el2qual draws on the
  * device tree's /chosen simple-framebuffer if the firmware's memory map
@@ -56,6 +65,7 @@
 #include "report.h"
 #include "thermal.h"
 #include "vhe.h"
+#include "pagemap.h"
 #include "usbprobe.h"
 
 /* idregs.h is the monitor's: id_register() is shared so both read exactly
@@ -316,7 +326,7 @@ static struct el2q_run run;
 static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
-    int thermal, exit_vhe, usb, usb_smmu;
+    int thermal, exit_vhe, usb, usb_smmu, usb_smmu_map, emulate_map_hole;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -617,6 +627,96 @@ static uint64_t usb_read_guarded(void *unused, uint64_t address, uint64_t *value
     return el2q_try_read32(&ctx[0], value, address);
 }
 
+/* ---- The private SMMU window map (option "usb-smmu-map"; pagemap.c) --------
+ * The table page comes from a pool allocated before ExitBootServices, only
+ * when the option is given. The only stores into a pre-existing page are to
+ * the level-2 descriptor; after ExitBootServices all memory is el2qual's,
+ * and only the boot CPU runs. */
+
+static uint64_t pm_pool_next, pm_pool_end;
+
+static uint64_t pm_alloc(void *ctx)
+{
+    (void)ctx;
+    if (!pm_pool_next || pm_pool_next >= pm_pool_end) return 0;
+    uint64_t page = pm_pool_next;
+    pm_pool_next += 0x1000;
+    return page;
+}
+
+static uint64_t pm_read64(void *ctx, uint64_t address)
+{
+    (void)ctx;
+    return *(volatile uint64_t *)(uintptr_t)address;
+}
+
+static void pm_write64(void *ctx, uint64_t address, uint64_t value)
+{
+    (void)ctx;
+    *(volatile uint64_t *)(uintptr_t)address = value;
+}
+
+static void pm_sync(void *ctx, uint32_t op, uint64_t address, uint64_t size)
+{
+    (void)ctx;
+    if (op == EL2Q_PM_CLEAN) dcache_range((const volatile void *)(uintptr_t)address, size, CLEAN);
+    else if (op == EL2Q_PM_DSB) DSB();
+    else if (op == EL2Q_PM_TLBI) __asm__ volatile("tlbi alle2" ::: "memory");
+    else if (op == EL2Q_PM_ISB) ISB();
+}
+
+/* "emulate-map-hole" (test only): on QEMU's virt machine EDK2 already maps
+ * the SMMU window's addresses as Device, so the map would never be written.
+ * Two 1 MiB windows in flash0's space past EDK2's firmware volume, which its
+ * tables leave absent (OBSERVED), are mapped instead: the first gets a new
+ * level-3 table; the second, in the same 2 MiB region, then clones that one,
+ * so the swap of a valid entry with its break runs too. The first window
+ * must still pass afterwards. Nothing reads either. */
+#define EL2Q_PM_TEST_FIRST  0x02000000ull
+#define EL2Q_PM_TEST_SECOND 0x02100000ull
+#define EL2Q_PM_TEST_SIZE   0x100000ull
+
+static uint32_t map_window(uint64_t base, uint64_t size, struct el2q_pm_result *r)
+{
+    const struct el2q_pm_hw pmhw = {0, pm_read64, pm_write64, pm_alloc, usb_mapped_el2, pm_sync};
+    uint32_t state = el2q_pm_prepare(base, size, RD("tcr_el2"), RD("ttbr0_el2"), RD("mair_el2"),
+                                     !!(RD("hcr_el2") & EL2Q_HCR_E2H), &pmhw, r);
+    if (state == EL2Q_PM_BUILT) {
+        el2q_pm_publish(&pmhw, r);
+        state = el2q_pm_verify(base, size, &pmhw, r);
+    }
+    return state;
+}
+
+/* Build the clone, swap it in with break-before-make (pagemap.c), then
+ * every window page must pass the stage's own AT check. */
+static void map_smmu_window(void)
+{
+    struct el2q_pm_result r;
+    uint32_t state;
+    if (opt.emulate_map_hole) {
+        progress("USB: MAPPING TWO TEST WINDOWS IN EL2QUAL'S OWN TABLES (TEST ONLY)");
+        state = map_window(EL2Q_PM_TEST_FIRST, EL2Q_PM_TEST_SIZE, &r);
+        if (state == EL2Q_PM_OK) state = map_window(EL2Q_PM_TEST_SECOND, EL2Q_PM_TEST_SIZE, &r);
+        if (state == EL2Q_PM_OK) {
+            const struct el2q_pm_hw pmhw = {0, pm_read64, pm_write64, pm_alloc, usb_mapped_el2, pm_sync};
+            struct el2q_pm_result first = r;
+            if (el2q_pm_verify(EL2Q_PM_TEST_FIRST, EL2Q_PM_TEST_SIZE, &pmhw, &first) != EL2Q_PM_OK) {
+                state = EL2Q_PM_REFUSED_VERIFY;
+                r.mapped_after = first.mapped_after;
+            }
+        }
+    } else {
+        progress("USB: MAPPING APPS_SMMU'S WINDOW IN EL2QUAL'S OWN TABLES");
+        state = map_window(EL2Q_USB_SMMU_BASE, EL2Q_USB_SMMU_SIZE, &r);
+    }
+    run.usb.map = state;
+    run.usb.map_test = opt.emulate_map_hole;
+    run.usb.map_cloned = r.cloned;
+    run.usb.map_kept = r.mapped_before;
+    run.usb.map_arg = state == EL2Q_PM_REFUSED_VERIFY ? r.mapped_after : r.detail;
+}
+
 static void measure_usb_before(void)
 {
     const struct el2q_usb_hw hw = {0, usb_mapped_now, usb_read_unguarded};
@@ -633,6 +733,7 @@ static void measure_usb_after(void)
         progress("USB: READING THE USB0 CONTROLLER. A HANG HERE IS A USB0 READ");
     el2q_usb_core(&run.usb.after, &hw);
     if (opt.usb_smmu) {
+        if (opt.usb_smmu_map) map_smmu_window();
         progress("USB: READING APPS_SMMU. A HANG HERE IS AN SMMU READ");
         el2q_usb_smmu(&run.usb, &hw);
     }
@@ -812,6 +913,8 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "thermal")) opt.thermal = 1;
         if (word_is(w, len, "usb")) opt.usb = 1;
         if (word_is(w, len, "usb-smmu")) opt.usb = opt.usb_smmu = 1;
+        if (word_is(w, len, "usb-smmu-map")) opt.usb = opt.usb_smmu = opt.usb_smmu_map = 1;
+        if (word_is(w, len, "emulate-map-hole")) opt.emulate_map_hole = 1;
     }
 }
 
@@ -1034,6 +1137,13 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     uint64_t pages = 0;
     if (!EFI_ERROR(bs->allocate_pages(0 /* AnyPages */, 2 /* LoaderData */, 8, &pages)))
         table = (pages + 0x3fff) & ~0x3fffull;
+    /* pagemap.c needs one 4 KiB table page per window it maps. */
+    uint64_t pool = 0, pool_pages = opt.emulate_map_hole ? 2 : 1;
+    if (opt.usb_smmu_map &&
+        !EFI_ERROR(bs->allocate_pages(0 /* AnyPages */, 2 /* LoaderData */, pool_pages, &pool))) {
+        pm_pool_next = pool;
+        pm_pool_end = pool + pool_pages * 0x1000;
+    }
 
     char line[] = "SNAPINTOSH EL2QUAL: STARTED AT EL., CALLING EXITBOOTSERVICES";
     line[33] = (char)('0' + run.start_el);

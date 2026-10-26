@@ -1437,6 +1437,8 @@ static void test_tsens(void)
 unsigned test_vhe(void);
 /* tools/test-el2qual-usbprobe.c: usbprobe.c, the read-only USB stage. */
 unsigned test_usbprobe(void);
+/* tools/test-el2qual-pagemap.c: pagemap.c, the private SMMU window map. */
+unsigned test_pagemap(void);
 
 int main(void)
 {
@@ -1452,6 +1454,7 @@ int main(void)
     test_tsens();
     checks += test_vhe();
     checks += test_usbprobe();
+    checks += test_pagemap();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

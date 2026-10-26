@@ -298,7 +298,11 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
  *   USB0 DWC3 U2PHY <w> U3PIPE <w> DCFG <w>
  *   USB0 DWC3 DCTL <w> EVNT <w>
  *   USB0 QSCRATCH HS <w> SS <w>
- * (the last five only when a read was attempted), then with "usb-smmu"
+ * (the last five only when a read was attempted), then with "usb-smmu-map"
+ *   SMMU MAP <OK <CLONE|NEW TABLE> KEPT <n>/256|NOT NEEDED|
+ *            REFUSED: <REGIME|DEVICE|ALLOC|STRUCTURE <16 hex>|VERIFY <n>/256>>
+ * ending " (TEST WINDOW)" when "emulate-map-hole" mapped QEMU's test window
+ * and with "usb-smmu"
  *   SMMU SCR0 <w> IDR0 <w>
  *   SMMU STREAM 820 <MATCH SMR <n> <w> S2CR <w>|NO MATCH|UNMAPPED|NOT READ: ALL ONES|FAULT ESR <e>>
  * and after a match, its context bank:
@@ -333,6 +337,17 @@ static void put_hex(struct lbuf *b, uint64_t v, unsigned digits)
     for (unsigned i = 0; i < digits; i++) t[i] = "0123456789ABCDEF"[(v >> (4 * (digits - 1 - i))) & 15];
     t[digits] = 0;
     put_s(b, t);
+}
+
+static void put_dec(struct lbuf *b, uint64_t v)
+{
+    char d[20];
+    unsigned n = 0;
+    do d[n++] = (char)('0' + v % 10); while ((v /= 10) && n < sizeof d);
+    while (n) {
+        char c[2] = {d[--n], 0};
+        put_s(b, c);
+    }
 }
 
 static void put_word(struct lbuf *b, const char *label, uint32_t state, uint32_t value)
@@ -476,6 +491,35 @@ static unsigned s2_lines(const struct el2q_usb *u, unsigned index, struct lbuf *
     return count;
 }
 
+static unsigned map_lines(const struct el2q_usb *u, unsigned index, struct lbuf *b)
+{
+    if (u->map == EL2Q_PM_NOT_ASKED) return 0;
+    if (index == 0) {
+        put_s(b, "SMMU MAP ");
+        if (u->map == EL2Q_PM_REFUSED_STRUCT) {
+            put_s(b, "REFUSED: STRUCTURE ");
+            put_hex(b, u->map_arg, 16);
+        } else if (u->map == EL2Q_PM_REFUSED_VERIFY) {
+            put_s(b, "REFUSED: VERIFY ");
+            put_dec(b, u->map_arg);
+            put_s(b, "/");
+            put_dec(b, EL2Q_USB_SMMU_SIZE >> 12);
+        } else if (u->map == EL2Q_PM_OK) {
+            put_s(b, u->map_cloned ? "OK CLONE KEPT " : "OK NEW TABLE KEPT ");
+            put_dec(b, u->map_kept);
+            put_s(b, "/");
+            put_dec(b, EL2Q_USB_SMMU_SIZE >> 12);
+        } else {
+            if (u->map == EL2Q_PM_REFUSED_REGIME || u->map == EL2Q_PM_REFUSED_DEVICE ||
+                u->map == EL2Q_PM_REFUSED_ALLOC)
+                put_s(b, "REFUSED: ");
+            put_s(b, el2q_pm_word(u->map));
+        }
+        if (u->map_test) put_s(b, " (TEST WINDOW)");
+    }
+    return 1;
+}
+
 static unsigned smmu_lines(const struct el2q_usb *u, unsigned index, struct lbuf *b)
 {
     if (u->smmu == EL2Q_USB_SMMU_NOT_ASKED) return 0;
@@ -506,6 +550,8 @@ void el2q_usb_line(const struct el2q_usb *u, unsigned index, char out[EL2Q_USB_L
     if (index < (n = phase_lines(&u->after, 'A', index, &b))) return;
     index -= n;
     if (index < (n = core_lines(&u->after, index, &b))) return;
+    index -= n;
+    if (index < (n = map_lines(u, index, &b))) return;
     index -= n;
     if (index < (n = smmu_lines(u, index, &b))) return;
     index -= n;

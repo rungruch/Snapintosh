@@ -46,6 +46,18 @@ report it writes to the PL011:
                controller read made while it is not ON, and any SError
   max-vhe-usb-smmu  the same with the SMMU, after the slbounce emulation
                and the VHE exit, the order the gaokun3 runs it in
+  max-vhe-usb-smmu-map  the same, with "usb-smmu-map": el2qual first adds its
+               own Device map of the SMMU's 1 MiB window to its EL2 tables
+               (pagemap.c). EDK2 already maps that range on virt, so the
+               one SMMU MAP line must say NOT NEEDED
+  max-vhe-usb-smmu-map-hole  the same with "emulate-map-hole": two test
+               windows EDK2 leaves unmapped are mapped instead, the second
+               cloning the table the first created, so both a new table and
+               the swap of a valid entry with its break run under the
+               hardware walk; the line must say OK CLONE KEPT 0/256 (TEST
+               WINDOW), which also requires the first window to still pass
+  max-vhe-usb-smmu-map-hole-e2h  the same without the VHE exit, so the
+               tables are walked in the EL2&0 regime, with its own leaf bits
 
 On every configuration that runs, all four CPUs must finish at EL2 without
 a fault, the report must name the GOP mode it drew on, and each feature's
@@ -119,6 +131,28 @@ CONFIGS = {
     'max-vhe-usb-smmu': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu', pac='Y', walk='Y',
                              vhe=True, vhe_exit='DONE', usb=True, smmu=True,
                              features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The window map (pagemap.c). EDK2 maps virt's 0x15000000 as Device
+    # already (PCIe MMIO), so nothing is written; the SMMU itself still
+    # reads all ones, so no bank lines.
+    'max-vhe-usb-smmu-map': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu-map',
+                                 pac='Y', walk='Y', vhe=True, vhe_exit='DONE',
+                                 usb=True, smmu=True, smmumap='NOT NEEDED',
+                                 features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The same through the writing path, on two test windows EDK2 leaves absent.
+    'max-vhe-usb-smmu-map-hole': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu-map emulate-map-hole',
+                                      pac='Y', walk='Y', vhe=True, vhe_exit='DONE',
+                                      usb=True, smmu=True,
+                                      smmumap=r'OK CLONE KEPT 0/256 \(TEST WINDOW\)',
+                                      smmumap_sample='OK CLONE KEPT 0/256 (TEST WINDOW)',
+                                      features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The same left in slbounce's E2H|TGE state: the EL2&0 regime, whose leaf
+    # permission and execute-never bits differ from the EL2 regime's.
+    'max-vhe-usb-smmu-map-hole-e2h': dict(cpu='max', options='emulate-vhe usb-smmu-map emulate-map-hole',
+                                          pac='Y', walk='Y', vhe=True, usb=True, smmu=True,
+                                          smmumap=r'OK CLONE KEPT 0/256 \(TEST WINDOW\)',
+                                          smmumap_sample='OK CLONE KEPT 0/256 (TEST WINDOW)',
+                                          features=dict.fromkeys(FEATURES, True),
+                                          routes=('CPU OK', 'CPU OK')),
 }
 
 STOP_LINES = ('NO GOP MODE HAS A FRAMEBUFFER ADDRESS', 'DT FRAMEBUFFER: NO DEVICE TREE',
@@ -350,11 +384,26 @@ def check_usb(lines, expect):
             problems.append(f'the controller was read although power after ExitBootServices was '
                             f'{power.get("A")}: {core}')
     smmu = [line for line in lines if line.startswith('SMMU ')]
-    smmu = [line for line in smmu if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 '))]
+    smmu = [line for line in smmu if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 ', 'SMMU MAP'))]
     if expect.get('smmu') and len(smmu) != 2:
         problems.append(f'usb-smmu asked but {len(smmu)} SMMU lines')
     if not expect.get('smmu') and smmu:
         problems.append('SMMU lines although usb-smmu was not asked')
+    # The window map: exactly one well-formed line, exactly when asked, with
+    # the outcome this configuration must reach.
+    maplines = [line for line in lines if line.startswith('SMMU MAP ')]
+    MAP_LINE = (r'^SMMU MAP (NOT NEEDED|OK (CLONE|NEW TABLE) KEPT \d+/256|'
+                r'REFUSED: (REGIME|DEVICE|ALLOC|STRUCTURE [0-9A-F]{16}|VERIFY \d+/256))'
+                r'( \(TEST WINDOW\))?$')
+    if expect.get('smmumap'):
+        if len(maplines) != 1:
+            problems.append(f'usb-smmu-map asked but {len(maplines)} SMMU MAP lines')
+        elif not re.match(MAP_LINE, maplines[0]):
+            problems.append(f'malformed SMMU MAP line: {maplines[0]}')
+        elif not re.fullmatch(expect['smmumap'], maplines[0].removeprefix('SMMU MAP ')):
+            problems.append(f'{maplines[0]}, not SMMU MAP {expect["smmumap"]}')
+    elif maplines:
+        problems.append('an SMMU MAP line although usb-smmu-map was not asked')
     if any(line.startswith('SMMU STREAM 820 MATCH SMR 00 FFFFFFFF') for line in smmu):
         problems.append('an all-ones SMMU read was taken as a stream match')
     # The context bank: read only after a match, and only through a
@@ -456,6 +505,8 @@ def synthetic(expect, smp=SMP):
                       f'USB1 GCC {phase} GDSC UNMAPPED MASTER UNMAPPED',
                       f'USB0 POWER {phase} UNREAD']
         lines.append('USB0 CORE NOT READ: POWER NOT ON')
+        if expect.get('smmumap'):
+            lines.append(f'SMMU MAP {expect.get("smmumap_sample", expect["smmumap"])}')
         if expect.get('smmu'):
             lines += ['SMMU SCR0 FFFFFFFF IDR0 FFFFFFFF', 'SMMU STREAM 820 NOT READ: ALL ONES']
         lines.append('USB SERROR NONE')
@@ -637,6 +688,27 @@ def self_test():
                     'MAIR1 00000000', 'MAIR1 00000000\nSMMU S2 CB7E AT 150FE000 CBAR 00000003 CBA2R 00000001\n'
                     'SMMU S2 CB7E SCTLR 00000061 TCR 80023559\nSMMU S2 CB7E TTBR0 000300009F700000'),
                     expect, True)
+                if expect.get('smmumap'):
+                    mapline = f'SMMU MAP {expect.get("smmumap_sample", expect["smmumap"])}'
+                    expect_result(f'{name} map line missing',
+                                  good.replace(mapline + '\n', ''), expect, False)
+                    expect_result(f'{name} map line malformed',
+                                  good.replace(mapline, 'SMMU MAP MAYBE'), expect, False)
+                    expect_result(f'{name} map line twice',
+                                  good.replace(mapline, mapline + '\n' + mapline), expect, False)
+                    expect_result(f'{name} map refused', good.replace(
+                        mapline, 'SMMU MAP REFUSED: STRUCTURE 0000000000000001'), expect, False)
+                    if mapline.endswith('(TEST WINDOW)'):
+                        expect_result(f'{name} test window not named', good.replace(
+                            mapline, mapline.removesuffix(' (TEST WINDOW)')), expect, False)
+                        expect_result(f'{name} nothing written', good.replace(
+                            mapline, 'SMMU MAP NOT NEEDED (TEST WINDOW)'), expect, False)
+                    else:
+                        expect_result(f'{name} written where nothing was needed', good.replace(
+                            mapline, 'SMMU MAP OK CLONE KEPT 3/256'), expect, False)
+                else:
+                    expect_result(f'{name} map line unasked', good.replace(
+                        'SMMU SCR0', 'SMMU MAP OK\nSMMU SCR0'), expect, False)
             else:
                 expect_result(f'{name} SMMU unasked', good.replace(
                     'USB SERROR NONE', 'SMMU SCR0 0 IDR0 0\nSMMU STREAM 820 NO MATCH\nUSB SERROR NONE'),

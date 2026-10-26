@@ -16,6 +16,10 @@
    barrier or a misordered write, so a passing QEMU run cannot show this;
    the order is checked here instead, and deliberately reordered copies of
    the routine must be rejected.
+4. Deliberately broken copies of probes/el2qual/pagemap.c, each removing
+   one of its safety properties (break-before-make steps, the regime's
+   leaf bits, refusals, never rewriting a valid entry), must each make
+   tools/test-el2qual.c fail.
 """
 import argparse
 import os
@@ -195,14 +199,57 @@ def check_exit_vhe():
     return problems, len(sequence_mutations(insns))
 
 
-def compile_test(cc, out, sanitizers):
+def compile_test(cc, out, sanitizers, pagemap=None):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'),
            str(ROOT / 'tools' / 'test-el2qual-vhe.c'), str(ROOT / 'tools' / 'test-el2qual-usbprobe.c'),
-           str(EL2Q / 'report.c'), str(EL2Q / 'usbprobe.c'),
+           str(ROOT / 'tools' / 'test-el2qual-pagemap.c'),
+           str(EL2Q / 'report.c'), str(EL2Q / 'usbprobe.c'), str(pagemap or EL2Q / 'pagemap.c'),
            str(EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'), str(EL2Q / 'vhe.c'),
            str(ROOT / 'compat' / 'sc8280xp-thermal.c'), '-o', str(out)]
     return cmd, subprocess.run(cmd, capture_output=True, text=True)
+
+
+# (name, text in pagemap.c, replacement): each must make the suite fail.
+PAGEMAP_MUTATIONS = [
+    ('the slot written while building',
+     '    out->cloned = l3 != 0;\n',
+     '    out->cloned = l3 != 0;\n    hw->write64(hw->ctx, l2_slot, (fresh & PT_OA) | 3);\n'),
+    ('PXN, RES0, as execute-never in the EL2 regime',
+     'PT_RO_EL2 | PT_XN)', 'PT_RO_EL2 | PT_PXN)'),
+    ('AP[1] clear in the EL2 regime', '#define PT_RO_EL2  (3ull << 6)', '#define PT_RO_EL2  (2ull << 6)'),
+    ('the table limits dropped', '(l2_desc & PT_TABLE_ATTRS) | ', ''),
+    ('an invalid non-zero level-2 entry replaced', 'if (l2_desc && (l2_desc & 3) != 3) {', 'if (0) {'),
+    ('no break', '    hw->write64(hw->ctx, io->l2_slot, 0);\n', ''),
+    ('no TLBI', '    hw->sync(hw->ctx, EL2Q_PM_TLBI, 0, 0);\n', ''),
+    ('the clone not cleaned first', '    hw->sync(hw->ctx, EL2Q_PM_CLEAN, io->table, 0x1000);\n', ''),
+    ('no ISB', '    hw->sync(hw->ctx, EL2Q_PM_ISB, 0, 0);\n', ''),
+    ('a valid entry rewritten', 'if (i >= first && i < first + count && !e)',
+     'if (i >= first && i < first + count)'),
+    ('a non-identity entry accepted', '(e & PT_OA) != page', '((e & PT_OA) != page && 0)'),
+    ('a Normal MAIR byte taken as Device', '& 0xf3ull', '& 0xf0ull'),
+    ('the start level ignored', 'unsigned start = 4 - levels;', 'unsigned start = 0;'),
+]
+
+
+def check_pagemap_mutations(cc, flags, tmp):
+    """Problems: mutations that do not apply, or that the suite accepts."""
+    source = (EL2Q / 'pagemap.c').read_text()
+    problems = []
+    for i, (name, old, new) in enumerate(PAGEMAP_MUTATIONS):
+        if source.count(old) != 1:
+            problems.append(f'{name}: its text is not in pagemap.c exactly once')
+            continue
+        mutant = Path(tmp) / f'pagemap-{i}.c'
+        mutant.write_text(source.replace(old, new))
+        exe = Path(tmp) / (f'mutant-{i}' + EXE)
+        cmd, built = compile_test(cc, exe, flags, mutant)
+        if built.returncode:
+            problems.append(f'{name}: does not build')
+            continue
+        if subprocess.run([str(exe)], capture_output=True, text=True).returncode == 0:
+            problems.append(f'{name}: accepted')
+    return problems
 
 
 def main():
@@ -244,6 +291,14 @@ def main():
         print((ran.stdout + ran.stderr).rstrip())
         verdict = 'PASS' if ran.returncode == 0 else f'FAIL (exit {ran.returncode})'
         print(f'{verdict} test-el2qual.c [{mode}]')
+        if ran.returncode == 0:
+            mutants = check_pagemap_mutations(cc, flags, tmp)
+            for m in mutants:
+                print(f'FAIL pagemap mutation: {m}')
+            if not mutants:
+                print(f'PASS pagemap mutations: {len(PAGEMAP_MUTATIONS)} deliberately broken copies '
+                      f'of pagemap.c are rejected')
+            problems += mutants
     return 1 if problems or ran.returncode else 0
 
 

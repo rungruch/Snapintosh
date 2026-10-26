@@ -22,6 +22,7 @@
 #define EL2QUAL_USBPROBE_H
 
 #include <stdint.h>
+#include "pagemap.h"
 
 /* The GCC words read in each phase, in this order. */
 enum el2q_usb_gcc {
@@ -115,6 +116,12 @@ struct el2q_usb_phase {
 
 struct el2q_usb {
     struct el2q_usb_phase before, after;     /* before and after ExitBootServices */
+    /* Option "usb-smmu-map": el2qual's private Device map of the SMMU's
+     * window, built before the SMMU read (el2qual.c, pagemap.c). */
+    uint32_t map;                            /* enum el2q_pm */
+    uint32_t map_test;                       /* "emulate-map-hole": a QEMU test window, not the SMMU's */
+    uint32_t map_cloned, map_kept;           /* OK: UEFI's table cloned (or a new one); pages already mapped */
+    uint64_t map_arg;                        /* STRUCTURE: the refused descriptor; VERIFY: pages passing */
     uint32_t smmu;                           /* enum el2q_usb_smmu */
     uint32_t scr0, idr0, smr, s2cr, group;   /* group: the matching SMR's index */
     uint32_t smmu_words;                     /* of sCR0 and IDR0, how many were read */
