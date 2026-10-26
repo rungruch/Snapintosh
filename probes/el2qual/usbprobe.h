@@ -57,6 +57,7 @@ extern const uint64_t el2q_usb_gcc_address[EL2Q_USB_GCC_COUNT];
 extern const uint64_t el2q_usb_word_address[EL2Q_USB_WORD_COUNT];
 
 #define EL2Q_USB_SMMU_BASE   0x15000000ull
+#define EL2Q_USB_SMMU_SIZE   0x100000ull  /* apps_smmu's register window (device tree) */
 #define EL2Q_USB_STREAM      0x820u      /* USB0 on apps_smmu (device tree) */
 /* IDR0.NUMSMRG is 8 bits, and Linux uses it as the group count with no other
  * limit; the gaokun3's apps_smmu reports 212 (VERIFIED, el2qual run 17). */
@@ -90,6 +91,16 @@ enum el2q_usb_smmu {
     EL2Q_USB_SMMU_MATCH
 };
 
+/* The context bank the matched stream translates through (S2CR.CBNDX). */
+enum el2q_usb_cb {
+    EL2Q_USB_CB_NOT_TRIED,      /* no stream match was read */
+    EL2Q_USB_CB_NOT_TRANSLATED, /* S2CR says bypass or fault: no bank is used */
+    EL2Q_USB_CB_OUT_OF_RANGE,   /* the bank is past NUMCB, or its page past the SMMU's window */
+    EL2Q_USB_CB_UNMAPPED,
+    EL2Q_USB_CB_FAULT,
+    EL2Q_USB_CB_READ
+};
+
 struct el2q_usb_phase {
     uint32_t ran;
     uint32_t gcc_read[EL2Q_USB_GCC_COUNT];   /* enum el2q_usb_read */
@@ -106,6 +117,14 @@ struct el2q_usb {
     uint32_t smmu;                           /* enum el2q_usb_smmu */
     uint32_t scr0, idr0, smr, s2cr, group;   /* group: the matching SMR's index */
     uint32_t smmu_words;                     /* of sCR0 and IDR0, how many were read */
+    uint32_t cb;                             /* enum el2q_usb_cb */
+    uint32_t cb_index, id1;                  /* S2CR.CBNDX; SMMU IDR1 */
+    uint64_t cb_page;                        /* the bank's register page */
+    uint32_t cbar, cba2r;                    /* GR1 CBAR(n), CBA2R(n) */
+    uint32_t cb_sctlr, cb_tcr, cb_tcr2, cb_mair0, cb_mair1;
+    uint64_t cb_ttbr0;                       /* read as two 32-bit halves */
+    uint32_t cb_words;                       /* bank words read, in the order above */
+    uint64_t cb_esr, cb_at;
     uint64_t smmu_esr;
     uint64_t isr;                            /* ISR_EL1 after the reads: a pending SError shows here */
 };
@@ -134,7 +153,15 @@ void el2q_usb_core(struct el2q_usb_phase *phase, const struct el2q_usb_hw *hw);
  * ID, outside its mask, equals USB0's stream, and that group's S2CR. With
  * extended stream IDs (sCR0.EXIDENABLE) validity is S2CR.EXIDVALID and the
  * mask is 16 bits; otherwise SMR bit 31 and a 15-bit mask. At most
- * EL2Q_USB_SMR_LIMIT groups are read, and none after a fault. */
+ * EL2Q_USB_SMR_LIMIT groups are read, and none after a fault.
+ *
+ * When that S2CR translates (TYPE 0), the context bank it names is read too:
+ * IDR1 gives the page size and where the bank pages start (Linux arm-smmu.c:
+ * pgshift from PAGESIZE, numpage = 1 << (NUMPAGENDXB + 1), bank n at page
+ * numpage + n), and the bank must be below NUMCB with its page inside the
+ * SMMU's window. Then GR1's CBAR(n) and CBA2R(n), and the bank's SCTLR, TCR,
+ * TCR2, TTBR0, MAIR0 and MAIR1, each page checked for its mapping first and
+ * nothing read after a fault. */
 void el2q_usb_smmu(struct el2q_usb *usb, const struct el2q_usb_hw *hw);
 
 /* Fixed-format report lines, empty past the last; see usbprobe.c. */

@@ -105,12 +105,83 @@ void el2q_usb_core(struct el2q_usb_phase *p, const struct el2q_usb_hw *hw)
 #define SMR_VALID     (1u << 31)
 #define sCR0_EXIDENABLE (1u << 3)
 #define S2CR_EXIDVALID  (1u << 10)
+#define SMMU_IDR1     0x24
+#define IDR1_PAGESIZE (1u << 31)
+#define SMMU_GR1_CBAR(n)  (0x0 + 4 * (n))
+#define SMMU_GR1_CBA2R(n) (0x800 + 4 * (n))
+#define CB_SCTLR 0x0
+#define CB_TCR2  0x10
+#define CB_TTBR0 0x20
+#define CB_TCR   0x30
+#define CB_MAIR0 0x38
+#define CB_MAIR1 0x3c
+
+/* The context bank the matched S2CR names; see usbprobe.h. */
+static void read_bank(struct el2q_usb *u, const struct el2q_usb_hw *hw)
+{
+    if ((u->s2cr >> 16 & 3) != 0) {                      /* S2CR.TYPE: 0 translate */
+        u->cb = EL2Q_USB_CB_NOT_TRANSLATED;
+        return;
+    }
+    u->cb_index = u->s2cr & 0xff;                        /* CBNDX */
+    uint64_t word = 0, f = hw->read32(hw->ctx, EL2Q_USB_SMMU_BASE + SMMU_IDR1, &word);
+    if (f) {
+        u->cb = EL2Q_USB_CB_FAULT;
+        u->cb_esr = f;
+        u->cb_at = EL2Q_USB_SMMU_BASE + SMMU_IDR1;
+        return;
+    }
+    u->id1 = (uint32_t)word;
+    unsigned shift = (u->id1 & IDR1_PAGESIZE) ? 16 : 12;
+    uint64_t numpage = 1ull << ((u->id1 >> 28 & 7) + 1);
+    uint64_t gr1 = EL2Q_USB_SMMU_BASE + (1ull << shift);
+    uint64_t page = (numpage + u->cb_index) << shift;
+    u->cb_page = EL2Q_USB_SMMU_BASE + page;
+    if (u->cb_index >= (u->id1 & 0xff) || page + (1ull << shift) > EL2Q_USB_SMMU_SIZE) {
+        u->cb = EL2Q_USB_CB_OUT_OF_RANGE;
+        return;
+    }
+    if (hw->mapped(hw->ctx, gr1) || hw->mapped(hw->ctx, gr1 + SMMU_GR1_CBA2R(u->cb_index)) ||
+        hw->mapped(hw->ctx, u->cb_page)) {
+        u->cb = EL2Q_USB_CB_UNMAPPED;
+        return;
+    }
+    const uint64_t at[] = {gr1 + SMMU_GR1_CBAR(u->cb_index), gr1 + SMMU_GR1_CBA2R(u->cb_index),
+                           u->cb_page + CB_SCTLR, u->cb_page + CB_TCR, u->cb_page + CB_TCR2,
+                           u->cb_page + CB_TTBR0, u->cb_page + CB_TTBR0 + 4,
+                           u->cb_page + CB_MAIR0, u->cb_page + CB_MAIR1};
+    uint32_t value[sizeof at / sizeof at[0]] = {0};
+    for (unsigned i = 0; i < sizeof at / sizeof at[0]; i++) {
+        f = hw->read32(hw->ctx, at[i], &word);
+        if (f) {
+            u->cb = EL2Q_USB_CB_FAULT;
+            u->cb_esr = f;
+            u->cb_at = at[i];
+            break;
+        }
+        value[i] = (uint32_t)word;
+        u->cb_words = i + 1;
+    }
+    u->cbar = value[0];
+    u->cba2r = value[1];
+    u->cb_sctlr = value[2];
+    u->cb_tcr = value[3];
+    u->cb_tcr2 = value[4];
+    u->cb_ttbr0 = value[5] | (uint64_t)value[6] << 32;
+    u->cb_mair0 = value[7];
+    u->cb_mair1 = value[8];
+    if (u->cb != EL2Q_USB_CB_FAULT) u->cb = EL2Q_USB_CB_READ;
+}
 
 void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
 {
     u->smmu = EL2Q_USB_SMMU_UNMAPPED;
     u->scr0 = u->idr0 = u->smr = u->s2cr = u->group = u->smmu_words = 0;
     u->smmu_esr = 0;
+    u->cb = EL2Q_USB_CB_NOT_TRIED;
+    u->cb_index = u->id1 = u->cbar = u->cba2r = u->cb_words = 0;
+    u->cb_sctlr = u->cb_tcr = u->cb_tcr2 = u->cb_mair0 = u->cb_mair1 = 0;
+    u->cb_page = u->cb_ttbr0 = u->cb_esr = u->cb_at = 0;
     if (!hw || !hw->mapped || !hw->read32) return;
     /* sCR0, IDR0, the SMRs and the S2CRs all lie in the first 4 KiB of the
      * global register space: S2CR(254), the last there can be, ends it. */
@@ -151,6 +222,7 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
         u->s2cr = s2cr;
         u->group = n;
         u->smmu = EL2Q_USB_SMMU_MATCH;
+        read_bank(u, hw);
         return;
     }
 #undef SMMU_READ
@@ -175,6 +247,13 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
  * (the last five only when a read was attempted), then with "usb-smmu"
  *   SMMU SCR0 <w> IDR0 <w>
  *   SMMU STREAM 820 <MATCH SMR <n> <w> S2CR <w>|NO MATCH|UNMAPPED|NOT READ: ALL ONES|FAULT ESR <e>>
+ * and after a match, its context bank:
+ *   SMMU CB <NOT TRANSLATED|NOT READ: OUT OF RANGE|NOT READ: UNMAPPED|FAULT AT <a> ESR <e>>
+ * or, when its words were read (FAULT also prints the ones read before it):
+ *   SMMU ID1 <w> CB <nn> AT <a>
+ *   SMMU CB<nn> CBAR <w> CBA2R <w> SCTLR <w>
+ *   SMMU CB<nn> TCR <w> TCR2 <w>
+ *   SMMU CB<nn> TTBR0 <16 hex> MAIR0 <w> MAIR1 <w>
  * and last
  *   USB SERROR <PENDING|NONE>
  * <w> is eight hex digits, or UNMAPPED, FAULT or NOT READ for a word that
@@ -262,6 +341,47 @@ static unsigned core_lines(const struct el2q_usb_phase *p, unsigned index, struc
     return count;
 }
 
+static unsigned cb_lines(const struct el2q_usb *u, unsigned index, struct lbuf *b)
+{
+    if (u->cb == EL2Q_USB_CB_NOT_TRIED) return 0;
+    int words = u->cb == EL2Q_USB_CB_READ || (u->cb == EL2Q_USB_CB_FAULT && u->cb_words);
+    unsigned count = 1 + (words ? 4 : 0) - (u->cb == EL2Q_USB_CB_READ);
+    unsigned w = u->cb_words;
+    char cb[] = {'C', 'B', "0123456789ABCDEF"[u->cb_index >> 4 & 15], "0123456789ABCDEF"[u->cb_index & 15], 0};
+    if (u->cb != EL2Q_USB_CB_READ) {
+        if (index == 0) {
+            put_s(b, "SMMU CB ");
+            if (u->cb == EL2Q_USB_CB_NOT_TRANSLATED) put_s(b, "NOT TRANSLATED");
+            else if (u->cb == EL2Q_USB_CB_OUT_OF_RANGE) put_s(b, "NOT READ: OUT OF RANGE");
+            else if (u->cb == EL2Q_USB_CB_UNMAPPED) put_s(b, "NOT READ: UNMAPPED");
+            else { put_s(b, "FAULT AT "); put_hex(b, u->cb_at, 8); put_s(b, " ESR "); put_hex(b, u->cb_esr, 8); }
+            return count;
+        }
+        index--;
+    }
+    if (!words) return count;
+    if (index == 0) {
+        put_s(b, "SMMU ID1 "); put_hex(b, u->id1, 8);
+        put_s(b, " "); put_s(b, cb); put_s(b, " AT "); put_hex(b, u->cb_page, 8);
+    } else if (index == 1) {
+        put_s(b, "SMMU "); put_s(b, cb);
+        put_word(b, " CBAR ", w > 0 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->cbar);
+        put_word(b, " CBA2R ", w > 1 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->cba2r);
+        put_word(b, " SCTLR ", w > 2 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->cb_sctlr);
+    } else if (index == 2) {
+        put_s(b, "SMMU "); put_s(b, cb);
+        put_word(b, " TCR ", w > 3 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->cb_tcr);
+        put_word(b, " TCR2 ", w > 4 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->cb_tcr2);
+    } else if (index == 3) {
+        put_s(b, "SMMU "); put_s(b, cb); put_s(b, " TTBR0 ");
+        if (w > 6) put_hex(b, u->cb_ttbr0, 16);
+        else put_s(b, "NOT READ");
+        put_word(b, " MAIR0 ", w > 7 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->cb_mair0);
+        put_word(b, " MAIR1 ", w > 8 ? EL2Q_USB_READ_OK : EL2Q_USB_NOT_READ, u->cb_mair1);
+    }
+    return count;
+}
+
 static unsigned smmu_lines(const struct el2q_usb *u, unsigned index, struct lbuf *b)
 {
     if (u->smmu == EL2Q_USB_SMMU_NOT_ASKED) return 0;
@@ -294,6 +414,8 @@ void el2q_usb_line(const struct el2q_usb *u, unsigned index, char out[EL2Q_USB_L
     if (index < (n = core_lines(&u->after, index, &b))) return;
     index -= n;
     if (index < (n = smmu_lines(u, index, &b))) return;
+    index -= n;
+    if (index < (n = cb_lines(u, index, &b))) return;
     index -= n;
     if (index == 0) put_s(&b, u->isr & (1u << 8) ? "USB SERROR PENDING" : "USB SERROR NONE");
 }

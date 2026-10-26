@@ -13,10 +13,11 @@
 #include "vhe.h"
 #include "usbprobe.h"
 
-#define EL2Q_VERSION      5     /* 2: counter rate, GICv3 virtualization, SMBIOS;
+#define EL2Q_VERSION      6     /* 2: counter rate, GICv3 virtualization, SMBIOS;
                                    3: the tsens read (option "thermal");
                                    4: the VHE exit (option "exit-vhe");
-                                   5: the USB read (options "usb", "usb-smmu") */
+                                   5: the USB read (options "usb", "usb-smmu");
+                                   6: "usb-smmu" also reads the matched context bank */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4

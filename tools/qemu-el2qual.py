@@ -350,12 +350,28 @@ def check_usb(lines, expect):
             problems.append(f'the controller was read although power after ExitBootServices was '
                             f'{power.get("A")}: {core}')
     smmu = [line for line in lines if line.startswith('SMMU ')]
+    smmu = [line for line in smmu if not line.startswith(('SMMU CB', 'SMMU ID1'))]
     if expect.get('smmu') and len(smmu) != 2:
         problems.append(f'usb-smmu asked but {len(smmu)} SMMU lines')
     if not expect.get('smmu') and smmu:
         problems.append('SMMU lines although usb-smmu was not asked')
     if any(line.startswith('SMMU STREAM 820 MATCH SMR 00 FFFFFFFF') for line in smmu):
         problems.append('an all-ones SMMU read was taken as a stream match')
+    # The context bank: read only after a match, and only through a
+    # translating S2CR (TYPE, bits 17:16, zero).
+    match = next((m for line in lines for m in [re.match(
+        r'^SMMU STREAM 820 MATCH SMR [0-9A-F]{2} [0-9A-F]{8} S2CR ([0-9A-F]{8})$', line)] if m), None)
+    bank = [line for line in lines if line.startswith(('SMMU CB', 'SMMU ID1'))]
+    if not match and bank:
+        problems.append(f'context-bank lines without a stream match: {bank[0]}')
+    if match:
+        translate = (int(match[1], 16) >> 16) & 3 == 0
+        if not bank:
+            problems.append('a stream match without its context-bank lines')
+        elif not translate and bank != ['SMMU CB NOT TRANSLATED']:
+            problems.append(f'a bypassing or faulting S2CR, yet the bank was read: {bank}')
+        elif translate and 'SMMU CB NOT TRANSLATED' in bank:
+            problems.append('a translating S2CR reported as not translated')
     if 'USB SERROR NONE' not in lines:
         problems.append('the USB read left an SError pending, or no SERROR line')
     return problems
@@ -589,6 +605,22 @@ def self_test():
                     expect, False)
                 expect_result(f'{name} SMMU lines missing', good.replace('SMMU SCR0', 'XMMU SCR0'),
                               expect, False)
+                expect_result(f'{name} bank lines without a match', good.replace(
+                    'USB SERROR NONE', 'SMMU CB NOT TRANSLATED\nUSB SERROR NONE'), expect, False)
+                matched = good.replace('SMMU SCR0 FFFFFFFF IDR0 FFFFFFFF', 'SMMU SCR0 00240406 IDR0 7C017ED4')
+                bank = ('SMMU STREAM 820 MATCH SMR 06 80000820 S2CR 00000006\n'
+                        'SMMU ID1 60000020 CB06 AT 15086000\n'
+                        'SMMU CB06 CBAR 00010100 CBA2R 00000001 SCTLR 00001067\n'
+                        'SMMU CB06 TCR 80803520 TCR2 00000005\n'
+                        'SMMU CB06 TTBR0 00060000A1B2C000 MAIR0 0004FF44 MAIR1 00000000')
+                matched = matched.replace('SMMU STREAM 820 NOT READ: ALL ONES', bank)
+                expect_result(f'{name} a matched, translated, read bank', matched, expect, True)
+                expect_result(f'{name} a match without its bank', matched.replace(
+                    bank, bank.split('\n')[0]), expect, False)
+                expect_result(f'{name} a bypass S2CR with a bank read', matched.replace(
+                    'S2CR 00000006', 'S2CR 00010006'), expect, False)
+                expect_result(f'{name} a translating S2CR called not translated', matched.replace(
+                    bank, bank.split('\n')[0] + '\nSMMU CB NOT TRANSLATED'), expect, False)
             else:
                 expect_result(f'{name} SMMU unasked', good.replace(
                     'USB SERROR NONE', 'SMMU SCR0 0 IDR0 0\nSMMU STREAM 820 NO MATCH\nUSB SERROR NONE'),

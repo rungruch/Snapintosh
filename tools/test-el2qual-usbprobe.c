@@ -240,6 +240,108 @@ static void test_smmu(void)
     CHECK(u.smmu == EL2Q_USB_SMMU_UNMAPPED && hw_state.nlog == 0);
 }
 
+/* The gaokun3's match (run 17): group 6, S2CR 00000006, translate through
+ * bank 6. ID1 here: 4 KiB pages, NUMPAGENDXB 6 (128 pages before the
+ * banks), 32 banks, so bank 6's page is at 0x15086000 and GR1 at 0x15001000. */
+#define GR1(off) SMMU(0x1000 + (off))
+#define CB6(off) SMMU(0x86000 + (off))
+static void bank_fixture(void)
+{
+    fake_reset();
+    set(SMMU(0), 0x00240406);
+    set(SMMU(0x20), 0x7c017ed4);
+    set(SMMU(0x24), (6u << 28) | 0x20);
+    set(SMMU(0x818), 0x80000820);
+    set(SMMU(0xc18), 0x00000006);
+    set(GR1(0x18), 0x00010100);
+    set(GR1(0x818), 0x00000001);
+    set(CB6(0x00), 0x00001067);
+    set(CB6(0x30), 0x80803520);
+    set(CB6(0x10), 0x00000005);
+    set(CB6(0x20), 0xa1b2c000);
+    set(CB6(0x24), 0x00060000);
+    set(CB6(0x38), 0x0004ff44);
+    set(CB6(0x3c), 0x00000000);
+}
+
+static int bank_reads(void)
+{
+    int n = 0;
+    for (unsigned i = 0; i < hw_state.nlog; i++)
+        n += hw_state.log[i] >= SMMU(0x1000) && hw_state.log[i] != SMMU(0x24);
+    return n;
+}
+
+static void test_bank(void)
+{
+    struct el2q_usb u;
+    memset(&u, 0, sizeof u);
+
+    bank_fixture();
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.smmu == EL2Q_USB_SMMU_MATCH && u.group == 6 && u.cb == EL2Q_USB_CB_READ);
+    CHECK(u.cb_index == 6 && u.cb_page == SMMU(0x86000) && u.cb_words == 9);
+    CHECK(u.cbar == 0x00010100 && u.cba2r == 1 && u.cb_sctlr == 0x00001067);
+    CHECK(u.cb_tcr == 0x80803520 && u.cb_tcr2 == 5 && u.cb_ttbr0 == 0x00060000a1b2c000ull);
+    CHECK(u.cb_mair0 == 0x0004ff44 && u.cb_mair1 == 0);
+
+    /* Bypass or fault in S2CR: no bank is used, none is read. */
+    bank_fixture();
+    set(SMMU(0xc18), 0x00010006);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_NOT_TRANSLATED && bank_reads() == 0);
+    bank_fixture();
+    set(SMMU(0xc18), 0x00020006);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_NOT_TRANSLATED && bank_reads() == 0);
+
+    /* A bank past NUMCB, or a page past the SMMU's 1 MiB window. */
+    bank_fixture();
+    set(SMMU(0x24), (6u << 28) | 6);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_OUT_OF_RANGE && bank_reads() == 0);
+    bank_fixture();
+    set(SMMU(0x24), (1u << 31) | (7u << 28) | 0x20);        /* 64 KiB pages, 256 before the banks */
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_OUT_OF_RANGE && bank_reads() == 0);
+
+    /* 64 KiB pages that do fit: bank 6 at (2 + 6) * 64 KiB. */
+    bank_fixture();
+    set(SMMU(0x24), (1u << 31) | (0u << 28) | 0x20);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_READ && u.cb_page == SMMU(8u << 16));
+
+    /* The bank's page unmapped: nothing of it is read. */
+    bank_fixture();
+    hw_state.unmapped[hw_state.nunmapped++] = CB6(0);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_UNMAPPED && bank_reads() == 0);
+
+    /* A fault in TTBR0's upper half: the words before it kept, after it not read. */
+    bank_fixture();
+    hw_state.fault[hw_state.nfault++] = CB6(0x24);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_FAULT && u.cb_words == 6 && u.cb_at == CB6(0x24));
+    CHECK(u.cb_tcr2 == 5 && u.cb_mair0 == 0);
+    char l[40][EL2Q_USB_LINE_COLS + 1];
+    unsigned n = 0;
+    u.before.ran = 1;
+    for (; n < 40; n++) { el2q_usb_line(&u, n, l[n]); if (!l[n][0]) break; }
+    int seen = 0;
+    for (unsigned i = 0; i < n; i++) {
+        seen += !strcmp(l[i], "SMMU CB FAULT AT 15086024 ESR 96000010");
+        seen += !strcmp(l[i], "SMMU CB06 TTBR0 NOT READ MAIR0 NOT READ MAIR1 NOT READ");
+        seen += !strcmp(l[i], "SMMU CB06 TCR 80803520 TCR2 00000005");
+    }
+    CHECK(seen == 3);
+
+    /* IDR1 itself faulting. */
+    bank_fixture();
+    hw_state.fault[hw_state.nfault++] = SMMU(0x24);
+    el2q_usb_smmu(&u, &hw);
+    CHECK(u.cb == EL2Q_USB_CB_FAULT && u.cb_words == 0 && u.cb_at == SMMU(0x24));
+}
+
 static unsigned lines(const struct el2q_usb *u, char out[][EL2Q_USB_LINE_COLS + 1], unsigned max)
 {
     unsigned n = 0;
@@ -317,6 +419,24 @@ static void test_lines(void)
     el2q_usb_smmu(&u, &hw);
     n = lines(&u, l, 40);
     CHECK(!strcmp(l[11], "SMMU STREAM 820 NOT READ: ALL ONES"));
+
+    /* A full bank read: its four lines after the stream line. */
+    memset(&u, 0, sizeof u);
+    bank_fixture();
+    el2q_usb_gcc(&u.after, &hw);
+    el2q_usb_smmu(&u, &hw);
+    n = lines(&u, l, 40);
+    CHECK(n == 4 + 1 + 2 + 4 + 1);
+    CHECK(!strcmp(l[6], "SMMU STREAM 820 MATCH SMR 06 80000820 S2CR 00000006"));
+    CHECK(!strcmp(l[7], "SMMU ID1 60000020 CB06 AT 15086000"));
+    CHECK(!strcmp(l[8], "SMMU CB06 CBAR 00010100 CBA2R 00000001 SCTLR 00001067"));
+    CHECK(!strcmp(l[9], "SMMU CB06 TCR 80803520 TCR2 00000005"));
+    CHECK(!strcmp(l[10], "SMMU CB06 TTBR0 00060000A1B2C000 MAIR0 0004FF44 MAIR1 00000000"));
+    CHECK(!strcmp(l[11], "USB SERROR NONE"));
+    set(SMMU(0xc18), 0x00010006);
+    el2q_usb_smmu(&u, &hw);
+    n = lines(&u, l, 40);
+    CHECK(!strcmp(l[7], "SMMU CB NOT TRANSLATED") && !strcmp(l[8], "USB SERROR NONE"));
 }
 
 /* The lines reach the screen report, near the top, with the power line in
@@ -349,6 +469,7 @@ unsigned test_usbprobe(void)
 {
     test_gate();
     test_smmu();
+    test_bank();
     test_lines();
     test_report();
     return checks;

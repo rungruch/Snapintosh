@@ -41,8 +41,9 @@
  *               ExitBootServices; after it, and only if powered and
  *               clocked, the controller's own state (usbprobe.c). Read
  *               only. Off by default.
- *   usb-smmu    "usb", then also apps_smmu's state for USB0's stream.
- *               Off by default.
+ *   usb-smmu    "usb", then also apps_smmu's state for USB0's stream and,
+ *               when it translates, the context bank it names. Off by
+ *               default.
  *
  * With no GOP mode that has a framebuffer address, el2qual draws on the
  * device tree's /chosen simple-framebuffer if the firmware's memory map
