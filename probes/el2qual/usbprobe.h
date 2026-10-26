@@ -58,7 +58,9 @@ extern const uint64_t el2q_usb_word_address[EL2Q_USB_WORD_COUNT];
 
 #define EL2Q_USB_SMMU_BASE   0x15000000ull
 #define EL2Q_USB_STREAM      0x820u      /* USB0 on apps_smmu (device tree) */
-#define EL2Q_USB_SMR_LIMIT   128u        /* SMMUv2 allows at most 128 stream match groups */
+/* IDR0.NUMSMRG is 8 bits, and Linux uses it as the group count with no other
+ * limit; the gaokun3's apps_smmu reports 212 (VERIFIED, el2qual run 17). */
+#define EL2Q_USB_SMR_LIMIT   255u
 
 /* One word's outcome. */
 enum el2q_usb_read { EL2Q_USB_NOT_READ, EL2Q_USB_READ_OK, EL2Q_USB_UNMAPPED, EL2Q_USB_FAULT };

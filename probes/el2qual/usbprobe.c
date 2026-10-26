@@ -113,8 +113,9 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
     u->smmu_esr = 0;
     if (!hw || !hw->mapped || !hw->read32) return;
     /* sCR0, IDR0, the SMRs and the S2CRs all lie in the first 4 KiB of the
-     * global register space, one page, so one mapping check covers them. */
-    if (hw->mapped(hw->ctx, EL2Q_USB_SMMU_BASE) || hw->mapped(hw->ctx, EL2Q_USB_SMMU_BASE + SMMU_S2CR(127)))
+     * global register space: S2CR(254), the last there can be, ends it. */
+    if (hw->mapped(hw->ctx, EL2Q_USB_SMMU_BASE) ||
+        hw->mapped(hw->ctx, EL2Q_USB_SMMU_BASE + SMMU_S2CR(EL2Q_USB_SMR_LIMIT - 1)))
         return;
     uint64_t word = 0;
 #define SMMU_READ(offset, dest) do { \

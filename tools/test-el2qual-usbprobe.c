@@ -211,7 +211,7 @@ static void test_smmu(void)
     el2q_usb_smmu(&u, &hw);
     CHECK(u.smmu == EL2Q_USB_SMMU_MATCH && u.group == 1 && u.s2cr == 0x00010400);
 
-    /* At most 128 groups, whatever IDR0 claims. */
+    /* NUMSMRG's whole 8-bit range is searched (the gaokun3 reports 212). */
     fake_reset();
     set(SMMU(0x20), 0xff);
     el2q_usb_smmu(&u, &hw);
