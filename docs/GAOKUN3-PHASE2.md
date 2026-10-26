@@ -311,7 +311,8 @@ q1n1 has no transport to the Mac yet.
 
 ### Next
 
-- **The USB link to the Mac** ([run 13](#run-13-2026-10-26-usb-inventory)). It must be built on q1n1's own
+- **The USB link to the Mac** ([run 13](#run-13-2026-10-26-usb-inventory); study:
+  [GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md)). It must be built on q1n1's own
   DWC3 device-mode driver, from a controller the firmware leaves in host
   mode.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
