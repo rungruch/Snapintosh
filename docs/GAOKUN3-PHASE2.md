@@ -4,8 +4,9 @@ Status, 2026-10-26: **started.** Phase 0C accepted Route B on 2026-10-26
 ([decision](GAOKUN3-PHASE0C.md#decision)). Phase 2's goal is q1n1 running at
 EL2 on the gaokun3 and serving its proxy over USB. Its first piece, the VHE
 hand-off below, passed on the gaokun3 in el2qual
-([runs 11 and 12](#runs-11-and-12-2026-10-26)). q1n1 itself is not changed
-yet.
+([runs 11 and 12](#runs-11-and-12-2026-10-26)), and q1n1 now carries it
+behind a build define and an option ([below](#in-q1n1)), tested on the host
+and in QEMU but not yet run on the gaokun3.
 
 ## VHE hand-off
 
@@ -113,9 +114,8 @@ default, and without it el2qual behaves exactly as before.
   left as PSCI hands them over.
 - **The switch is single-CPU.** It must run before any secondary starts, as
   el2qual does.
-- **q1n1 is not changed yet.** No q1n1 checkout exists beside this
-  repository (`../q1n1`, README). `vhe.{h,c}` and `el2q_exit_vhe` are ready
-  to be adopted there, now that the gaokun3 run has passed.
+- **q1n1 has not run it on the gaokun3.** Its copy ([below](#in-q1n1)) is
+  checked on the host and in QEMU only.
 
 ### Runs 11 and 12, 2026-10-26
 
@@ -169,12 +169,44 @@ from the photographed numbers, and the pair is now a host fixture.
 - It does not show q1n1 or the monitor running in that state. Neither has
   run on the gaokun3.
 
+### In q1n1
+
+q1n1 (`../q1n1`, cloned at `5b440d4`) carries the same hand-off. Its
+`docs/GAOKUN3-VHE-EXIT.md` has the details.
+
+- **`vhe.{h,c}`** are verbatim copies of this repository's (commit
+  `04de4f8`).
+- **`platform/uefi/vhe-exit.S`** has the switch, `q1n1_exit_vhe`, which is
+  el2qual's sequence.
+- **`vhe_exit()` in `main.c`** runs it at the top of `q1n1_main()`, before
+  the proxy or the foothold starts.
+- **It is opt-in twice:**
+  - it is compiled only with `Q1N1_DEFINES=-DQ1N1_VHE_EXIT`, into its own
+    `OUT`;
+  - it runs only with `--exit-vhe`.
+
+  The default `q1n1.efi` and all four stage binaries equal the baseline
+  build byte for byte, apart from the PE TimeDateStamp, which differs
+  between any two builds. The stage pins here therefore stay valid.
+
+| Check (`python3 tools/test-q1n1-vhe-exit.py --qemu`, in q1n1) | Result, 2026-10-26 |
+| --- | --- |
+| Switch order | PASS: the required order, and 14 reordered copies rejected |
+| Plan against the gaokun3's measured state (ASan+UBSan) | PASS |
+| Default build carries no exit | PASS |
+| QEMU foothold, `--emulate-vhe --exit-vhe` | PASS: `VHE EXIT DONE PLAN MATCH`, `HCR` `0x408000000` to `0x80000000`, the foothold keeps drawing |
+| QEMU foothold, `--exit-vhe` alone | PASS: `NOT-VHE` |
+| QEMU, default build given `--exit-vhe` | PASS: ignored |
+| QEMU `--uart-proxy` after the exit | PASS: the proxy answers, and a chainloaded stage runs at EL2 |
+| gaokun3 | NOT RUN |
+
+The q1n1 change is uncommitted in that checkout and pushed nowhere.
+
 ### Next
 
-- **Adopt the hand-off in q1n1.** This needs a q1n1 checkout beside this
-  repository. Take `vhe.{h,c}` as they are and `el2q_exit_vhe`'s sequence,
-  and run the exit at q1n1's EL2 entry, before its own setup reads any
-  E2H-dependent register.
+- **Run q1n1's `--el2 --exit-vhe` foothold on the gaokun3.** It is the only
+  q1n1 mode meaningful there today. It needs a stick that boots the
+  `-DQ1N1_VHE_EXIT` `q1n1.efi` under slbounce, as el2qual's stick does.
 - **The rest of Phase 2:**
   - USB device mode on DWC3 `a600000.usb`, including whether q1n1 must set
     the Type-C role through the EC itself;
