@@ -266,18 +266,21 @@ None of this is designed yet. It is the next host-side study.
 - **The USB link to the Mac** (below). It must be built on q1n1's own
   DWC3 device-mode driver, from a controller the firmware leaves in host
   mode.
-- **q1n1's `--el2 --exit-vhe` foothold on the gaokun3: blocked.** q1n1
-  draws only on a GOP mode with a framebuffer address, and the gaokun3 has
-  none (runs 2 and 3), so it would stop before ExitBootServices, showing
-  nothing. It first needs el2qual's device-tree simple-framebuffer
-  fallback, opt-in:
-  - the framebuffer checked against the firmware memory map;
-  - every draw cleaned to the point of coherency, since nothing says how
-    firmware maps that buffer. q1n1's drawing code does no cleaning
-    today.
-- **The rest of Phase 2:**
-  - USB device mode on DWC3 `a600000.usb`, including whether q1n1 must set
-    the Type-C role through the EC itself;
-  - the board adapter behind `HostRuntime`;
-  - the acceptance run: the proxy answering over NCM, and `probes/run.py
-    idregs` and `tgran16` matching Phase 0A.
+- **q1n1's `--el2 --exit-vhe` foothold on the gaokun3: unblocked on the
+  host.** q1n1 drew only on a GOP mode with a framebuffer address, and the
+  gaokun3 has none.
+  - **The fix:** with `-DQ1N1_DT_FRAMEBUFFER` it falls back to the device
+    tree's `/chosen` simple-framebuffer, accepted only when the node is
+    self-consistent and inside one Reserved region of the memory map. Every
+    draw on it is cleaned to the point of coherency. `simplefb.c` is el2qual's
+    `firmware.c` code, function for function. Details: q1n1
+    `docs/GAOKUN3-DT-FRAMEBUFFER.md`.
+  - **Evidence:**
+    - the default build is byte-identical apart from the PE timestamp;
+    - 55 host checks pass, and 5 broken variants fail them;
+    - on QEMU, the full gaokun3 path (no GOP address, the fallback, the VHE
+      exit, the foothold) draws correctly, confirmed by a screendump.
+  - **Not shown by QEMU:** whether the cleaning is needed or enough, since
+    TCG is coherent. Not run on the gaokun3.
+  - **Next:** a stick that boots the `-DQ1N1_VHE_EXIT -DQ1N1_DT_FRAMEBUFFER`
+    `q1n1.efi` with `--el2 --exit-vhe` under slbounce.
