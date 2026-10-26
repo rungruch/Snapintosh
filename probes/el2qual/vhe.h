@@ -12,10 +12,11 @@
  *
  * Layouts are from the Arm ARM's register descriptions (TCR_EL2, SCTLR_EL2,
  * CPTR_EL2 and CNTHCTL_EL2, each for HCR_EL2.E2H == 0 and == 1). The state
- * slbounce leaves on the gaokun3 is partly measured: HCR_EL2 0x488000000 and
- * SCTLR_EL2 0x30C5183D (VERIFIED, el2qual runs 8-10). Its TCR_EL2, TTBR0_EL2,
- * CPTR_EL2 and CNTHCTL_EL2 are UNMEASURED, so the exit plan refuses anything
- * it does not recognise rather than guessing. */
+ * slbounce leaves on the gaokun3 (firmware 2.18) is measured: HCR_EL2
+ * 0x488000000, SCTLR_EL2 0x30C5183D, TCR_EL2 0x280803518, CPTR_EL2 0x300000
+ * and CNTHCTL_EL2 0x3 (VERIFIED, el2qual runs 11 and 12), and the plan
+ * accepts it. Another firmware or slbounce build may differ, so the plan
+ * still refuses anything it does not recognise rather than guessing. */
 #ifndef EL2QUAL_VHE_H
 #define EL2QUAL_VHE_H
 

@@ -44,6 +44,19 @@ unsigned test_vhe(void)
     CHECK(out.ttbr0 == 0xbffff000ull);
     CHECK(out.cptr == EL2Q_VHE_EXIT_CPTR && out.cnthctl == EL2Q_VHE_EXIT_CNTHCTL);
 
+    /* slbounce's whole entry state as the gaokun3 reported it (VERIFIED,
+     * runs 11 and 12, 2026-10-26: VHEIN/VHEIN2), and the registers it read
+     * back after the switch (VHEOUT/VHEOUT2). The plan must reproduce what
+     * the hardware ended up holding. TCR: 40-bit VA (T0SZ 24), 4K, inner
+     * shareable write-back walks, IPS 40-bit, TTBR1 walks off. */
+    in = (struct el2q_vhe_regs){
+        .hcr = 0x488000000ull, .sctlr = 0x30c5183dull, .tcr = 0x280803518ull,
+        .ttbr0 = 0x9f519000ull, .cptr = 0x300000ull, .cnthctl = 3,
+    };
+    CHECK(el2q_vhe_exit_plan(&in, &out) == EL2Q_VHE_EXIT_DONE);
+    CHECK(out.hcr == 0x80000000ull && out.sctlr == 0x30c5183dull && out.tcr == 0x80823518ull);
+    CHECK(out.ttbr0 == 0x9f519000ull && out.cptr == 0x33ffull && out.cnthctl == 3);
+
     /* Round trips through both conversions: granules, PS, TBI, HA/HD, HPD. */
     static const uint64_t walks[] = {
         0x80853510ull,                               /* 4K, PS 5 */
@@ -137,6 +150,22 @@ unsigned test_vhe(void)
     r.vhe_out.tcr ^= 1;                              /* the CPU kept something else */
     el2q_vhe_line(&r, 0, line);
     CHECK(!strcmp(line, "VHEX DONE PLAN=DIFF"));
+    /* On screen too: the gaokun3 has no serial port. */
+    static struct el2q_text text;
+    r.vhe_out = r.vhe_plan;
+    el2q_report(&r, &text);
+    unsigned found = 0;
+    for (unsigned i = 0; i < text.count; i++) {
+        found += !strcmp(text.line[i], "VHE EXIT .. DONE  HCR_EL2 0000000080000000");
+        found += !strcmp(text.line[i], "VHEIN HCR=488000000 SCTLR=30C5183D TCR=580903510");
+        found += !strcmp(text.line[i], "VHEIN2 TTBR0=BFFFF000 CPTR=33FF CNTHCTL=3");
+        found += !strcmp(text.line[i], "VHEOUT HCR=80000000 SCTLR=30C5183D TCR=80853510");
+        found += !strcmp(text.line[i], "VHEOUT2 TTBR0=BFFFF000 CPTR=33FF CNTHCTL=3");
+    }
+    CHECK(found == 5);
+    r.vhe_exit = EL2Q_VHE_EXIT_NOT_ASKED;
+    el2q_report(&r, &text);
+    for (unsigned i = 0; i < text.count; i++) CHECK(strncmp(text.line[i], "VHE", 3));
     r.vhe_exit = EL2Q_VHE_EXIT_TTBR1;
     el2q_vhe_line(&r, 0, line);
     CHECK(!strcmp(line, "VHEX REFUSED-TTBR1 PLAN=-"));

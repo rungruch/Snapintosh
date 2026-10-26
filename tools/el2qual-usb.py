@@ -7,6 +7,7 @@
   python3 tools/el2qual-usb.py stage2  --systemd-boot F --slbounce F --tcblaunch F
                                        (--dtb F | --always-switch)
   python3 tools/el2qual-usb.py thermal (the same inputs as stage2)
+  python3 tools/el2qual-usb.py vhe-exit (the same inputs as stage2)
 
 This only builds a directory tree, by default build/el2qual-usb/<stage>/.
 It never writes to a disk or a mounted volume: copying the tree onto a
@@ -21,6 +22,8 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
   stage2   stage1b plus slbounce and tcblaunch.exe: the EL2 measurement.
   thermal  stage2's files with one entry only: the Phase 1 tsens read
            (load option "thermal"; docs/GAOKUN3-PHASE1-GUARDS.md).
+  vhe-exit stage2's files with the two Phase 2 VHE-exit entries only (load
+           option "exit-vhe"; docs/GAOKUN3-PHASE2.md).
 
 Every input is checked before anything is written (PE machine and
 subsystem, FDT header), and a manifest records the SHA-256 of each file
@@ -66,7 +69,17 @@ THERMAL_ENTRIES = [
     ('el2qual-5-thermal.conf', 'el2qual 5: tsens read only (boot CPU, no PAuth)',
      'nopac nosmp thermal'),
 ]
-STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRIES}
+
+# The Phase 2 VHE exit (docs/GAOKUN3-PHASE2.md), in order. The first adds
+# only the switch to steps run 9 cleared (boot CPU, no PAuth); the second
+# measures everything in non-VHE EL2, PAuth and every CPU via PSCI. Only
+# these two, so no stage2 entry can be picked by mistake.
+VHE_EXIT_ENTRIES = [
+    ('el2qual-6-vhe-exit.conf', 'el2qual 6: VHE exit, boot CPU, no PAuth', 'nopac nosmp exit-vhe'),
+    ('el2qual-7-vhe-exit-full.conf', 'el2qual 7: VHE exit, all CPUs and PAuth', 'exit-vhe'),
+]
+STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRIES,
+                 'vhe-exit': VHE_EXIT_ENTRIES}
 
 
 class LayoutError(Exception):
@@ -137,9 +150,9 @@ def entry_text(title, options, dtb_name):
 def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=None,
                  dtb=None, always_switch=False, replace=False):
     """Validate every input, then write the tree; returns the manifest."""
-    if stage not in ('stage1', 'stage1b', 'stage2', 'thermal'):
+    if stage not in ('stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit'):
         raise LayoutError(f'unknown stage {stage}')
-    switches = stage in ('stage2', 'thermal')
+    switches = stage in ('stage2', 'thermal', 'vhe-exit')
     require_pe(efi, 'el2qual', {SUBSYSTEM_EFI_APPLICATION})
     if stage != 'stage1':
         if not systemd_boot:
@@ -207,7 +220,7 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('stage', choices=['stage1', 'stage1b', 'stage2', 'thermal'])
+    ap.add_argument('stage', choices=['stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit'])
     ap.add_argument('--out', help='destination directory (default build/el2qual-usb/<stage>)')
     ap.add_argument('--efi', help='a built el2qual.efi (default: build it now)')
     ap.add_argument('--llvm', help='passed to probes/el2qual/build.py')

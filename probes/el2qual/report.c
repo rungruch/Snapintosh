@@ -263,6 +263,16 @@ static void header(const struct el2q_run *r, struct el2q_text *t)
             put_s(&b, "  HCR_EL2 ");
             put_hex(&b, r->vhe_out.hcr, 16);
         }
+        /* The registers as found and as left. The gaokun3 has no serial
+         * port, so the screen is the only record of slbounce's TCR, TTBR0,
+         * CPTR and CNTHCTL, which nothing else measures. */
+        char regs[EL2Q_TEXT_COLS + 1];
+        for (unsigned i = 1;; i++) {
+            el2q_vhe_line(r, i, regs);
+            if (!regs[0]) break;
+            b = new_line(t, EL2Q_WHITE);
+            put_s(&b, regs);
+        }
     }
 
     enum el2q_color c = r->start_el == 2 ? EL2Q_WHITE

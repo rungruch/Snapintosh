@@ -143,6 +143,35 @@ class Layout(unittest.TestCase):
         self.refused('thermal needs --systemd-boot', stage='thermal', systemd_boot=None)
         self.refused('thermal needs --dtb, or --always-switch', stage='thermal', dtb=None)
 
+    def test_vhe_exit_stage_has_its_two_entries(self):
+        m = usb.build_layout('vhe-exit', self.out(), self.efi, self.sdboot, self.slb, self.tcb,
+                             self.dtb)
+        out = self.out()
+        self.assert_manifest_complete(out, m)
+        self.assertEqual(m['stage'], 'vhe-exit')
+        self.assertEqual((out / 'EFI/systemd/drivers/slbounceaa64.efi').read_bytes(),
+                         self.slb.read_bytes())
+        self.assertEqual((out / 'tcblaunch.exe').read_bytes(), self.tcb.read_bytes())
+        entries = sorted((out / 'loader/entries').iterdir())
+        self.assertEqual([e.name for e in entries],
+                         ['el2qual-6-vhe-exit.conf', 'el2qual-7-vhe-exit-full.conf'])
+        texts = [e.read_text() for e in entries]
+        self.assertIn('options nopac nosmp exit-vhe\n', texts[0])    # the switch alone first
+        self.assertIn('options exit-vhe\n', texts[1])
+        for text in texts:
+            self.assertIn('devicetree /dtb/gaokun3-el2.dtb\n', text)
+            self.assertNotIn('emulate-', text)                        # never the QEMU-only options
+        self.assertIn('default el2qual-6-vhe-exit.conf', (out / 'loader/loader.conf').read_text())
+        usb.build_layout('stage2', self.out('s2'), self.efi, self.sdboot, self.slb, self.tcb,
+                         self.dtb)
+        for e in (self.out('s2') / 'loader/entries').iterdir():
+            self.assertNotIn('exit-vhe', e.read_text())
+
+    def test_vhe_exit_stage_input_rules(self):
+        self.refused('vhe-exit needs --slbounce', stage='vhe-exit', slbounce=None)
+        self.refused('vhe-exit needs --systemd-boot', stage='vhe-exit', systemd_boot=None)
+        self.refused('vhe-exit needs --dtb, or --always-switch', stage='vhe-exit', dtb=None)
+
     def test_stage1b_has_no_slbounce(self):
         m = usb.build_layout('stage1b', self.out(), self.efi, self.sdboot, dtb=self.dtb)
         self.assertFalse(any('slbounce' in rel or 'tcblaunch' in rel for rel in m['files']))
