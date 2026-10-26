@@ -181,7 +181,8 @@ UART it stops before ExitBootServices and says why on the firmware console.
 python3 probes/el2qual/build.py            # build/el2qual/el2qual.efi
 python3 tools/test-el2qual.py              # report code, host
 python3 tools/qemu-el2qual.py              # max, max-vhe, max-nopauth, cortex-a76,
-                                           # max-rotated, max-dt-fb, max-no-fb
+                                           # max-rotated, max-dt-fb, max-no-fb, max-thermal,
+                                           # max-vhe-thermal, max-vhe-exit, max-exit-novhe
 ```
 
 `build.py` finds LLVM from `--llvm`, `SNAP_LLVM`, Homebrew, then `PATH`;
@@ -189,7 +190,10 @@ python3 tools/qemu-el2qual.py              # max, max-vhe, max-nopauth, cortex-a
 options: `serial` (also write to an SPCR PL011/SBSA UART), `poweroff` (PSCI
 `SYSTEM_OFF` at the end; QEMU), `nopac`, `nosmp`, `thermal` (since el2qual
 3: the SC8280XP tsens guard run read-only on the boot CPU,
-[GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md#el2-tsens-read)), and
+[GAOKUN3-PHASE1-GUARDS.md](GAOKUN3-PHASE1-GUARDS.md#el2-tsens-read)),
+`exit-vhe` (since el2qual 4: leave slbounce's `E2H|TGE` state for non-VHE
+EL2 before measuring, refused with a reason if the state is not one it
+recognises, [GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md#vhe-hand-off)), and
 four test-only options: `emulate-vhe` (recreates slbounce's `E2H|TGE` state on a machine
 that started at EL2), `emulate-rotated` (treats the firmware's GOP mode as
 having no framebuffer address), `emulate-no-fb` (treats every mode so) and

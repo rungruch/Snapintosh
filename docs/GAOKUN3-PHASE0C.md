@@ -187,8 +187,9 @@ Each check reports PASS, FAIL, SKIP or NOT RUN, with its evidence class.
    adds a profile, and builds with its gates off keep the A16 baseline
    unchanged (AGENTS.md rule 3).
 
-**What starts now.** Phase 2 (EL2 entry and the USB host link) may begin.
-It starts with host-first work on slbounce's VHE hand-off: `HCR_EL2 = E2H
+**What starts now.** Phase 2 (EL2 entry and the USB host link) may begin
+([GAOKUN3-PHASE2.md](GAOKUN3-PHASE2.md)). It starts with host-first work on
+slbounce's VHE hand-off: `HCR_EL2 = E2H
 | TGE`, with `VBAR_EL2` still at UEFI's vectors, while q1n1 and the monitor
 assume a non-VHE EL2. Hardware runs remain the owner's, supervised and
 under the Phase 1 guards. No Linux image is booted on the gaokun3 (the
