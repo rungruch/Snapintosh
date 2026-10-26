@@ -9,6 +9,7 @@
   python3 tools/el2qual-usb.py thermal (the same inputs as stage2)
   python3 tools/el2qual-usb.py vhe-exit (the same inputs as stage2)
   python3 tools/el2qual-usb.py usb-inventory --systemd-boot F --usb-probe F
+  python3 tools/el2qual-usb.py q1n1-foothold --q1n1 F (and stage2's other inputs)
 
 This only builds a directory tree, by default build/el2qual-usb/<stage>/.
 It never writes to a disk or a mounted volume: copying the tree onto a
@@ -25,6 +26,9 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
            (load option "thermal"; docs/GAOKUN3-PHASE1-GUARDS.md).
   vhe-exit stage2's files with the two Phase 2 VHE-exit entries only (load
            option "exit-vhe"; docs/GAOKUN3-PHASE2.md).
+  q1n1-foothold  stage2's files with q1n1 (its -DQ1N1_VHE_EXIT
+           -DQ1N1_DT_FRAMEBUFFER build) in place of el2qual: its --el2
+           foothold under slbounce, then the same after --exit-vhe.
   usb-inventory  systemd-boot and q1n1's holding USB protocol inventory
            (q1n1-usb-probe-hold.efi) only: no slbounce, tcblaunch.exe or
            device tree, so nothing on it can attempt a Secure Launch.
@@ -90,7 +94,30 @@ STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRI
 # screen, since a boot menu redraws over an application that returns.
 USB_PROBE_PATH = 'EFI/q1n1/q1n1-usb-probe-hold.efi'
 USB_INVENTORY_ENTRY = ('q1n1-usb-inventory.conf', 'q1n1: USB protocol inventory (read only, no EL2 switch)')
-STAGES = ('stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit', 'usb-inventory')
+STAGES = ('stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit', 'usb-inventory', 'q1n1-foothold')
+
+# q1n1's first boot on the gaokun3 (docs/GAOKUN3-PHASE2.md), in order: its
+# --el2 foothold under slbounce's VHE state, drawing on the device tree's
+# framebuffer; then the same after leaving VHE. Only the gaokun3 build can
+# draw there, so the image must carry both features (q1n1_features).
+Q1N1_PATH = 'EFI/q1n1/q1n1.efi'
+Q1N1_FOOTHOLD_ENTRIES = [
+    ('q1n1-1-foothold.conf', 'q1n1 1: EL2 foothold (no VHE exit)', '--el2'),
+    ('q1n1-2-foothold-vhe-exit.conf', 'q1n1 2: EL2 foothold after the VHE exit', '--el2 --exit-vhe'),
+]
+STAGE_ENTRIES['q1n1-foothold'] = Q1N1_FOOTHOLD_ENTRIES
+# Report strings only the -DQ1N1_VHE_EXIT and -DQ1N1_DT_FRAMEBUFFER code
+# contains (q1n1 platform/uefi/main.c).
+Q1N1_MARKERS = {b'VHE EXIT ': '-DQ1N1_VHE_EXIT', b'DT SIMPLE-FB': '-DQ1N1_DT_FRAMEBUFFER'}
+
+
+def q1n1_features(path):
+    data = Path(path).read_bytes()
+    missing = [define for marker, define in Q1N1_MARKERS.items() if marker not in data]
+    if missing:
+        raise LayoutError(f'{path}: not the gaokun3 q1n1 build (lacks {" and ".join(missing)}); '
+                          'build it with make uefi OUT=build/uefi-gaokun3 '
+                          'Q1N1_DEFINES="-DQ1N1_VHE_EXIT -DQ1N1_DT_FRAMEBUFFER"')
 
 
 class LayoutError(Exception):
@@ -168,8 +195,11 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
                                    any((slbounce, tcblaunch, dtb, always_switch, efi)))
     if usb_probe:
         raise LayoutError('--usb-probe belongs to the usb-inventory stage only')
-    switches = stage in ('stage2', 'thermal', 'vhe-exit')
-    require_pe(efi, 'el2qual', {SUBSYSTEM_EFI_APPLICATION})
+    switches = stage in ('stage2', 'thermal', 'vhe-exit', 'q1n1-foothold')
+    q1n1 = stage == 'q1n1-foothold'
+    require_pe(efi, 'q1n1' if q1n1 else 'el2qual', {SUBSYSTEM_EFI_APPLICATION})
+    if q1n1:
+        q1n1_features(efi)
     if stage != 'stage1':
         if not systemd_boot:
             raise LayoutError(f'{stage} needs --systemd-boot')
@@ -217,14 +247,15 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
         place(efi, 'EFI/BOOT/BOOTAA64.EFI')
     else:
         place(systemd_boot, 'EFI/BOOT/BOOTAA64.EFI')
-        place(efi, 'EFI/el2qual/el2qual.efi')
+        place(efi, Q1N1_PATH if q1n1 else 'EFI/el2qual/el2qual.efi')
         dtb_name = Path(dtb).name if dtb else None
         if dtb:
             place(dtb, f'dtb/{dtb_name}')
         entries = STAGE_ENTRIES[stage]
         write('loader/loader.conf', f'timeout 15\ndefault {entries[0][0]}\neditor no\n')
         for name, title, options in entries:
-            write(f'loader/entries/{name}', entry_text(title, options, dtb_name))
+            write(f'loader/entries/{name}', entry_text(title, options, dtb_name,
+                                                       '/' + Q1N1_PATH if q1n1 else '/EFI/el2qual/el2qual.efi'))
         if switches:
             place(slbounce, f'EFI/systemd/drivers/{SLBOUNCE_NAME}')
             # slbounce opens tcblaunch.exe from the root of its own volume.
@@ -275,9 +306,18 @@ def main():
                     help='slbounce was built with SLBOUNCE_ALWAYS_SWITCH=1 (no --dtb)')
     ap.add_argument('--replace', action='store_true', help='replace an existing tree')
     ap.add_argument('--usb-probe', help="q1n1's q1n1-usb-probe-hold.efi (usb-inventory only)")
+    ap.add_argument('--q1n1', help="q1n1's gaokun3 build of q1n1.efi (q1n1-foothold only)")
     a = ap.parse_args()
     efi = a.efi
-    if a.stage == 'usb-inventory':
+    if a.stage == 'q1n1-foothold':
+        if efi or not a.q1n1:
+            print('REFUSED: q1n1-foothold takes --q1n1 (not --efi)')
+            return 1
+        efi = a.q1n1
+    elif a.q1n1:
+        print('REFUSED: --q1n1 belongs to the q1n1-foothold stage only')
+        return 1
+    elif a.stage == 'usb-inventory':
         pass
     elif not efi:
         sys.path.insert(0, str(ROOT / 'probes' / 'el2qual'))

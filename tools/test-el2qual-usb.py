@@ -208,6 +208,41 @@ class Layout(unittest.TestCase):
         with self.assertRaises(usb.LayoutError):                                     # not a PE app
             usb.build_layout('usb-inventory', self.out('v'), None, self.sdboot, usb_probe=self.slb)
 
+    def test_q1n1_foothold_stage(self):
+        q1n1 = self.file('q1n1.efi', pe(payload=b'q1n1 VHE EXIT  DT SIMPLE-FB'))
+        m = usb.build_layout('q1n1-foothold', self.out(), q1n1, self.sdboot, self.slb, self.tcb,
+                             self.dtb)
+        out = self.out()
+        self.assert_manifest_complete(out, m)
+        self.assertEqual((out / 'EFI/q1n1/q1n1.efi').read_bytes(), q1n1.read_bytes())
+        self.assertFalse(any('el2qual' in rel for rel in m['files']))
+        self.assertEqual((out / 'tcblaunch.exe').read_bytes(), self.tcb.read_bytes())
+        self.assertIn('EFI/systemd/drivers/slbounceaa64.efi', m['files'])
+        entries = sorted((out / 'loader/entries').iterdir())
+        self.assertEqual([e.name for e in entries],
+                         ['q1n1-1-foothold.conf', 'q1n1-2-foothold-vhe-exit.conf'])
+        texts = [e.read_text() for e in entries]
+        self.assertIn('options --el2\n', texts[0])                 # the foothold alone first
+        self.assertIn('options --el2 --exit-vhe\n', texts[1])
+        for text in texts:
+            self.assertIn('efi /EFI/q1n1/q1n1.efi\n', text)
+            self.assertIn('devicetree /dtb/gaokun3-el2.dtb\n', text)
+            self.assertNotIn('emulate', text)                       # never the QEMU-only options
+        self.assertIn('default q1n1-1-foothold.conf', (out / 'loader/loader.conf').read_text())
+
+    def test_q1n1_foothold_refuses_other_builds(self):
+        for payload in (b'q1n1 default build', b'q1n1 VHE EXIT  only', b'q1n1 DT SIMPLE-FB only'):
+            q1n1 = self.file('q1n1.efi', pe(payload=payload))
+            with self.assertRaises(usb.LayoutError):
+                usb.build_layout('q1n1-foothold', self.out('x'), q1n1, self.sdboot, self.slb,
+                                 self.tcb, self.dtb)
+        good = self.file('q1n1-good.efi', pe(payload=b'q1n1 VHE EXIT  DT SIMPLE-FB'))
+        with self.assertRaises(usb.LayoutError):                    # slbounce is required
+            usb.build_layout('q1n1-foothold', self.out('y'), good, self.sdboot, None, self.tcb,
+                             self.dtb)
+        with self.assertRaises(usb.LayoutError):                    # so is the gate's tree
+            usb.build_layout('q1n1-foothold', self.out('z'), good, self.sdboot, self.slb, self.tcb)
+
     def test_stage1b_has_no_slbounce(self):
         m = usb.build_layout('stage1b', self.out(), self.efi, self.sdboot, dtb=self.dtb)
         self.assertFalse(any('slbounce' in rel or 'tcblaunch' in rel for rel in m['files']))
