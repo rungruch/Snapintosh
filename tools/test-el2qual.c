@@ -1435,6 +1435,8 @@ static void test_tsens(void)
 
 /* tools/test-el2qual-vhe.c: vhe.c and its report lines; returns its check count. */
 unsigned test_vhe(void);
+/* tools/test-el2qual-usbprobe.c: usbprobe.c, the read-only USB stage. */
+unsigned test_usbprobe(void);
 
 int main(void)
 {
@@ -1449,6 +1451,7 @@ int main(void)
     test_gic();
     test_tsens();
     checks += test_vhe();
+    checks += test_usbprobe();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

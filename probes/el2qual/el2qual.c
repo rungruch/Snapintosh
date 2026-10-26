@@ -36,6 +36,13 @@
  *               (thermal.c) on the boot CPU for 12 s: read only, and only
  *               the guard's 58 words, each checked against the firmware's
  *               page tables before the first read. Off by default.
+ *   usb         read whether the gaokun3's USB0 controller is powered, from
+ *               the clock controller's status words, before and after
+ *               ExitBootServices; after it, and only if powered and
+ *               clocked, the controller's own state (usbprobe.c). Read
+ *               only. Off by default.
+ *   usb-smmu    "usb", then also apps_smmu's state for USB0's stream.
+ *               Off by default.
  *
  * With no GOP mode that has a framebuffer address, el2qual draws on the
  * device tree's /chosen simple-framebuffer if the firmware's memory map
@@ -48,6 +55,7 @@
 #include "report.h"
 #include "thermal.h"
 #include "vhe.h"
+#include "usbprobe.h"
 
 /* idregs.h is the monitor's: id_register() is shared so both read exactly
  * the allocated encodings; its id_forge() is not used here. */
@@ -307,7 +315,7 @@ static struct el2q_run run;
 static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
-    int thermal, exit_vhe;
+    int thermal, exit_vhe, usb, usb_smmu;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -569,6 +577,67 @@ static void exit_vhe(void)
     progress("VHE EXIT: NON-VHE EL2");
 }
 
+/* ---- The USB read (options "usb", "usb-smmu"; usbprobe.c) --------------------
+ * Before ExitBootServices the exception vectors are the firmware's, so a read
+ * that faults cannot be caught: only the clock controller's status words are
+ * read then, which UEFI's own clock driver reads all the time, each after a
+ * mapping check at the current level. After it, el2qual's fault fixup guards
+ * every read, and the controller itself is read only if those words say it
+ * is powered and clocked. */
+
+static int tsens_mapped(void *unused, uint64_t address, uint64_t *par);
+
+static int usb_mapped_now(void *unused, uint64_t address)
+{
+    (void)unused;
+    if (current_el() == 2) __asm__ volatile("at s1e2r, %0" :: "r"(address) : "memory");
+    else __asm__ volatile("at s1e1r, %0" :: "r"(address) : "memory");
+    ISB();
+    uint64_t p = RD("par_el1");
+    return (p & 1) || ((p >> 56) & 0xf0) || ((p ^ address) & 0x0000fffffffff000ull);
+}
+
+static uint64_t usb_read_unguarded(void *unused, uint64_t address, uint64_t *value)
+{
+    (void)unused;
+    *value = *(volatile uint32_t *)(uintptr_t)address;
+    return 0;
+}
+
+static int usb_mapped_el2(void *unused, uint64_t address)
+{
+    uint64_t par;
+    return tsens_mapped(unused, address, &par);
+}
+
+static uint64_t usb_read_guarded(void *unused, uint64_t address, uint64_t *value)
+{
+    (void)unused;
+    return el2q_try_read32(&ctx[0], value, address);
+}
+
+static void measure_usb_before(void)
+{
+    const struct el2q_usb_hw hw = {0, usb_mapped_now, usb_read_unguarded};
+    progress("USB: GCC STATUS BEFORE EXITBOOTSERVICES, READ ONLY");
+    el2q_usb_gcc(&run.usb.before, &hw);
+}
+
+static void measure_usb_after(void)
+{
+    const struct el2q_usb_hw hw = {0, usb_mapped_el2, usb_read_guarded};
+    progress("USB: GCC STATUS AFTER EXITBOOTSERVICES, READ ONLY");
+    el2q_usb_gcc(&run.usb.after, &hw);
+    if (run.usb.after.power == EL2Q_USB_POWER_ON)
+        progress("USB: READING THE USB0 CONTROLLER. A HANG HERE IS A USB0 READ");
+    el2q_usb_core(&run.usb.after, &hw);
+    if (opt.usb_smmu) {
+        progress("USB: READING APPS_SMMU. A HANG HERE IS AN SMMU READ");
+        el2q_usb_smmu(&run.usb, &hw);
+    }
+    run.usb.isr = RD("isr_el1");
+}
+
 /* ---- The tsens read (option "thermal"; thermal.c) ------------------------
  * The boot CPU at EL2, every other core off, interrupts masked, the
  * firmware's page tables still in place. */
@@ -740,6 +809,8 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "emulate-no-fb")) opt.emulate_no_fb = 1;
         if (word_is(w, len, "emulate-dt-fb")) opt.emulate_dt_fb = 1;
         if (word_is(w, len, "thermal")) opt.thermal = 1;
+        if (word_is(w, len, "usb")) opt.usb = 1;
+        if (word_is(w, len, "usb-smmu")) opt.usb = opt.usb_smmu = 1;
     }
 }
 
@@ -968,6 +1039,7 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     progress(line);
     if (!table) progress("NO MEMORY FOR THE 16K TABLE: STOPPING");
     if (!table) finish();
+    if (opt.usb) measure_usb_before();
 
     efi_status status = 0;
     uint64_t tries = 0;
@@ -1010,5 +1082,6 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     run.cpu[0].done = 1;
     if (!opt.nosmp && run.psci_version >= 0) start_secondaries();
     if (opt.thermal) measure_tsens();
+    if (opt.usb) measure_usb_after();
     finish();
 }

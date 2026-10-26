@@ -198,7 +198,8 @@ def check_exit_vhe():
 def compile_test(cc, out, sanitizers):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'),
-           str(ROOT / 'tools' / 'test-el2qual-vhe.c'), str(EL2Q / 'report.c'),
+           str(ROOT / 'tools' / 'test-el2qual-vhe.c'), str(ROOT / 'tools' / 'test-el2qual-usbprobe.c'),
+           str(EL2Q / 'report.c'), str(EL2Q / 'usbprobe.c'),
            str(EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'), str(EL2Q / 'vhe.c'),
            str(ROOT / 'compat' / 'sc8280xp-thermal.c'), '-o', str(out)]
     return cmd, subprocess.run(cmd, capture_output=True, text=True)

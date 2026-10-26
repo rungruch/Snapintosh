@@ -11,10 +11,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "vhe.h"
+#include "usbprobe.h"
 
-#define EL2Q_VERSION      4     /* 2: counter rate, GICv3 virtualization, SMBIOS;
+#define EL2Q_VERSION      5     /* 2: counter rate, GICv3 virtualization, SMBIOS;
                                    3: the tsens read (option "thermal");
-                                   4: the VHE exit (option "exit-vhe") */
+                                   4: the VHE exit (option "exit-vhe");
+                                   5: the USB read (options "usb", "usb-smmu") */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4
@@ -172,6 +174,7 @@ struct el2q_run {
     uint32_t cpu_count;              /* slots used; slot 0 is the boot CPU */
     struct el2q_cpu cpu[EL2Q_MAX_CPUS];
     struct el2q_tsens tsens;
+    struct el2q_usb usb;             /* options "usb", "usb-smmu"; zero when not asked */
 };
 
 enum el2q_color { EL2Q_WHITE, EL2Q_GREEN, EL2Q_RED, EL2Q_YELLOW, EL2Q_CYAN };

@@ -228,6 +228,19 @@ static const char *const dt_words[] = {
     [EL2Q_DT_ZAP_DISABLED] = "ZAP-SHADER DISABLED: OPEN",
 };
 
+/* A USB0 POWER line in green when the controller is on, yellow otherwise;
+ * every other USB line in white. */
+static enum el2q_color usb_line_color(const char *line)
+{
+    static const char prefix[] = "USB0 POWER";
+    unsigned n = 0;
+    while (prefix[n] && line[n] == prefix[n]) n++;
+    if (prefix[n]) return EL2Q_WHITE;
+    while (line[n]) n++;
+    return n >= 3 && line[n - 3] == ' ' && line[n - 2] == 'O' && line[n - 1] == 'N' ? EL2Q_GREEN
+                                                                                   : EL2Q_YELLOW;
+}
+
 static void header(const struct el2q_run *r, struct el2q_text *t)
 {
     struct lb b = new_line(t, EL2Q_CYAN);
@@ -274,6 +287,16 @@ static void header(const struct el2q_run *r, struct el2q_text *t)
             b = new_line(t, EL2Q_WHITE);
             put_s(&b, regs);
         }
+    }
+    /* The USB read, near the top, where a long CPU table cannot push it off
+     * the screen. */
+    _Static_assert(EL2Q_USB_LINE_COLS <= EL2Q_TEXT_COLS, "a USB line fits a report line");
+    for (unsigned i = 0;; i++) {
+        char usb[EL2Q_USB_LINE_COLS + 1];
+        el2q_usb_line(&r->usb, i, usb);
+        if (!usb[0]) break;
+        b = new_line(t, usb_line_color(usb));
+        put_s(&b, usb);
     }
 
     enum el2q_color c = r->start_el == 2 ? EL2Q_WHITE

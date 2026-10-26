@@ -39,6 +39,13 @@ report it writes to the PL011:
                then measure as on max, the 16K walk through the EL1&0 regime
   max-exit-novhe  "exit-vhe" on a machine that starts at EL2 without E2H:
                nothing to leave, so NOT-VHE, and the run as on max
+  max-usb      the USB read (usbprobe.c): the virt machine has none of the
+               gaokun3's clock controller, USB or SMMU, so the stage must
+               refuse or read without harm; the checker recomputes the
+               power decision from the words printed, and fails any
+               controller read made while it is not ON, and any SError
+  max-vhe-usb-smmu  the same with the SMMU, after the slbounce emulation
+               and the VHE exit, the order the gaokun3 runs it in
 
 On every configuration that runs, all four CPUs must finish at EL2 without
 a fault, the report must name the GOP mode it drew on, and each feature's
@@ -101,6 +108,17 @@ CONFIGS = {
                          routes=('CPU OK', 'CPU OK')),
     'max-exit-novhe': dict(cpu='max', options='exit-vhe', pac='Y', walk='Y', vhe_exit='NOT-VHE',
                            features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The USB read (usbprobe.c). The virt machine has no Qualcomm clock
+    # controller, USB or SMMU at those addresses: the stage must refuse or
+    # read without harm, decide power from exactly the words it printed, read
+    # the controller only when they say ON, and leave no SError. The second
+    # runs in the order the gaokun3 would: slbounce's state, the VHE exit,
+    # then the read with the SMMU.
+    'max-usb': dict(cpu='max', options='usb', pac='Y', walk='Y', usb=True,
+                    features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-vhe-usb-smmu': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu', pac='Y', walk='Y',
+                             vhe=True, vhe_exit='DONE', usb=True, smmu=True,
+                             features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
 }
 
 STOP_LINES = ('NO GOP MODE HAS A FRAMEBUFFER ADDRESS', 'DT FRAMEBUFFER: NO DEVICE TREE',
@@ -282,6 +300,64 @@ def check(log, expect, smp=SMP):
     problems += check_gic(lines, smp)
     problems += check_tsens(lines, expect)
     problems += check_vhe_exit(lines, expect)
+    problems += check_usb(lines, expect)
+    return problems
+
+
+USB_WORD = r'([0-9A-F]{8}|UNMAPPED|FAULT|NOT READ)'
+USB_GCC1 = re.compile(rf'^USB0 GCC ([BA]) GDSC {USB_WORD} MASTER {USB_WORD} SLEEP {USB_WORD}$')
+USB_GCC2 = re.compile(rf'^USB0 GCC ([BA]) UTMI {USB_WORD} AXI {USB_WORD} CNOC {USB_WORD}$')
+USB_POWER = re.compile(r'^USB0 POWER ([BA]) (ON|GDSC OFF|CLOCKS OFF|UNREAD)$')
+
+
+def usb_power(gdsc, master, axi, cnoc):
+    """usbprobe.c's decision, from the printed words."""
+    words = (gdsc, master, axi, cnoc)
+    if any(not re.fullmatch(r'[0-9A-F]{8}', w) for w in words):
+        return 'UNREAD'
+    if not int(gdsc, 16) >> 31:
+        return 'GDSC OFF'
+    if any(int(w, 16) >> 31 for w in (master, axi, cnoc)):
+        return 'CLOCKS OFF'
+    return 'ON'
+
+
+def check_usb(lines, expect):
+    """The "usb" lines: absent unless asked; when asked, both phases, each
+    power line equal to the decision its own GCC words give, the controller
+    read only when the phase after ExitBootServices says ON, the SMMU lines
+    exactly when asked, and no pending SError."""
+    present = [line for line in lines if re.match(r'^(USB0|USB1|SMMU) ', line) or line.startswith('USB SERROR')]
+    if not expect.get('usb'):
+        return [f'USB lines on a run that did not ask for them: {present[0]}'] if present else []
+    problems = []
+    first = {m[1]: m for line in lines for m in [USB_GCC1.match(line)] if m}
+    second = {m[1]: m for line in lines for m in [USB_GCC2.match(line)] if m}
+    power = {m[1]: m[2] for line in lines for m in [USB_POWER.match(line)] if m}
+    for phase in 'BA':
+        if phase not in first or phase not in second or phase not in power:
+            problems.append(f'USB phase {phase}: lines missing')
+            continue
+        want = usb_power(first[phase][2], first[phase][3], second[phase][3], second[phase][4])
+        if power[phase] != want:
+            problems.append(f'USB phase {phase}: power {power[phase]}, but its words say {want}')
+    core = next((line for line in lines if line.startswith('USB0 CORE ')), None)
+    read_lines = [line for line in lines if re.match(r'^USB0 (XHCI|DWC3|QSCRATCH) ', line)]
+    if core is None:
+        problems.append('no USB0 CORE line')
+    elif power.get('A') != 'ON':
+        if core != 'USB0 CORE NOT READ: POWER NOT ON' or read_lines:
+            problems.append(f'the controller was read although power after ExitBootServices was '
+                            f'{power.get("A")}: {core}')
+    smmu = [line for line in lines if line.startswith('SMMU ')]
+    if expect.get('smmu') and len(smmu) != 2:
+        problems.append(f'usb-smmu asked but {len(smmu)} SMMU lines')
+    if not expect.get('smmu') and smmu:
+        problems.append('SMMU lines although usb-smmu was not asked')
+    if any(line.startswith('SMMU STREAM 820 MATCH SMR 00 FFFFFFFF') for line in smmu):
+        problems.append('an all-ones SMMU read was taken as a stream match')
+    if 'USB SERROR NONE' not in lines:
+        problems.append('the USB read left an SError pending, or no SERROR line')
     return problems
 
 
@@ -350,6 +426,16 @@ def synthetic(expect, smp=SMP):
         lines += [f'VHEX {expect["vhe_exit"]} PLAN=-',
                   'VHEIN HCR=80000000 SCTLR=30C5183D TCR=80853510',
                   'VHEIN2 TTBR0=BFFFF000 CPTR=33FF CNTHCTL=3']
+    if expect.get('usb'):
+        for phase in 'BA':
+            lines += [f'USB0 GCC {phase} GDSC UNMAPPED MASTER UNMAPPED SLEEP UNMAPPED',
+                      f'USB0 GCC {phase} UTMI UNMAPPED AXI UNMAPPED CNOC UNMAPPED',
+                      f'USB1 GCC {phase} GDSC UNMAPPED MASTER UNMAPPED',
+                      f'USB0 POWER {phase} UNREAD']
+        lines.append('USB0 CORE NOT READ: POWER NOT ON')
+        if expect.get('smmu'):
+            lines += ['SMMU SCR0 FFFFFFFF IDR0 FFFFFFFF', 'SMMU STREAM 820 NOT READ: ALL ONES']
+        lines.append('USB SERROR NONE')
     if expect.get('thermal'):
         lines += ['TSENS GUARD (READ ONLY) . TRIPPED: READ AT 0C222000',
                   'TSENS TRIPPED CHECKED=58 UNMAPPED=0 ADMIT=1 POLLS=1 VALID=0',
@@ -479,6 +565,37 @@ def self_test():
         else:
             expect_result(f'{name} exit unasked', good.replace(
                 'EL2QUAL END', 'VHEX DONE PLAN=MATCH\nEL2QUAL END'), expect, False)
+        if expect.get('usb'):
+            on = (good.replace('GDSC UNMAPPED MASTER UNMAPPED SLEEP UNMAPPED',
+                               'GDSC 80000000 MASTER 00000001 SLEEP 00000001')
+                  .replace('UTMI UNMAPPED AXI UNMAPPED CNOC UNMAPPED',
+                           'UTMI 00000001 AXI 00000001 CNOC 00000001'))
+            expect_result(f'{name} power disagrees with its words', on, expect, False)
+            expect_result(f'{name} ON with its words', on.replace('POWER B UNREAD', 'POWER B ON')
+                          .replace('POWER A UNREAD', 'POWER A ON')
+                          .replace('USB0 CORE NOT READ: POWER NOT ON', 'USB0 CORE READ'), expect, True)
+            off = on.replace('GDSC 80000000', 'GDSC 00000000', 1)
+            expect_result(f'{name} GDSC off read as on', off.replace('POWER B UNREAD', 'POWER B ON')
+                          .replace('POWER A UNREAD', 'POWER A ON'), expect, False)
+            expect_result(f'{name} controller read while unread', good.replace(
+                'USB0 CORE NOT READ: POWER NOT ON', 'USB0 CORE READ\nUSB0 DWC3 SNPSID 33313130 VER 0 GCTL 0'),
+                expect, False)
+            expect_result(f'{name} no before phase', good.replace('GCC B ', 'GCC X '), expect, False)
+            expect_result(f'{name} SError left', good.replace('USB SERROR NONE', 'USB SERROR PENDING'),
+                          expect, False)
+            if expect.get('smmu'):
+                expect_result(f'{name} all ones taken as a match', good.replace(
+                    'SMMU STREAM 820 NOT READ: ALL ONES', 'SMMU STREAM 820 MATCH SMR 00 FFFFFFFF S2CR FFFFFFFF'),
+                    expect, False)
+                expect_result(f'{name} SMMU lines missing', good.replace('SMMU SCR0', 'XMMU SCR0'),
+                              expect, False)
+            else:
+                expect_result(f'{name} SMMU unasked', good.replace(
+                    'USB SERROR NONE', 'SMMU SCR0 0 IDR0 0\nSMMU STREAM 820 NO MATCH\nUSB SERROR NONE'),
+                    expect, False)
+        else:
+            expect_result(f'{name} USB unasked', good.replace(
+                'EL2QUAL END', 'USB0 POWER A UNREAD\nEL2QUAL END'), expect, False)
         if expect.get('vhe'):
             expect_result(f'{name} E2H missing', good.replace(
                 f'{1 << 34 | 1 << 27:016X}', f'{1 << 31:016X}'), expect, False)
