@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 #include "pagemap.h"
+#include "s2walk.h"
 
 /* The GCC words read in each phase, in this order. */
 enum el2q_usb_gcc {
@@ -141,6 +142,9 @@ struct el2q_usb {
     uint64_t s2_ttbr0;                       /* VTTBR, read as two 32-bit halves */
     uint32_t s2_words;
     uint64_t s2_esr, s2_at;
+    /* Option "usb-s2-walk": that stage 2 walked for a q1n1-style DMA arena
+     * (el2qual.c, s2walk.c). */
+    struct el2q_s2w_result walk;
     uint64_t smmu_esr;
     uint64_t isr;                            /* ISR_EL1 after the reads: a pending SError shows here */
 };
@@ -189,6 +193,7 @@ void el2q_usb_smmu(struct el2q_usb *usb, const struct el2q_usb_hw *hw);
 
 /* Fixed-format report lines, empty past the last; see usbprobe.c. */
 #define EL2Q_USB_LINE_COLS 64
+_Static_assert(EL2Q_S2W_LINE_COLS == EL2Q_USB_LINE_COLS, "a walk line is a USB line");
 void el2q_usb_line(const struct el2q_usb *usb, unsigned index, char out[EL2Q_USB_LINE_COLS + 1]);
 
 #endif

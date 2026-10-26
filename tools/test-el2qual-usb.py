@@ -243,7 +243,7 @@ class Layout(unittest.TestCase):
         with self.assertRaises(usb.LayoutError):                    # so is the gate's tree
             usb.build_layout('q1n1-foothold', self.out('z'), good, self.sdboot, self.slb, self.tcb)
 
-    def test_usb_read_stage_has_its_three_entries(self):
+    def test_usb_read_stage_has_its_four_entries(self):
         m = usb.build_layout('usb-read', self.out(), self.efi, self.sdboot, self.slb, self.tcb,
                              self.dtb)
         out = self.out()
@@ -253,12 +253,16 @@ class Layout(unittest.TestCase):
         entries = sorted((out / 'loader/entries').iterdir())
         names = [e.name for e in entries]
         self.assertEqual(sorted(names), sorted(['el2qual-8-usb.conf', 'el2qual-9-usb-smmu.conf',
-                                                'el2qual-10-usb-smmu-map.conf']))
+                                                'el2qual-10-usb-smmu-map.conf',
+                                                'el2qual-11-usb-s2-walk.conf']))
         texts = {e.name: e.read_text() for e in entries}
         self.assertIn('options nopac nosmp usb\n', texts['el2qual-8-usb.conf'])  # no SMMU, no VHE exit first
         # Entry 9 stays what runs 17, 19 and 20 ran; the map is entry 10's alone.
         self.assertIn('options nopac nosmp exit-vhe usb-smmu\n', texts['el2qual-9-usb-smmu.conf'])
         self.assertIn('options nopac nosmp exit-vhe usb-smmu-map\n', texts['el2qual-10-usb-smmu-map.conf'])
+        # Entry 10 stays what run 21 ran; the walk is entry 11's alone.
+        self.assertIn('options nopac nosmp exit-vhe usb-smmu-map usb-s2-walk\n',
+                      texts['el2qual-11-usb-s2-walk.conf'])
         texts = list(texts.values())
         for text in texts:
             self.assertIn('efi /EFI/el2qual/el2qual.efi\n', text)

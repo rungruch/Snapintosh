@@ -20,6 +20,9 @@
    one of its safety properties (break-before-make steps, the regime's
    leaf bits, refusals, never rewriting a valid entry), must each make
    tools/test-el2qual.c fail.
+5. The same for probes/el2qual/s2walk.c: the table mapping check, the
+   SError checks, stopping at a fault, reading each descriptor once, the
+   format refusals and the page classes.
 """
 import argparse
 import os
@@ -199,12 +202,13 @@ def check_exit_vhe():
     return problems, len(sequence_mutations(insns))
 
 
-def compile_test(cc, out, sanitizers, pagemap=None):
+def compile_test(cc, out, sanitizers, pagemap=None, s2walk=None):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'),
            str(ROOT / 'tools' / 'test-el2qual-vhe.c'), str(ROOT / 'tools' / 'test-el2qual-usbprobe.c'),
-           str(ROOT / 'tools' / 'test-el2qual-pagemap.c'),
+           str(ROOT / 'tools' / 'test-el2qual-pagemap.c'), str(ROOT / 'tools' / 'test-el2qual-s2walk.c'),
            str(EL2Q / 'report.c'), str(EL2Q / 'usbprobe.c'), str(pagemap or EL2Q / 'pagemap.c'),
+           str(s2walk or EL2Q / 's2walk.c'),
            str(EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'), str(EL2Q / 'vhe.c'),
            str(ROOT / 'compat' / 'sc8280xp-thermal.c'), '-o', str(out)]
     return cmd, subprocess.run(cmd, capture_output=True, text=True)
@@ -232,23 +236,55 @@ PAGEMAP_MUTATIONS = [
 ]
 
 
-def check_pagemap_mutations(cc, flags, tmp):
-    """Problems: mutations that do not apply, or that the suite accepts."""
-    source = (EL2Q / 'pagemap.c').read_text()
+# The same for s2walk.c. The read limit has no mutation: with each
+# descriptor read once, no table shape reaches it.
+S2WALK_MUTATIONS = [
+    ('a table page read without its mapping check', 'if (!table_readable(par, page)) {', 'if (!table_readable(par, page) && 0) {'),
+    ('an outer non-cacheable table page accepted', 'write_back(attr >> 4) && ', ''),
+    ('a table page not inner shareable accepted', ' && (par & PAR_SH_IS) == PAR_SH_IS', ''),
+    ('a table page at another address accepted', '!((par ^ page) & PAR_PA) && ', '!((par ^ page) & PAR_PA & 0) && '),
+    ('non-cacheable taken as write-back', '((nibble & 0xc) == 0x4 && (nibble & 3))', '(nibble & 0xc) == 0x4'),
+    ('no SError check after a read', 'if (w->hw->serror(w->hw->ctx)) {', 'if (0) {'),
+    ('an SError already pending ignored', '    if (hw->serror(hw->ctx)) return out->state = EL2Q_S2W_PENDING;\n', ''),
+    ('the walk continued past a fault', '    if (esr) {', '    if (0) {'),
+    ('a descriptor read again', 'if (w->desc_valid[level] && w->desc_at[level] == address) {', 'if (0) {'),
+    ('the access flag ignored', 'if (!(desc & S2_AF) || (oa >> oas)) break;', 'if (oa >> oas) break;'),
+    ('a leaf past the output size accepted', 'if (!(desc & S2_AF) || (oa >> oas)) break;', 'if (!(desc & S2_AF)) break;'),
+    ('S2AP ignored', '(desc & S2_AP_RW) == S2_AP_RW ? EL2Q_S2W_RW : EL2Q_S2W_LIMITED', 'EL2Q_S2W_RW'),
+    ('a block compared page by page', 'oa != (ipa & ~(size - 1))', 'oa != ipa'),
+    ('a reserved level-3 encoding taken as a page', '(level == 3 && type != S2_TYPE) || ', ''),
+    ('a level-0 block accepted', ' || (level == 0 && type == S2_BLOCK)', ''),
+    ('a table past the output size followed', 'if (table >> oas) {', 'if (0) {'),
+    ('concatenated start tables assumed', 'input > below + 9 || ', ''),
+    ('an input larger than the output accepted', ' || input > oas)', ')'),
+    ('the root alignment ignored', '(root & (entries * 8 - 1)) || ', ''),
+    ('VA64 ignored', '!(bank->cba2r & 1) || ', ''),
+    ('the granule ignored', '((bank->tcr >> 14) & 3) || ', ''),
+    ('SL0 ignored', 'unsigned start = 2 - sl0,', 'unsigned start = 1,'),
+    ('translation off walked anyway', '    if (!(bank->sctlr & 1)) return out->state = EL2Q_S2W_NOT_NEEDED;\n', ''),
+    ('an arena above 4 GiB accepted', 'arena + EL2Q_S2W_ARENA_SIZE > (1ull << 32)', '0'),
+    ('CnP taken as an address bit', '#define TTBR_BADDR 0x0000fffffffffffeull', '#define TTBR_BADDR 0x0000ffffffffffffull'),
+]
+
+
+def check_mutations(cc, flags, tmp, name, mutations):
+    """Problems: mutations of probes/el2qual/<name> that do not apply, or
+    that the suite accepts."""
+    source = (EL2Q / name).read_text()
     problems = []
-    for i, (name, old, new) in enumerate(PAGEMAP_MUTATIONS):
+    for i, (what, old, new) in enumerate(mutations):
         if source.count(old) != 1:
-            problems.append(f'{name}: its text is not in pagemap.c exactly once')
+            problems.append(f'{what}: its text is not in {name} exactly once')
             continue
-        mutant = Path(tmp) / f'pagemap-{i}.c'
+        mutant = Path(tmp) / f'{Path(name).stem}-{i}.c'
         mutant.write_text(source.replace(old, new))
         exe = Path(tmp) / (f'mutant-{i}' + EXE)
-        cmd, built = compile_test(cc, exe, flags, mutant)
+        cmd, built = compile_test(cc, exe, flags, **{Path(name).stem: mutant})
         if built.returncode:
-            problems.append(f'{name}: does not build')
+            problems.append(f'{what}: does not build')
             continue
         if subprocess.run([str(exe)], capture_output=True, text=True).returncode == 0:
-            problems.append(f'{name}: accepted')
+            problems.append(f'{what}: accepted')
     return problems
 
 
@@ -292,13 +328,14 @@ def main():
         verdict = 'PASS' if ran.returncode == 0 else f'FAIL (exit {ran.returncode})'
         print(f'{verdict} test-el2qual.c [{mode}]')
         if ran.returncode == 0:
-            mutants = check_pagemap_mutations(cc, flags, tmp)
-            for m in mutants:
-                print(f'FAIL pagemap mutation: {m}')
-            if not mutants:
-                print(f'PASS pagemap mutations: {len(PAGEMAP_MUTATIONS)} deliberately broken copies '
-                      f'of pagemap.c are rejected')
-            problems += mutants
+            for name, mutations in (('pagemap.c', PAGEMAP_MUTATIONS), ('s2walk.c', S2WALK_MUTATIONS)):
+                mutants = check_mutations(cc, flags, tmp, name, mutations)
+                for m in mutants:
+                    print(f'FAIL {Path(name).stem} mutation: {m}')
+                if not mutants:
+                    print(f'PASS {Path(name).stem} mutations: {len(mutations)} deliberately broken copies '
+                          f'of {name} are rejected')
+                problems += mutants
     return 1 if problems or ran.returncode else 0
 
 

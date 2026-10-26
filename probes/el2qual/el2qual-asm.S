@@ -53,6 +53,10 @@ TRY el2q_try_pacga,   pacga x10, x2, x3
  * Only addresses whose translation el2qual.c has checked come here. */
 TRY el2q_try_read32,  ldr w10, [x2]
 
+/* The same for one stage-2 descriptor (s2walk.c): a single 64-bit load, so
+ * the descriptor is read whole, never as two halves of different writes. */
+TRY el2q_try_read64,  ldr x10, [x2]
+
 /* x0 ctx, x1 out[2], x2 the pattern (EL2Q_LR_PATTERN).
  *
  * ICH_LR0_EL2 is saved, written with the pattern, read back and restored;

@@ -53,6 +53,18 @@
  *   emulate-map-hole  with "usb-smmu-map", map two test windows QEMU's
  *               EDK2 leaves unmapped instead of the SMMU's, so the map is
  *               written and checked there; test only, reported as such
+ *   usb-s2-walk "usb-smmu", then walk the stage-2 bank's tables for a 1 MiB
+ *               DMA arena allocated below 4 GiB as q1n1 allocates its own
+ *               (s2walk.c): descriptor reads only, through mappings UEFI's
+ *               tables already have, stopping at the first fault or
+ *               SError. Off by default.
+ *   emulate-s2-tables  with "usb-s2-walk", walk a stage-2 table set
+ *               el2qual builds for its arena instead of the SMMU's, every
+ *               page identity read-write; test only, reported as such
+ *   emulate-s2-odd     the same, with arena pages 1 to 3 moved, invalid
+ *               and read-only; test only
+ *   emulate-s2-device  the same tables, but the root pointed at QEMU's
+ *               PL011, a Device page the walk must refuse unread; test only
  *
  * With no GOP mode that has a framebuffer address, el2qual draws on the
  * device tree's /chosen simple-framebuffer if the firmware's memory map
@@ -67,6 +79,7 @@
 #include "vhe.h"
 #include "pagemap.h"
 #include "usbprobe.h"
+#include "s2walk.h"
 #include "uefi.h"
 
 /* idregs.h is the monitor's: id_register() is shared so both read exactly
@@ -135,6 +148,7 @@ uint64_t el2q_try_pacga(struct el2q_ctx *ctx, uint64_t *value, uint64_t pointer,
 uint64_t el2q_try_pac(struct el2q_ctx *ctx, const uint64_t *in, const uint64_t *modifier,
                       uint64_t *out, uint64_t *round_trip, uint64_t count);
 uint64_t el2q_try_read32(struct el2q_ctx *ctx, uint64_t *value, uint64_t address);
+uint64_t el2q_try_read64(struct el2q_ctx *ctx, uint64_t *value, uint64_t address);
 void el2q_apia_get(uint64_t key[2]);
 void el2q_apia_set(uint64_t lo, uint64_t hi);
 void tgran16_probe(uint64_t *out, uint64_t table);       /* probes/tgran16.c */
@@ -238,6 +252,7 @@ static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
     int thermal, exit_vhe, usb, usb_smmu, usb_smmu_map, emulate_map_hole;
+    int usb_s2_walk, emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -628,6 +643,70 @@ static void map_smmu_window(void)
     run.usb.map_arg = state == EL2Q_PM_REFUSED_VERIFY ? r.mapped_after : r.detail;
 }
 
+/* ---- The stage-2 walk (option "usb-s2-walk"; s2walk.c) --------------------
+ * The arena is allocated before ExitBootServices exactly as q1n1's usb-ebs.c
+ * allocates its DWC3 arena: EfiLoaderData pages below 4 GiB. The walk then
+ * reads descriptors only, each behind the fault fixup, and only through
+ * mappings UEFI's tables already have. */
+
+static uint64_t s2w_arena, s2w_pool;
+
+/* "emulate-s2-device": QEMU virt's PL011, a page EDK2 maps as Device. */
+#define EL2Q_S2W_TEST_DEVICE_ROOT 0x09000000ull
+
+static uint64_t s2w_par(void *unused, uint64_t address)
+{
+    (void)unused;
+    __asm__ volatile("at s1e2r, %0" :: "r"(address) : "memory");
+    ISB();
+    return RD("par_el1");
+}
+
+static uint64_t s2w_read64(void *unused, uint64_t address, uint64_t *value)
+{
+    (void)unused;
+    return el2q_try_read64(&ctx[0], value, address);
+}
+
+/* An external abort on a load the core does not report synchronously
+ * becomes a pending SError once the load completes; the DSB waits for that,
+ * and DAIF.A, set since ExitBootServices, keeps it pending to be seen here
+ * rather than taken. */
+static int s2w_serror(void *unused)
+{
+    (void)unused;
+    DSB();
+    ISB();
+    return (RD("isr_el1") >> 8) & 1;
+}
+
+static void s2w_write64(void *unused, uint64_t address, uint64_t value)
+{
+    (void)unused;
+    *(volatile uint64_t *)(uintptr_t)address = value;
+}
+
+static void walk_stage2(void)
+{
+    const struct el2q_s2w_hw hw = {0, s2w_par, s2w_read64, s2w_serror};
+    struct el2q_s2w_bank bank, *walked = 0;
+    if (opt.emulate_s2_tables) {
+        progress("USB: WALKING EL2QUAL'S OWN TEST STAGE-2 TABLES (TEST ONLY)");
+        if (s2w_pool && !el2q_s2w_build_test(s2w_arena, s2w_pool, opt.emulate_s2_odd, s2w_write64, 0, &bank)) {
+            if (opt.emulate_s2_device) bank.ttbr = EL2Q_S2W_TEST_DEVICE_ROOT;
+            walked = &bank;
+        }
+    } else {
+        progress("USB: STAGE-2 WALK, READ ONLY. A HANG OR RESET HERE IS THE WALK");
+        if (run.usb.s2 == EL2Q_USB_CB_READ) {
+            bank = (struct el2q_s2w_bank){run.usb.s2_sctlr, run.usb.s2_tcr, run.usb.s2_cba2r, run.usb.s2_ttbr0};
+            walked = &bank;
+        }
+    }
+    el2q_s2w_walk(walked, s2w_arena, &hw, &run.usb.walk);
+    run.usb.walk.test = opt.emulate_s2_tables;
+}
+
 static void measure_usb_before(void)
 {
     const struct el2q_usb_hw hw = {0, usb_mapped_now, usb_read_unguarded};
@@ -647,6 +726,7 @@ static void measure_usb_after(void)
         if (opt.usb_smmu_map) map_smmu_window();
         progress("USB: READING APPS_SMMU. A HANG HERE IS AN SMMU READ");
         el2q_usb_smmu(&run.usb, &hw);
+        if (opt.usb_s2_walk) walk_stage2();
     }
     run.usb.isr = RD("isr_el1");
 }
@@ -826,6 +906,10 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "usb-smmu")) opt.usb = opt.usb_smmu = 1;
         if (word_is(w, len, "usb-smmu-map")) opt.usb = opt.usb_smmu = opt.usb_smmu_map = 1;
         if (word_is(w, len, "emulate-map-hole")) opt.emulate_map_hole = 1;
+        if (word_is(w, len, "usb-s2-walk")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = 1;
+        if (word_is(w, len, "emulate-s2-tables")) opt.emulate_s2_tables = 1;
+        if (word_is(w, len, "emulate-s2-odd")) opt.emulate_s2_tables = opt.emulate_s2_odd = 1;
+        if (word_is(w, len, "emulate-s2-device")) opt.emulate_s2_tables = opt.emulate_s2_device = 1;
     }
 }
 
@@ -1054,6 +1138,15 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
         !EFI_ERROR(bs->allocate_pages(0 /* AnyPages */, 2 /* LoaderData */, pool_pages, &pool))) {
         pm_pool_next = pool;
         pm_pool_end = pool + pool_pages * 0x1000;
+    }
+    if (opt.usb_s2_walk) {
+        uint64_t below = 0xffffffffull;
+        if (!EFI_ERROR(bs->allocate_pages(1 /* MaxAddress */, 2 /* LoaderData */, EL2Q_S2W_ARENA_PAGES, &below)))
+            s2w_arena = below;
+        uint64_t fixture = 0;
+        if (opt.emulate_s2_tables &&
+            !EFI_ERROR(bs->allocate_pages(0 /* AnyPages */, 2 /* LoaderData */, EL2Q_S2W_TEST_PAGES, &fixture)))
+            s2w_pool = fixture;
     }
 
     char line[] = "SNAPINTOSH EL2QUAL: STARTED AT EL., CALLING EXITBOOTSERVICES";

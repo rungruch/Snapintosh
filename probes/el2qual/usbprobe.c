@@ -318,7 +318,7 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
  *   SMMU S2 CB<nn> AT <a> CBAR <w> CBA2R <w>
  *   SMMU S2 CB<nn> SCTLR <w> TCR <w>
  *   SMMU S2 CB<nn> TTBR0 <16 hex>
- * and last
+ * then with "usb-s2-walk" the walk's lines (s2walk.c), and last
  *   USB SERROR <PENDING|NONE>
  * <w> is eight hex digits, or UNMAPPED, FAULT or NOT READ for a word that
  * has none. */
@@ -558,6 +558,16 @@ void el2q_usb_line(const struct el2q_usb *u, unsigned index, char out[EL2Q_USB_L
     if (index < (n = cb_lines(u, index, &b))) return;
     index -= n;
     if (index < (n = s2_lines(u, index, &b))) return;
+    index -= n;
+    for (n = 0; n < 4; n++) {
+        char walk[EL2Q_S2W_LINE_COLS + 1];
+        el2q_s2w_line(&u->walk, n, walk);
+        if (!walk[0]) break;
+        if (index == n) {
+            put_s(&b, walk);
+            return;
+        }
+    }
     index -= n;
     if (index == 0) put_s(&b, u->isr & (1u << 8) ? "USB SERROR PENDING" : "USB SERROR NONE");
 }

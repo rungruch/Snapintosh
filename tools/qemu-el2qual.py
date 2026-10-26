@@ -58,6 +58,18 @@ report it writes to the PL011:
                WINDOW), which also requires the first window to still pass
   max-vhe-usb-smmu-map-hole-e2h  the same without the VHE exit, so the
                tables are walked in the EL2&0 regime, with its own leaf bits
+  max-vhe-usb-s2walk-stick  the gaokun3 stick entry's options ("usb-smmu-map
+               usb-s2-walk"): virt has no stage-2 bank, so the walk must say
+               NOT RUN: NO STAGE 2 and read nothing
+  max-vhe-usb-s2walk  "usb-s2-walk" over a stage-2 table set el2qual builds
+               for its own arena ("emulate-s2-tables"), laid out like bank
+               126's, through the real AT checks, guarded loads and SError
+               checks: every page identity read-write, and the first page's
+               leaf at the arena's own address
+  max-vhe-usb-s2walk-odd  the same with three pages changed: one moved, one
+               invalid, one read-only, and the first odd page named
+  max-vhe-usb-s2walk-device  the same tables with the root pointed at
+               virt's PL011, a Device page: refused with nothing read
 
 On every configuration that runs, all four CPUs must finish at EL2 without
 a fault, the report must name the GOP mode it drew on, and each feature's
@@ -153,6 +165,41 @@ CONFIGS = {
                                           smmumap_sample='OK CLONE KEPT 0/256 (TEST WINDOW)',
                                           features=dict.fromkeys(FEATURES, True),
                                           routes=('CPU OK', 'CPU OK')),
+    # The stage-2 walk (s2walk.c). s2walk is a regex the walk's lines, joined
+    # by newlines, must fullmatch; s2walk_sample is a log that does.
+    'max-vhe-usb-s2walk-stick': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu-map usb-s2-walk',
+                                     pac='Y', walk='Y', vhe=True, vhe_exit='DONE',
+                                     usb=True, smmu=True, smmumap='NOT NEEDED',
+                                     s2walk=r'SMMU WALK NOT RUN: NO STAGE 2',
+                                     features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-vhe-usb-s2walk': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-walk emulate-s2-tables',
+                               pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
+                               s2walk=(r'SMMU WALK ARENA [0-9A-F]{8} READS (258|259|260) \(TEST TABLES\)\n'
+                                       r'SMMU WALK RW 256 LIMITED 0 MOVED 0 FAULTS 0\n'
+                                       r'SMMU WALK LEAF L3 [0-9A-F]{16}'),
+                               s2walk_sample=('SMMU WALK ARENA 7E600000 READS 258 (TEST TABLES)\n'
+                                              'SMMU WALK RW 256 LIMITED 0 MOVED 0 FAULTS 0\n'
+                                              'SMMU WALK LEAF L3 000000007E6007FF'),
+                               features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-vhe-usb-s2walk-odd': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-walk emulate-s2-odd',
+                                   pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
+                                   s2walk=(r'SMMU WALK ARENA [0-9A-F]{8} READS (258|259|260) \(TEST TABLES\)\n'
+                                           r'SMMU WALK RW 253 LIMITED 1 MOVED 1 FAULTS 1\n'
+                                           r'SMMU WALK LEAF L3 [0-9A-F]{16}\n'
+                                           r'SMMU WALK ODD [0-9A-F]{8} L3 [0-9A-F]{16}'),
+                                   s2walk_odd=0x1000,
+                                   s2walk_sample=('SMMU WALK ARENA 7E600000 READS 258 (TEST TABLES)\n'
+                                                  'SMMU WALK RW 253 LIMITED 1 MOVED 1 FAULTS 1\n'
+                                                  'SMMU WALK LEAF L3 000000007E6007FF\n'
+                                                  'SMMU WALK ODD 7E601000 L3 000000007E8017FF'),
+                                   features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-vhe-usb-s2walk-device': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-walk emulate-s2-device',
+                                      pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
+                                      s2walk=(r'SMMU WALK ARENA [0-9A-F]{8} READS 0 \(TEST TABLES\)\n'
+                                              r'SMMU WALK REFUSED: TABLE 0000000009000000 PAR [0-9A-F]{16}'),
+                                      s2walk_sample=('SMMU WALK ARENA 7E600000 READS 0 (TEST TABLES)\n'
+                                                     'SMMU WALK REFUSED: TABLE 0000000009000000 PAR 0000000009000000'),
+                                      features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
 }
 
 STOP_LINES = ('NO GOP MODE HAS A FRAMEBUFFER ADDRESS', 'DT FRAMEBUFFER: NO DEVICE TREE',
@@ -384,7 +431,8 @@ def check_usb(lines, expect):
             problems.append(f'the controller was read although power after ExitBootServices was '
                             f'{power.get("A")}: {core}')
     smmu = [line for line in lines if line.startswith('SMMU ')]
-    smmu = [line for line in smmu if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 ', 'SMMU MAP'))]
+    smmu = [line for line in smmu
+            if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 ', 'SMMU MAP', 'SMMU WALK'))]
     if expect.get('smmu') and len(smmu) != 2:
         problems.append(f'usb-smmu asked but {len(smmu)} SMMU lines')
     if not expect.get('smmu') and smmu:
@@ -428,8 +476,41 @@ def check_usb(lines, expect):
             problems.append(f'a bypassing or faulting S2CR, yet the bank was read: {bank}')
         elif translate and 'SMMU CB NOT TRANSLATED' in bank:
             problems.append('a translating S2CR reported as not translated')
+    problems += check_s2walk(lines, expect)
     if 'USB SERROR NONE' not in lines:
         problems.append('the USB read left an SError pending, or no SERROR line')
+    return problems
+
+
+def check_s2walk(lines, expect):
+    """The walk's lines: present exactly when asked, matching this
+    configuration's outcome, and consistent: at most 264 reads, a page count
+    of 256, and the first page's leaf at the arena itself when every page
+    is identity read-write."""
+    walk = [line for line in lines if line.startswith('SMMU WALK ')]
+    if not expect.get('s2walk'):
+        return [f'SMMU WALK lines although usb-s2-walk was not asked: {walk[0]}'] if walk else []
+    text = '\n'.join(walk)
+    if not re.fullmatch(expect['s2walk'], text):
+        return [f'the walk said {walk!r}, not {expect["s2walk"]!r}']
+    problems = []
+    arena = re.match(r'^SMMU WALK ARENA ([0-9A-F]{8}) READS (\d+)', walk[0])
+    if arena and int(arena[2]) > 264:
+        problems.append(f'{arena[2]} descriptor reads, over the walk\'s bound')
+    counts = next((m for line in walk for m in [re.match(
+        r'^SMMU WALK RW (\d+) LIMITED (\d+) MOVED (\d+) FAULTS (\d+)$', line)] if m), None)
+    if counts and sum(int(c) for c in counts.groups()) != 256:
+        problems.append(f'page classes that do not add up to 256: {counts[0]}')
+    leaf = next((m for line in walk for m in [re.match(r'^SMMU WALK LEAF L(\d) ([0-9A-F]{16})$', line)] if m), None)
+    if arena and leaf:
+        size = 1 << (12 + 9 * (3 - int(leaf[1])))
+        oa = int(leaf[2], 16) & 0x0000fffffffff000 & ~(size - 1)
+        if counts and counts[1] == '256' and oa != int(arena[1], 16) & ~(size - 1):
+            problems.append(f'every page identity, but the first leaf maps {oa:X}, not the arena')
+    odd = next((m for line in walk for m in [re.match(r'^SMMU WALK ODD ([0-9A-F]{8}) ', line)] if m), None)
+    if 's2walk_odd' in expect and (not arena or not odd or
+                                   int(odd[1], 16) != int(arena[1], 16) + expect['s2walk_odd']):
+        problems.append(f'the first odd page is not the arena\'s page at +{expect["s2walk_odd"]:X}')
     return problems
 
 
@@ -509,6 +590,8 @@ def synthetic(expect, smp=SMP):
             lines.append(f'SMMU MAP {expect.get("smmumap_sample", expect["smmumap"])}')
         if expect.get('smmu'):
             lines += ['SMMU SCR0 FFFFFFFF IDR0 FFFFFFFF', 'SMMU STREAM 820 NOT READ: ALL ONES']
+        if expect.get('s2walk'):
+            lines += expect.get('s2walk_sample', expect['s2walk']).split('\n')
         lines.append('USB SERROR NONE')
     if expect.get('thermal'):
         lines += ['TSENS GUARD (READ ONLY) . TRIPPED: READ AT 0C222000',
@@ -709,6 +792,31 @@ def self_test():
                 else:
                     expect_result(f'{name} map line unasked', good.replace(
                         'SMMU SCR0', 'SMMU MAP OK\nSMMU SCR0'), expect, False)
+                if expect.get('s2walk'):
+                    sample = expect.get('s2walk_sample', expect['s2walk'])
+                    first = sample.split('\n')[0]
+                    expect_result(f'{name} walk missing', good.replace(sample + '\n', ''), expect, False)
+                    expect_result(f'{name} walk refused', good.replace(
+                        sample, 'SMMU WALK NOT RUN: FORMAT'), expect, False)
+                    expect_result(f'{name} walk stopped by an SError', good.replace(
+                        sample, 'SMMU WALK ARENA 7E600000 READS 3\n'
+                        'SMMU WALK SERROR PENDING AFTER 000000007E7FF008'), expect, False)
+                    if '(TEST TABLES)' in first:
+                        expect_result(f'{name} test tables not named', good.replace(
+                            first, first.removesuffix(' (TEST TABLES)')), expect, False)
+                        expect_result(f'{name} too many reads', good.replace(
+                            first, re.sub(r'READS \d+', 'READS 265', first)), expect, False)
+                    if 'RW 256 ' in sample:
+                        expect_result(f'{name} first leaf elsewhere', good.replace(
+                            'LEAF L3 000000007E6007FF', 'LEAF L3 000000007E8007FF'), expect, False)
+                        expect_result(f'{name} pages not adding up', good.replace(
+                            'RW 256 LIMITED 0', 'RW 255 LIMITED 0'), expect, False)
+                    if 's2walk_odd' in expect:
+                        expect_result(f'{name} the wrong odd page', good.replace(
+                            'ODD 7E601000', 'ODD 7E602000'), expect, False)
+                else:
+                    expect_result(f'{name} walk unasked', good.replace(
+                        'USB SERROR NONE', 'SMMU WALK NOT RUN: NO STAGE 2\nUSB SERROR NONE'), expect, False)
             else:
                 expect_result(f'{name} SMMU unasked', good.replace(
                     'USB SERROR NONE', 'SMMU SCR0 0 IDR0 0\nSMMU STREAM 820 NO MATCH\nUSB SERROR NONE'),
