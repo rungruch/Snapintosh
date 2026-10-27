@@ -1030,6 +1030,37 @@ model. Stage 2, writing the word and restoring it at once with no DMA in
 between, is the next step. It is the first SMMU write, and it needs its
 own design review and explicit go-ahead before any code for it exists.
 
+#### Run 26, 2026-10-27: USB0 is halted after ExitBootServices
+
+From the `usb-read` stick: el2qual 13 `3728784d` from `d8c5fe4`, entry 15
+(`nopac nosmp usb-halt`), on `PRODUCT HUAWEI GK-W7X`, firmware 2.18, with
+no SError. The controller read repeated runs 16 and 17 (`USB0 POWER` `ON`
+before and after ExitBootServices, `CORE READ`, `XHCI CAP 01100020`,
+`SNPSID 33313130`, `GCTL 00101005` host). Then the halt read
+([step 1j](#step-1j-the-usb0-halt-check-el2qual-13-entry-15)):
+
+```
+USB0 HALT OP 0A600020 CMD 00000000 STS 00000001 HALTED
+```
+
+**Reading it.**
+- **The operational base is `0x0A600020`,** core + the `CAPLENGTH` the
+  controller reports (`0x20`). This confirms on the machine what step 1j
+  derives: a base fixed at the A16's `0x30` would have read the wrong
+  registers here.
+- **`USBCMD` reads `0x00000000`:** `R/S` (bit 0) clear.
+- **`USBSTS` reads `0x00000001`:** `HCH` (bit 0) set.
+- So **USB0 is halted.** The firmware left its host controller powered but
+  not running after ExitBootServices, so nothing of USB0's drives DMA at
+  that point.
+
+**What it decides.** Stage 2's precondition — USB0 halted, no DMA — holds
+on the real machine, and both registers have now been read on the gaokun3
+for the first time. This removes the "not measured" caveat from stage 2's
+preconditions. It does not authorize a write: the remaining steps are
+still stage 2's gated wiring and then a supervised run, each needing its
+own go-ahead.
+
 ### Step 1i: stage 2, the first SMMU write (design and host model)
 
 Stage 2 asks one question, with the least change for the shortest time:
@@ -1068,9 +1099,9 @@ Each of these must hold, or nothing is written and the line says
   operational registers are at `0x0A600020`, while the A16's `0x30` puts
   them at `0x0A600030`.
   [Step 1j](#step-1j-the-usb0-halt-check-el2qual-13-entry-15) reads the
-  halt state from that derived base. **`USBCMD` and `USBSTS` have not been
-  read on the gaokun3 yet**: if UEFI left the controller running, the stage
-  refuses, and that is an answer too;
+  halt state from that derived base. **Run 26 read both on the gaokun3:
+  `USBCMD 00000000`, `USBSTS 00000001`, so USB0 is `HALTED` after
+  ExitBootServices** and this precondition holds on the machine;
 - `S2CR(group)` still reads as the old word.
 
 #### The writes
@@ -1198,7 +1229,7 @@ lines does not mistake a `NO CAPLENGTH` line for a read.
 | QEMU: `python3 tools/qemu-el2qual.py --config max-usb-halt` (and `--self-test`) | PASS. `max-usb-halt`: virt never powers the controller, so the one `USB0 HALT` line says `NO CAPLENGTH` and touches nothing in its range |
 | QEMU: `--config max-usb-halt-emulated`, `--config max-usb-halt-running` | PASS. virt has no USB0, and pagemap cannot turn RAM into Device memory, so `emulate-usb-halt` stands a page el2qual owns in for the controller (`CAPLENGTH 0x30`, base `0x0A600030` — deliberately the A16's value rather than the gaokun3's `0x20`, so a base fixed at the target's value would fail this test). The read runs end to end through the real `AT S1E2R` identity check and guarded read — only the Device-attribute requirement relaxed, since virt offers no controllable Device MMIO — and the live line reads `OP 0A600030 CMD 00000000 STS 00000001 HALTED (TEST)`, or `CMD 00000001 STS 00000000 RUNNING (TEST)` for the running stand-in. The `UNMAPPED`/`FAULT` paths stay host-test-only |
 | el2qual.efi | Changed: version 13 adds the `usb-halt` option (and the test-only `emulate-usb-halt`). Entry 15 needs el2qual 13 |
-| gaokun3 | NOT RUN |
+| gaokun3 | PASS, run 26 (`3728784d`, `d8c5fe4`): `USB0 HALT OP 0A600020 CMD 00000000 STS 00000001 HALTED`; the base is core + the measured `CAPLENGTH 0x20`, and USB0 is halted after ExitBootServices; no SError ([run 26](#run-26-2026-10-27-usb0-is-halted-after-exitbootservices)) |
 
 ### Step 2: decided by step 1
 
