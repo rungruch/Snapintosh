@@ -43,12 +43,14 @@ enum el2q_s2b {
     EL2Q_S2B_REFUSED_TYPE,      /* S2CR does not translate through the bank that was read */
     EL2Q_S2B_REFUSED_MASK,      /* the group does not match USB0's stream alone */
     EL2Q_S2B_REFUSED_SHARED,    /* another valid group matches it too */
-    EL2Q_S2B_REFUSED_RANGE,     /* S2CR(group) is outside the global register page */
+    EL2Q_S2B_REFUSED_RANGE,     /* the group is not below NUMSMRG */
     EL2Q_S2B_REFUSED_READ,      /* a read for the check faulted */
     EL2Q_S2B_REFUSED_UNMAPPED,  /* the register's page is not Device identity at EL2 */
     EL2Q_S2B_REFUSED_READONLY,  /* ... or EL2 may not write it */
     EL2Q_S2B_REFUSED_PENDING,   /* an SError was already pending */
     EL2Q_S2B_REFUSED_FAULT,     /* the SMMU already reports a global fault */
+    EL2Q_S2B_REFUSED_MOVED,     /* sCR0, the group's SMR or its S2CR changed since it was read */
+    EL2Q_S2B_REFUSED_SERROR,    /* an SError became pending during the plan's own reads */
     EL2Q_S2B_PLANNED,
     EL2Q_S2B_COUNT
 };

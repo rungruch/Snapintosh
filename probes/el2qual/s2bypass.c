@@ -13,8 +13,10 @@
 #define S2CR_TRANSLATE (0u << 16)
 #define S2CR_BYPASS    (1u << 16)
 #define S2CR_CBNDX     0xffu
-/* S2CR(254) is the last that fits the first 4 KiB of the global register
- * space, which is the only page this plan would write. */
+/* NUMSMRG is 8 bits, so groups are at most 0 to 254, and S2CR(254) at
+ * 0xff8 still lies in the first 4 KiB of the global register space: a
+ * group below NUMSMRG is always in the one page this plan would write. The
+ * clamp mirrors usbprobe.c's EL2Q_USB_SMR_LIMIT. */
 #define GROUP_LIMIT    255u
 
 /* A valid group whose id, outside its mask, equals the stream. The mask is
@@ -84,29 +86,36 @@ uint32_t el2q_s2b_plan(const struct el2q_s2b_seen *seen, const struct el2q_s2b_h
         if (f_) { out->detail = f_; return out->state = EL2Q_S2B_REFUSED_READ; } \
         (dest) = v_; \
     } while (0)
-    /* A global fault already latched would make the one after the write
-     * impossible to attribute, so it is cleared by whoever owns it first. */
+    /* A global fault already latched would make one raised by the write
+     * impossible to attribute. The plan refuses rather than clearing it:
+     * clearing sGFSR is a write. */
     READ(SMMU_sGFSR, out->gfsr);
     if (out->gfsr) return out->state = EL2Q_S2B_REFUSED_FAULT;
     /* Nothing may have moved since the SMMU read: the same sCR0, and the
      * same S2CR in the group about to be planned. */
     uint32_t now = 0;
     READ(SMMU_sCR0, now);
-    if (now != seen->scr0) return out->state = EL2Q_S2B_REFUSED_SCR0;
+    if (now != seen->scr0) return out->state = EL2Q_S2B_REFUSED_MOVED;
     READ(SMMU_S2CR(seen->group), now);
-    if (now != seen->s2cr) return out->state = EL2Q_S2B_REFUSED_TYPE;
+    if (now != seen->s2cr) return out->state = EL2Q_S2B_REFUSED_MOVED;
 
     /* usbprobe.c stops at the first matching group; a second one would also
      * translate USB0's stream, and bypassing only the first would leave the
-     * SMMU with two answers for it. */
+     * SMMU with two answers for it. The group the read found must also
+     * still be the match: a count of one alone would accept SMR(group)
+     * having moved to another stream while some other group took 0x820, and
+     * the plan would then name an S2CR serving a different device. */
     for (unsigned n = 0; n < groups; n++) {
         uint32_t smr = 0;
         READ(SMMU_SMR(n), smr);
         out->scanned++;
+        if (n == seen->group && smr != seen->smr) return out->state = EL2Q_S2B_REFUSED_MOVED;
         out->matches += group_matches(smr, seen->stream);
     }
 #undef READ
     if (out->matches != 1) return out->state = EL2Q_S2B_REFUSED_SHARED;
+    /* PLANNED must also mean the plan's own 215 reads raised nothing. */
+    if (hw->serror(hw->ctx)) return out->state = EL2Q_S2B_REFUSED_SERROR;
 
     out->planned = (seen->s2cr & ~S2CR_TYPE) | S2CR_BYPASS;
     out->restore = seen->s2cr;
@@ -121,7 +130,7 @@ uint32_t el2q_s2b_plan(const struct el2q_s2b_seen *seen, const struct el2q_s2b_h
  *                REFUSED: <SCR0 <8 hex>|S2CR TYPE|STREAM MASK <4 hex>|
  *                <n> GROUPS MATCH|OUT OF RANGE|READ ESR <8 hex>|
  *                UNMAPPED <8 hex>|READ ONLY <8 hex>|SERROR ALREADY PENDING|
- *                GFSR <8 hex>>>
+ *                GFSR <8 hex>|MOVED SINCE READ|SERROR DURING THE CHECK>>
  * then, once the scan ran:
  *   SMMU BYPASS MATCHES <n>/<n> MASK <4 hex> GFSR <8 hex>
  * and always, because it is the point of this stage:
@@ -196,6 +205,8 @@ void el2q_s2b_line(const struct el2q_s2b_result *r, unsigned index,
         case EL2Q_S2B_REFUSED_FAULT:
             put_s(&b, "REFUSED: GFSR "); put_hex(&b, r->gfsr, 8);
             break;
+        case EL2Q_S2B_REFUSED_MOVED: put_s(&b, "REFUSED: MOVED SINCE READ"); break;
+        case EL2Q_S2B_REFUSED_SERROR: put_s(&b, "REFUSED: SERROR DURING THE CHECK"); break;
         default: break;
         }
         return;

@@ -42,8 +42,8 @@ static struct {
     unsigned nreads;
     uint32_t smr[256], s2cr[256];
     uint32_t scr0_now, gfsr;
-    uint64_t fault_at;
-    int serror, unmapped, readonly;
+    uint64_t fault_at, serror_at;
+    int serror, serror_now, unmapped, readonly;
 } f;
 
 static void freset(void)
@@ -56,13 +56,14 @@ static void freset(void)
 
 static int fmapped(void *ctx, uint64_t a) { (void)ctx; (void)a; return f.unmapped; }
 static int fwritable(void *ctx, uint64_t a) { (void)ctx; (void)a; return f.readonly; }
-static int fserror(void *ctx) { (void)ctx; return f.serror; }
+static int fserror(void *ctx) { (void)ctx; return f.serror || f.serror_now; }
 
 static uint64_t fread32(void *ctx, uint64_t a, uint32_t *v)
 {
     (void)ctx;
     if (f.nreads < MAXLOG) f.reads[f.nreads++] = a;
     if (a == f.fault_at) return ESR_SEA;
+    if (a == f.serror_at) f.serror_now = 1;
     uint64_t off = a - BASE;
     if (off == 0x48) *v = f.gfsr;
     else if (off == 0) *v = f.scr0_now;
@@ -236,12 +237,26 @@ static void test_reads(void)
     /* sCR0 or the S2CR moved since the SMMU read: nothing scanned. */
     freset();
     f.scr0_now = SCR0 ^ 1u;
-    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_SCR0);
+    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_MOVED);
     CHECK(f.nreads == 2 && r.scanned == 0);
+    line(&r, 0, "SMMU BYPASS REFUSED: MOVED SINCE READ");
     freset();
     f.s2cr[GROUP] = 0x00010006u;
-    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_TYPE);
+    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_MOVED);
     CHECK(f.nreads == 3 && r.scanned == 0);
+
+    /* The gap a count of one alone would leave: SMR(6) moved to another
+     * stream while another group took 0x820. Exactly one group still
+     * matches, but it is not the one whose S2CR the plan would name. */
+    freset();
+    f.smr[GROUP] = 0x80000821u;
+    f.smr[9] = SMR6;
+    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_MOVED);
+    CHECK(r.scanned == GROUP + 1);
+    /* Its mask widened, still matching 0x820: also moved. */
+    freset();
+    f.smr[GROUP] = 0x80010820u;
+    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_MOVED);
 
     /* A second valid group matching USB0's stream, exactly or by mask. */
     freset();
@@ -266,8 +281,17 @@ static void test_reads(void)
     /* The matching group itself disappearing from the scan. */
     freset();
     f.smr[GROUP] = 0;
-    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_SHARED && r.matches == 0);
-    line(&r, 0, "SMMU BYPASS REFUSED: 0 GROUPS MATCH");
+    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_MOVED);
+
+    /* An SError raised by the plan's own reads: no PLANNED, and the scan's
+     * line stays so the reads that ran are visible. */
+    freset();
+    f.serror_at = BASE + 0x800 + 4 * 100;
+    CHECK(el2q_s2b_plan(&seen, &hw, &r) == EL2Q_S2B_REFUSED_SERROR);
+    CHECK(r.scanned == 212 && r.matches == 1);
+    line(&r, 0, "SMMU BYPASS REFUSED: SERROR DURING THE CHECK");
+    line(&r, 1, "SMMU BYPASS MATCHES 1/212 MASK 0000 GFSR 00000000");
+    line(&r, 2, "SMMU BYPASS PLAN ONLY, NOTHING WRITTEN");
 
     /* A fault on each of the reads in turn: the ESR is reported and the
      * scan stops there. */
