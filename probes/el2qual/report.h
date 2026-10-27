@@ -14,7 +14,7 @@
 #include "usbprobe.h"
 #include "rng.h"
 
-#define EL2Q_VERSION      13    /* 2: counter rate, GICv3 virtualization, SMBIOS;
+#define EL2Q_VERSION      14    /* 2: counter rate, GICv3 virtualization, SMBIOS;
                                    3: the tsens read (option "thermal");
                                    4: the VHE exit (option "exit-vhe");
                                    5: the USB read (options "usb", "usb-smmu");
@@ -32,7 +32,9 @@
                                    12: "usb-s2-bypass-plan" plans the S2CR
                                       bypass without writing it;
                                    13: "usb-halt" reads USB0's xHCI run/halt
-                                      state from the measured CAPLENGTH */
+                                      state from the measured CAPLENGTH;
+                                   14: "rng" checks UEFI's RNG protocol
+                                      before ExitBootServices */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4
