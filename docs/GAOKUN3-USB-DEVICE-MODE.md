@@ -1059,13 +1059,16 @@ Each of these must hold, or nothing is written and the line says
   from;
 - no SError pending;
 - **USB0 halted:** xHCI `USBCMD.R/S` (bit 0) clear and `USBSTS.HCH` (bit 0)
-  set, at the operational registers (core + `CAPLENGTH`, `0x0A600020` on
-  the gaokun3). "No DMA" is the premise of the stage, and this is what
-  checks it. Offsets and bits are from Linux `drivers/usb/host/xhci.h`
-  (`struct xhci_op_regs`) and `xhci-ext-caps.h` (`XHCI_CMD_RUN`,
-  `XHCI_STS_HALT`), read as a reference. **These two registers have not
-  been read on the gaokun3 yet**: if UEFI left the controller running, the
-  stage refuses, and that is an answer too;
+  set, at the operational registers (core + `CAPLENGTH`). "No DMA" is the
+  premise of the stage, and this is what checks it. Offsets and bits are
+  from Linux `drivers/usb/host/xhci.h` (`struct xhci_op_regs`) and
+  `xhci-ext-caps.h` (`XHCI_CMD_RUN`, `XHCI_STS_HALT`), read as a reference.
+  The operational base is not an assumed offset: `CAPLENGTH` is read from
+  the controller, which
+  [step 1j](#step-1j-the-usb0-halt-check-el2qual-13-entry-15) does on its
+  own (the A16 reports `0x30`, not the `0x20` q1n1 assumed). **These
+  registers have not been read on the gaokun3 yet**: if UEFI left the
+  controller running, the stage refuses, and that is an answer too;
 - `S2CR(group)` still reads as the old word.
 
 #### The writes
@@ -1140,6 +1143,57 @@ Two separate decisions, in order:
 | el2qual.efi | Unchanged, `712af82c`: `s2bwrite.c` is neither built nor referenced, so there is nothing new for QEMU to run |
 | gaokun3 | NOT RUN; nothing written |
 
+### Step 1j: the USB0 halt check (el2qual 13, entry 15)
+
+Stage 2 (step 1i) requires USB0 **halted**, and reads `S2CR` through the
+xHCI operational registers at core + `CAPLENGTH`. Step 1j reads exactly
+that state on its own, read only, so the precondition is measured before
+any write is ever considered — and so the operational base stage 2 would
+use comes from the controller, not from a guess.
+
+**What it reads.** After the controller read (el2qual stage `usb`), which
+already reads `XCAP` (`CAPLENGTH`/`HCIVERSION`, core + 0), the halt check
+takes `CAPLENGTH` from `XCAP`'s low byte, forms the operational base
+(core + `CAPLENGTH`), and reads `USBCMD` (op + 0) and `USBSTS` (op + 4),
+each mapping-checked first. USB0 is **HALTED** when `USBCMD.R/S` (bit 0) is
+clear and `USBSTS.HCH` (bit 0) is set; otherwise **RUNNING**.
+
+**Why the base is measured, not assumed.** q1n1's A16 path takes the
+operational registers at core + `0x20`. The A16's own `CAPLENGTH`, in
+q1n1's firmware-running capture, is `0x30`. An operational base off by
+`0x10` would read the wrong registers, so step 1j derives it from the
+controller's `CAPLENGTH` and reports the base it used.
+
+**Status: read only, on the stick.** Unlike step 1i's model, this is a
+real el2qual read (stage `usb-halt`), built into el2qual at version 13, on
+the USB-read stick as entry 15 (`nopac nosmp usb-halt`). It reads two more
+of USB0's operational registers after the stage-`usb` controller read —
+the same controller, behind the same fault fixup, the same risk class as
+entry 8. It writes nothing, and does no clock, power or PHY programming.
+Reading `USBCMD`/`USBSTS` has no side effect.
+
+The line:
+
+```
+USB0 HALT <OP <a> CMD <w> STS <w> <HALTED|RUNNING>
+          |NOT READ: NO CAPLENGTH
+          |NOT READ: UNMAPPED AT <a>
+          |FAULT AT <a> ESR <e>>
+```
+
+`NO CAPLENGTH` means the controller was not read (power off, unmapped or a
+fault at or before `XCAP`), so there is no `CAPLENGTH` to derive from and
+nothing in the controller's range is touched. The line carries the
+`USB0 HALT` prefix, not `USB0 XHCI`, so a reader counting controller-read
+lines does not mistake a `NO CAPLENGTH` line for a read.
+
+| Check | Result, 2026-10-27 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS. Against the fake controller: with the A16's `XCAP` (`CAPLENGTH` `0x30`) the base is `0x0A600030`; `R/S` clear and `HCH` set reads `HALTED`, `R/S` set or `HCH` clear reads `RUNNING`; a `CAPLENGTH` of `0x20` moves the base to `0x0A600020`; an unmapped operational register is `UNMAPPED` and is not read; a faulting `USBCMD` is `FAULT` with its ESR, and `USBSTS` is not read; power off gives `NO CAPLENGTH` with nothing in the controller's range touched |
+| QEMU: `python3 tools/qemu-el2qual.py --self-test` | PASS. `max-usb-halt`: virt never powers the controller, so the one `USB0 HALT` line must say `NO CAPLENGTH` and touch nothing in its range. The `HALTED`/`RUNNING` paths need a powered controller and are covered by the host tests, not QEMU |
+| el2qual.efi | Changed: version 13 adds the `usb-halt` option. Entry 15 needs el2qual 13 |
+| gaokun3 | NOT RUN |
+
 ### Step 2: decided by step 1
 
 - **If USB0 stays powered after ExitBootServices,** the A16 path applies
@@ -1199,6 +1253,11 @@ Two separate decisions, in order:
   compile-time gate, then the supervised run). Even its worst outcome, a
   failed restore, leaves only USB0's stream bypassed while USB0 is halted,
   until a power cycle.
+- **Step 1j writes nothing.** It reads two of USB0's operational registers
+  (`USBCMD`, `USBSTS`) after the stage-`usb` controller read, from the base
+  the controller's own `CAPLENGTH` gives. It is on the stick as entry 15
+  because it is a read, the same class as entry 8; it is the read that
+  measures step 1i's halt precondition and operational base.
 - **Step 1h writes nothing, and cannot.** `s2bypass.c` has no write
   callback. Its reads are the SMMU global registers earlier steps already
   read, plus `sGFSR` and the remaining `SMR`s, all in the same page. The

@@ -318,9 +318,10 @@ q1n1 has no transport to the Mac yet.
   (runs 16 and 17).
   - **USB0 stays powered after ExitBootServices.**
   - **Two things block a device-mode run.** q1n1's identity check expects
-    the A16's xHCI `CAPLENGTH` (`0x30`, the gaokun3's is `0x20`), and USB0's
-    DMA is translated by the SMMU through context bank 6, so it is not known
-    to be identity.
+    the A16's xHCI `CAPLENGTH` (`0x30`); the gaokun3's own value has not been
+    measured (q1n1's A16 path assumes `0x20`, and step 1j reads it), and
+    USB0's DMA is translated by the SMMU through context bank 6, so it is
+    not known to be identity.
   - **Run 19:** context bank 6 has stage-1 translation off, but nests a
     stage 2, INFERRED to be bank 126.
   - **Run 20:** el2qual 7 could not read that stage-2 bank. Its page is not
@@ -361,9 +362,16 @@ q1n1 has no transport to the Mac yet.
     invalidates as Linux does, with USB0 confirmed halted. It is five
     writes at most, and each outcome is defined, including a failed
     restore (power cycle). It is not built into el2qual.
-  - **Next, to be decided:** wiring stage 2 into el2qual behind a
-    compile-time gate (code only), and then, separately, the supervised
-    hardware run that would be the first SMMU write.
+  - **The halt check is built and on the stick as entry 15**
+    ([step 1j](GAOKUN3-USB-DEVICE-MODE.md#step-1j-the-usb0-halt-check-el2qual-13-entry-15)):
+    el2qual 13's `usb-halt` reads USB0's `USBCMD`/`USBSTS` from the base the
+    controller's own `CAPLENGTH` gives, read only. It measures step 1i's
+    halt precondition and operational base, which have not been read on the
+    gaokun3 yet.
+  - **Next, to be decided:** running entry 15 (the halt read) on the
+    gaokun3, and, separately, wiring stage 2 into el2qual behind a
+    compile-time gate (code only) ahead of the supervised run that would be
+    the first SMMU write.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has
