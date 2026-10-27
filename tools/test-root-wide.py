@@ -35,9 +35,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from source_text import read_source
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'probes/xnuboot.c').read_text()
+SOURCE = read_source(ROOT / 'probes/xnuboot.c')
 ROOT_H = (ROOT / 'compat/sptm-root.h').read_text()
 NS_H = (ROOT / 'shadow/native-shared.h').read_text()
 WIDE = '-DSNAP_ROOT_CACHE_WIDE=1'
@@ -79,7 +80,7 @@ def compile_c(directory, test, defines, overrides=None, name=None):
         for hdr in ('sptm-root.h', 'native-shared.h'):
             (mut / hdr).write_text(overrides.get(hdr, (ROOT / ('compat' if hdr == 'sptm-root.h' else 'shadow') / hdr).read_text()))
         for src in ('compat/sptm-root.c', 'shadow/native-shared.c'):
-            (mut / Path(src).name).write_text((ROOT / src).read_text())
+            (mut / Path(src).name).write_text(read_source(ROOT / src))
         include = [f'-I{mut}']
         sources = [str(mut / Path(s).name) if s in ('compat/sptm-root.c', 'shadow/native-shared.c') else s
                    for s in sources]

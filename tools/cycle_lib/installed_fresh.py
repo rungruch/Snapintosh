@@ -221,9 +221,40 @@ INPUT_AUXKC_PTP_DARTPOOL_RESIDENT_BEAM_VA_WIDE_SHA = 'a2674b9e4ff8107dbe352a4acf
 # (-DADRENO_GPU_RECOVER=1): AdrenoX2 73b4b8da, agents/gpu-recovery/build/build-auxkc-recover.sh VARIANT=pipe.
 # Boot with --present-latch --present-pipeline 1 --ib-async --gpu-recover soft. Rollback: latch2-sync-nosparse
 # f930bc2154ebea37b7c19be785ee4dafe7c1a360f20cd78541e67d4a54c51968 (b12v12/b12v13/b12v16, no pipeline).
-INPUT_AUXKC_PTP_DARTPOOL_RESIDENT_BEAM_VA_WIDE_LATCH = ('build/current-assets/auxkc-input-ptp-dartpool-resident-beam-va-wide-'
-                                                        'latch2-pipe2-recover-nosparse-20261021/adreno-input.kc')
-INPUT_AUXKC_PTP_DARTPOOL_RESIDENT_BEAM_VA_WIDE_LATCH_SHA = '2cb7b6cca7fd199a9c254cda4022310630593a37e68c1b1a22006720ca3cd444'
+INPUT_AUXKC_PTP_DARTPOOL_RESIDENT_BEAM_VA_WIDE_LATCH = 'build/current-assets/org-desktop-nocoherent-20261023/adreno-input.kc'
+INPUT_AUXKC_PTP_DARTPOOL_RESIDENT_BEAM_VA_WIDE_LATCH_SHA = 'ccf0c8f4da4f63fbe25c2b74d728030452fea1ab23fcab162d108dc0e36d1592'
+# b12v23 (2026-10-23): + IO-coherent maintenance skipping (AdrenoX2 c66edb6b = SnapAdreno PROFILE=desktop at its profiles
+# commit; SnapI2CHID d90e0199 = PROFILE=desktop); boot with --gpu-coherent. Previous: cursor 43bed810 (AdrenoX2
+# 981e0b88 = PROFILE=desktop-nocoherent), b12v19c-b12v20. tools/build-auxkc-desktop.sh NAME rebuilds a collection from
+# this checkout and prints the two lines to put here (its bytes differ from these: see the script).
+# b12v19c: + aligned live-scanout copies (agents/cursor-fix; b12v19r panicked on the shake-to-locate cursor). Previous: repin 2ec76b70...
+# b12v19r: + resident re-pin kext b2686dfb (agents/resident-evict). Previous: relatch-sparse 1cd18fa5...
+# b12v19: relatch + cache-sparse kext 2cd7ef66 (agents/b12v19-kext). Rollback b12v18: relatch-nosparse 65243492...
+# b12v18: relatch kext 128667ac (agents/present-pacing). Rollback: latch2-pipe2-recover-nosparse, 2cb7b6cc...
+# --edp-backlight (opt-in, agents/brightness): the --present-latch collection with an AdrenoX2 that carries
+# -DADRENO_BACKLIGHT=1 in AdrenoDisplay.o (the AdrenoBacklight service CoreBrightness drives). Pinned: next-20261024,
+# the org next build (KEXT_PROFILE=desktop-next I2C_PROFILE=desktop-fnkeys tools/build-auxkc-desktop.sh, umbrella
+# 8f9eeb5, SnapAdreno e1cf072, SnapI2CHID f0b7984; compat/, the kext and SnapI2CHID are unchanged since): AdrenoX2 =
+# desktop-nocoherent (no --gpu-coherent) plus AdrenoBacklight taking the panel brightness from the swap record
+# (AdrenoDisplay::swap_submit, source swap; levels 41..2047, nits proportional), the head rule (adreno_head_offset),
+# the IOMFB call trace and the CS sampler opt-in (adreno_cs_samplers); SnapI2CHID = desktop plus the Fn-key layer
+# (snap_i2c_fnkeys), section-identical to next2-20261024's. Every addition stays off without its boot-arg except the
+# head rule (adreno_head_offset=0 turns it off). A --gpu-coherent run wants a KEXT_PROFILE=desktop-backlight collection
+# here instead. Rollback: next2-20261024 (cc07dfd3, the force-brightness-control path next2c ran) and next-20261024
+# (57965a84); without --edp-backlight the latch collection above (org-desktop-nocoherent-20261023, ccf0c8f4) is used.
+INPUT_AUXKC_DESKTOP_BACKLIGHT = 'build/current-assets/swap-path-20261024/adreno-input.kc'
+INPUT_AUXKC_DESKTOP_BACKLIGHT_SHA = '9e916a4185bc609178fe80a3110e020d9f3167625da7a76a9bc9ff22412743d5'
+# --edp-backlight with --gpu-coherent or --present-early-done: the --edp-backlight collection rebuilt from
+# SnapAdreno's desktop-early-done profile, i.e. desktop-backlight (desktop's IO-coherent maintenance skipping plus
+# AdrenoBacklight) plus -DADRENO_PRESENT_EARLY_DONE=1 in AdrenoDisplay.o (src/AdrenoDisplayEarlyDone.h: a layer-0 swap
+# completed right after its scanout copy, boot-arg adreno_present_early_done 1 always / 2 while WindowServer is behind,
+# 0 measures only; the perf done line), and SnapI2CHID desktop-fnkeys. Link it with
+# KEXT_PROFILE=desktop-early-done I2C_PROFILE=desktop-fnkeys tools/build-auxkc-desktop.sh NAME (sudo for kmutil's staging)
+# and put the two lines it prints here. Every addition is inert without its switch (the monitor's coherent ON with
+# adreno_coherent=1; adreno_backlight=1; adreno_present_early_done), so the collection also serves --edp-backlight runs
+# without them. early-done-20261025: umbrella 822226c, SnapAdreno a2d43d0, SnapI2CHID f0b7984 (AdrenoX2 24f9e767).
+INPUT_AUXKC_DESKTOP_EARLY_DONE = 'build/current-assets/early-done-20261025/adreno-input.kc'
+INPUT_AUXKC_DESKTOP_EARLY_DONE_SHA = '9aff1d3e0fc1fd0625b83165738b90196249e053d6cc149e609f6a608bd7a6d1'
 # --guest-net: INPUT_AUXKC's objects with SnapintoshVirtualEthernet's datapath (docs/GUEST-NETWORK-20261019.md).
 # None until that collection is built and pinned; --guest-net refuses meanwhile.
 INPUT_AUXKC_NET = None
@@ -311,10 +342,26 @@ QCC2072_INPUTS = 'qcc2072-inputs'        # under the attempt's directory: the th
 # no CP_MEMCPY over 1 MiB, after b12v13's 4 MiB copy latched the GPU); the pipeline set remains as ADDITIONS_PIPELINE.
 # Mirror-slab set (agents/gpu-perf FAILURE-MODES.md R): the pipeline2 rows plus the executable 933060b2 (UBO mirror regions
 # from slabs allocated once and never released); the pipeline2 set remains for rollback as ADDITIONS_PIPELINE2.
-ADDITIONS = 'build/current-assets/metal-stage-mirrorslab-20261021/trust-additions.json'
-ADDITIONS_SHA = '4802847aef13e6e46ebc50cd03b1e35ebafe929d5ae46f44f4de6a8d4fb64ae7'
-TRUST_PAYLOAD = 'build/current-assets/metal-stage-mirrorslab-20261021/trustcache.payload'
-TRUST_SHA = 'fb429aa20cea252f321d3b4ff18d7bc9425c10babb391d370315c9de5b4ff50f'
+# Settings-icons set (SnapMetal ADRENO_SETTINGS_ICONS): the mirror-slab rows plus the executable c76a4677 (CoreImage
+# compute kernels sampling sRGB and grey+alpha images; multi-input kernels behind AdrenoIBComputeSamplers), deployed by
+# tools/deploy-guest-plugin.py; the mirror-slab set remains for rollback as ADDITIONS_MIRRORSLAB.
+# Iconfix set (SnapMetal icon-pixels-next, ADRENO_CS_TABLES): the settings-icons rows plus the executable 11d5ff9a
+# (CoreImage compute kernels get SP_CS_CONFIG NTEX = NSAMP = their T#/S# count, as Mesa programs them;
+# ADRENO_CS_TABLES=0 in a process's environment keeps the settings-icons counts), deployed by
+# tools/deploy-guest-plugin.py, and the icon-pixels probe 25f07e86 that tools/run-icon-pixels.py pushes; the
+# settings-icons set remains for rollback as ADDITIONS_SETTINGSICONS.
+ADDITIONS = 'build/current-assets/metal-stage-iconfix-20261024/trust-additions.json'
+ADDITIONS_SHA = '501a90b6e6fe79b346bcb81c1bddee315ae9fbe3d369ff6b5f44b115aeecc4de'
+TRUST_PAYLOAD = 'build/current-assets/metal-stage-iconfix-20261024/trustcache.payload'
+TRUST_SHA = '7857aabcda2814974193c24dbc3245312c3ba02d1de46848b8be60a332571af0'
+ADDITIONS_SETTINGSICONS = 'build/current-assets/metal-stage-settingsicons-20261024/trust-additions.json'
+ADDITIONS_SETTINGSICONS_SHA = 'cdc784df778f7544fac5b2c774c3b6ee49cc70a15670301f3c4515dfed5562ff'
+TRUST_PAYLOAD_SETTINGSICONS = 'build/current-assets/metal-stage-settingsicons-20261024/trustcache.payload'
+TRUST_SHA_SETTINGSICONS = '247598bc2b4b48c31124e6dde3b83a52b41aa59355f697416cec0e8420926636'
+ADDITIONS_MIRRORSLAB = 'build/current-assets/metal-stage-mirrorslab-20261021/trust-additions.json'
+ADDITIONS_MIRRORSLAB_SHA = '4802847aef13e6e46ebc50cd03b1e35ebafe929d5ae46f44f4de6a8d4fb64ae7'
+TRUST_PAYLOAD_MIRRORSLAB = 'build/current-assets/metal-stage-mirrorslab-20261021/trustcache.payload'
+TRUST_SHA_MIRRORSLAB = 'fb429aa20cea252f321d3b4ff18d7bc9425c10babb391d370315c9de5b4ff50f'
 ADDITIONS_PIPELINE2 = 'build/current-assets/metal-stage-pipeline2-20261021/trust-additions.json'
 ADDITIONS_PIPELINE2_SHA = 'eb035ef6ff2a380ece5ace3eddd9d9bc1365d9a8a478ba25ede795d8ccf5e119'
 TRUST_PAYLOAD_PIPELINE2 = 'build/current-assets/metal-stage-pipeline2-20261021/trustcache.payload'
@@ -399,6 +446,8 @@ TIMESYNC_FLAG = '-timesync_bringup'
 COMPRESSOR_SW_FLAG = '-vm_compressor_wk_sw'
 BASE_CMDLINE = '-v debug=0x8 serial=3 cluster_power=0 wdt=-1'
 WATCHDOG = 1800
+# --watchdog: a desktop session may run up to two hours (owner's decision, 2026-10-24), only on AC.
+WATCHDOG_MAX = 7200
 DISPLAY_SLOT = '/device-tree/arm-io/adreno-display'
 # The installed launches' environment lived only in deleted launch records: the
 # speed test's six-CPU settings without its RAM-disk preload requirement, plus
@@ -629,6 +678,29 @@ ATTR_CLEAN_DEFER_DEFINE = '-DSNAP_ATTR_CLEAN_DEFER=1'
 # invalidated once. Needs --attr-clean-defer (the second clean off the token) and --root-cache-wide; refused with
 # --token-trim. Appended after every earlier flag.
 MULTIPAGE_FAST_DEFINE = '-DSNAP_MULTIPAGE_FAST=1'
+# SNAP_ADRENO_COHERENT (--gpu-coherent). b12v19/b12v20 spend about
+# 16.7 ms of CPU cache maintenance per IB (214 MiB with cache-sparse). At prepare the monitor proves, with CP_MEMCPY
+# jobs of at most 1 MiB in both directions (and non-coherent controls first), that GPU accesses through AttrIndx 1 /
+# SH IS leaves snoop the CPU's caches; only then are CB0's mirror leaves IO-coherent, and ADRENO_GUEST_COHERENT tells
+# the kext so. Its state is in root_ext (--root-cache-wide); its scratch is the q1n1 arena's Stage 4 pool region,
+# free only with --gpu-va-wide. The guest boot-arg adreno_coherent=1 opts the kext in. Appended after every earlier
+# flag.
+GPU_COHERENT_DEFINE = '-DSNAP_ADRENO_COHERENT=1'
+# --gpu-coherent-force: debug only, an A/B rendering check of skipped maintenance before the self-test can prove
+# anything. The monitor reports ON with ADRENO_COHERENT_DETAIL_FORCED and runs no job; the kext accepts that only with
+# its own boot-arg adreno_coherent_force=1. Appended after GPU_COHERENT_DEFINE.
+GPU_COHERENT_FORCE_DEFINE = '-DSNAP_ADRENO_COHERENT_FORCE=1'
+# --edp-backlight (agents/brightness): compat/edp-backlight.h SNAP_EDP_BACKLIGHT, ADRENO_GUEST_BACKLIGHT QUERY/SET of the
+# panel's DPCD backlight level over the eDP controller's AUX channel. Only the AUX transport registers and DPCD
+# 0x721-0x723 are written, the level is clamped to [10% of full scale, the panel's maximum], and any failure leaves the
+# brightness as it was. The kext half is INPUT_AUXKC_DESKTOP_BACKLIGHT and the guest boot-arg adreno_backlight=1 the
+# flag adds. Monitor define only (no loader change). Appended after every earlier flag; off, the monitor is
+# byte-identical.
+EDP_BACKLIGHT_DEFINE = '-DSNAP_EDP_BACKLIGHT=1'
+# --view-reclaim (agents/view-reclaim): shadow/sprr-view.h SNAP_VIEW_RECLAIM, a 256-table kernel view pool and the
+# reclaim of copies no protected leaf needs when a protecting RETYPE finds it full (next1 stopped at 128, exit 7).
+# Monitor define only (no loader change). Appended after every earlier flag; off, the monitor is byte-identical.
+VIEW_RECLAIM_DEFINE = '-DSNAP_VIEW_RECLAIM=1'
 # agents/dvfs (FAILURE-MODES.md): opt-in governors on vCPU 0's locked tick, state at the end of root_ext (so
 # --root-cache-wide), report DVFSREP1 after the thermal record, restored at the stop; both need --thermal-guard (they
 # never write without the guard's readings). compat/cpu-dvfs.h SNAP_CPU_DVFS: SCMI PERF LEVEL_SET fastchannels of the
@@ -723,6 +795,12 @@ def route_selected(args):
     need(not latch or va_wide,
          '--present-latch needs --gpu-va-wide and its chain (its AdrenoX2 is that collection\'s with ADRENO_LATCH, its '
          'SnapI2CHID stage B with SNAP_I2C_HID_LATENCY)')
+    edp_backlight = getattr(args, 'edp_backlight', False)
+    need(not edp_backlight or latch,
+         '--edp-backlight needs --present-latch and its chain (its AdrenoX2 is that collection\'s with ADRENO_BACKLIGHT)')
+    early = getattr(args, 'present_early_done', None)
+    need(early is None or edp_backlight,
+         '--present-early-done needs --edp-backlight and its chain (its AdrenoX2 is the early-done collection)')
     need(not (vsync60 and (damage or cached or gpumap)),
          '--present-vsync60 already includes --present-gpumap\'s (and so --present-cached-read\'s) kext: give one of them')
     need(not (damage and cached), '--present-cached-read already includes --present-damage\'s present: give one of them')
@@ -748,6 +826,20 @@ def route_selected(args):
         if vsync60:
             return ((INPUT_TOUCHPAD_PROFILE if touchpad else INPUT_PROFILE), INPUT_AUXKC_VSYNC60,
                     INPUT_AUXKC_VSYNC60_SHA, INPUT_BUNDLES)
+        if dartpool and ptp and resident and beam and va_reclaim and va_wide and latch and edp_backlight and (
+                getattr(args, 'gpu_coherent', False) or early is not None):
+            need(INPUT_AUXKC_DESKTOP_EARLY_DONE is not None and INPUT_AUXKC_DESKTOP_EARLY_DONE_SHA is not None,
+                 '--edp-backlight with --gpu-coherent or --present-early-done: its AuxKC is not pinned yet '
+                 '(INPUT_AUXKC_DESKTOP_EARLY_DONE_SHA; KEXT_PROFILE=desktop-early-done I2C_PROFILE=desktop-fnkeys '
+                 'tools/build-auxkc-desktop.sh NAME links it)')
+            return (INPUT_TOUCHPAD_PROFILE, INPUT_AUXKC_DESKTOP_EARLY_DONE, INPUT_AUXKC_DESKTOP_EARLY_DONE_SHA,
+                    INPUT_BUNDLES)
+        if dartpool and ptp and resident and beam and va_reclaim and va_wide and latch and edp_backlight:
+            need(INPUT_AUXKC_DESKTOP_BACKLIGHT is not None and INPUT_AUXKC_DESKTOP_BACKLIGHT_SHA is not None,
+                 '--edp-backlight: its AuxKC is not pinned yet (INPUT_AUXKC_DESKTOP_BACKLIGHT_SHA; '
+                 'KEXT_PROFILE=desktop-backlight tools/build-auxkc-desktop.sh NAME links it)')
+            return (INPUT_TOUCHPAD_PROFILE, INPUT_AUXKC_DESKTOP_BACKLIGHT, INPUT_AUXKC_DESKTOP_BACKLIGHT_SHA,
+                    INPUT_BUNDLES)
         if dartpool and ptp and resident and beam and va_reclaim and va_wide and latch:
             need(INPUT_AUXKC_PTP_DARTPOOL_RESIDENT_BEAM_VA_WIDE_LATCH is not None and
                  INPUT_AUXKC_PTP_DARTPOOL_RESIDENT_BEAM_VA_WIDE_LATCH_SHA is not None,
@@ -1032,13 +1124,43 @@ def variant_flags(sets, args, variant=None):
              '--multipage-fast needs --attr-clean-defer and --root-cache-wide (and the kernel view reuse snapshot), '
              'not --token-trim')
         flags.append(MULTIPAGE_FAST_DEFINE)
+    if getattr(args, 'gpu_coherent', False):
+        need(GPU_VA_WIDE_DEFINE in flags and '-DSNAP_ROOT_CACHE_WIDE=1' in flags,
+             '--gpu-coherent needs --gpu-va-wide (its self-test scratch is the arena\'s Stage 4 pool region) and '
+             '--root-cache-wide (its state is in root_ext)')
+        flags.append(GPU_COHERENT_DEFINE)
+    if getattr(args, 'gpu_coherent_force', False):
+        need(getattr(args, 'gpu_coherent', False), '--gpu-coherent-force needs --gpu-coherent: it forces that '
+             'self-test\'s outcome')
+        flags.append(GPU_COHERENT_FORCE_DEFINE)
+    if getattr(args, 'edp_backlight', False):
+        flags.append(EDP_BACKLIGHT_DEFINE)
+    if getattr(args, 'view_reclaim', False):
+        flags.append(VIEW_RECLAIM_DEFINE)
     return flags
+
+
+def run_watchdog(args):
+    """The run's watchdog in seconds: --watchdog, else WATCHDOG. Above WATCHDOG the boot preflight requires AC."""
+    value = getattr(args, 'watchdog', None)
+    if value is None:
+        return WATCHDOG
+    need(WATCHDOG <= value <= WATCHDOG_MAX, f'--watchdog must be {WATCHDOG}..{WATCHDOG_MAX} s')
+    return value
 
 
 def environment(args):
     """ENV, or with --console the console on the same poll; --kernel-sysreg-zero, --kernel-refmod-skip and
     --kernel-user-4k add the opt-in kernel patches."""
     env = dict(ENV, SNAP_EARLY_STOP='guest,console') if getattr(args, 'console', False) else dict(ENV)
+    watchdog = run_watchdog(args)
+    env['SNAP_WATCHDOG'] = str(watchdog)
+    if getattr(args, 'session', False):
+        # A desktop session: the kext gets no first-present stop request (probes/adreno.py advertises it only for the
+        # guest trigger), so the run lasts until the watchdog, the thermal guard or a host stop (tools/request-stop.py).
+        need(getattr(args, 'console', False), '--session needs --console (the host poll that request-stop.py uses)')
+        need(getattr(args, 'early_stop_delay', None) is None, '--session has no first-present stop: drop --early-stop-delay')
+        env['SNAP_EARLY_STOP'] = 'console'
     if getattr(args, 'hide_amx', False):
         env['SNAP_HIDE_AMX'] = '1'
     if getattr(args, 'guest_net', False):
@@ -1078,7 +1200,7 @@ def environment(args):
     if delay is not None:
         # The kext's first-present / plug-in-failure stop fires this long after its request (default 600 s);
         # it must leave the watchdog the last word.
-        need(60 <= delay < WATCHDOG, f'--early-stop-delay must be 60..{WATCHDOG - 1} s')
+        need(60 <= delay < watchdog, f'--early-stop-delay must be 60..{watchdog - 1} s')
         env['SNAP_EARLY_STOP_DELAY'] = env['SNAP_EARLY_STOP_MAX_DELAY'] = str(delay)
     return env
 
@@ -1099,6 +1221,22 @@ def boot_addition(args):
     extra = []
     if getattr(args, 'present_maint', False):
         extra.append('adreno_present_maint=1')
+    if getattr(args, 'adreno_cs_samplers', False):
+        extra.append('adreno_cs_samplers=1')      # read only by an ADRENO_IB_CS_SAMPLERS AdrenoX2 (configureDevice)
+    if getattr(args, 'gpu_coherent', False):
+        extra.append('adreno_coherent=1')   # the kext still skips only after the monitor's self-test said ON
+    if getattr(args, 'gpu_coherent_force', False):
+        extra.append('adreno_coherent_force=1')   # and, debug only, after a forced ON (no self-test)
+    need(not getattr(args, 'edp_backlight_mode', False) or getattr(args, 'edp_backlight', False),
+         '--edp-backlight-mode needs --edp-backlight')
+    if getattr(args, 'edp_backlight', False):
+        extra.append('adreno_backlight=1')        # the kext publishes its service only after the monitor's QUERY
+    if getattr(args, 'edp_backlight_mode', False):
+        extra.append('adreno_backlight_mode=1')   # and may switch a panel left in PWM mode to DPCD control
+    resident_mib = getattr(args, 'resident_mib', None)
+    if resident_mib is not None:
+        need(0 <= resident_mib <= 4096, '--resident-mib must be 0..4096')
+        extra.append(f'adreno_resident_mib={resident_mib}')
     # --present-latch's guest boot-args (AdrenoDisplay start_hardware, SnapI2CHIDBus::start); none without the flag.
     latch_us, hold = getattr(args, 'present_latch_us', None), getattr(args, 'present_hold', None)
     margin_us, active_us = getattr(args, 'present_hold_margin_us', None), getattr(args, 'input_active_us', None)
@@ -1128,6 +1266,30 @@ def boot_addition(args):
     if active_us is not None:
         need(active_us == 0 or 2000 <= active_us <= 100000, '--input-active-us must be 0 or 2000..100000')
         extra.append(f'snap_i2c_active_us={active_us}')
+    # --present-early-done: AdrenoDisplay's early completion (src/AdrenoDisplayEarlyDone.h), read only by the
+    # desktop-early-done AdrenoX2 that --edp-backlight then selects; the kext turns it off with the release hold.
+    early, early_hold = getattr(args, 'present_early_done', None), getattr(args, 'present_early_hold_ms', None)
+    need(early is None or getattr(args, 'edp_backlight', False),
+         '--present-early-done needs --edp-backlight (the early-done collection is that chain\'s)')
+    need(early is None or early in (0, 1, 2), '--present-early-done is 0 (measure only), 1 (always) or 2 (while behind)')
+    need(early_hold is None or early == 2, '--present-early-hold-ms needs --present-early-done 2')
+    need(not early or hold != 'on', '--present-early-done 1/2 and --present-hold on exclude each other (the hold '
+                                    'keeps the swap current until its release)')
+    if early is not None:
+        extra.append(f'adreno_present_early_done={early}')
+    if early_hold is not None:
+        need(100 <= early_hold <= 10000, '--present-early-hold-ms must be 100..10000')
+        extra.append(f'adreno_present_early_hold_ms={early_hold}')
+    # --input-fnkeys: the keyboard's Fn-key layer (drivers/snap-i2c-hid/src/hid-keyboard.h HID_FNKEYS_*), read by a
+    # SnapI2CHID built with SNAP_I2C_HID_FNKEYS; the same sets the kext refuses are refused here.
+    fnkeys = getattr(args, 'input_fnkeys', None)
+    if fnkeys is not None:
+        need(getattr(args, 'input', False), '--input-fnkeys needs --input (the SnapI2CHID AuxKC)')
+        need(0 < fnkeys <= 0x1f and not fnkeys & ~0x1f, '--input-fnkeys must be 0x1..0x1f (hid-keyboard.h HID_FNKEYS_*)')
+        need((fnkeys >> 3) & 3 != 3, '--input-fnkeys: brightness encoding 3 (0x18) does not exist')
+        need(not fnkeys & 0x4 or fnkeys & 0x1, '--input-fnkeys: the host Fn-lock (0x4) needs translation (0x1)')
+        need(fnkeys & 0x3, '--input-fnkeys: give translation (0x1) or the raw log (0x2)')
+        extra.append(f'snap_i2c_fnkeys={fnkeys}')
     if zone is not None:
         need(ZONE_LOG_NAME.fullmatch(zone), f'--zone-log {zone!r}: XNU zone names are [A-Za-z0-9_.], at most 64')
         extra.append(f'zlog1={zone}')
@@ -1641,7 +1803,7 @@ def prepare(ws, args, dest):
                          user_4k=getattr(args, 'kernel_user_4k', False), context_layout=context)
     need(all(sha(p) == h for p, h in sources.items()), 'sources changed during preparation')
     record = dict(schema=SCHEMA, status='OFFLINE_PREPARED_NOT_BOOTED', prefix=args.prefix, variant=args.variant,
-                  device=args.device or ws.device, profile=profile_name, watchdog_seconds=WATCHDOG, environment=environment(args),
+                  device=args.device or ws.device, profile=profile_name, watchdog_seconds=run_watchdog(args), environment=environment(args),
                   flags=flags, fast_defines=fast if args.variant == 'fast' else [], gpu_steps=steps,
                   root_hash_component=component, txm_helper=helper, auxkc_pin=pin,
                   window_header_prefix=WINDOW_HEADER_PREFIX, boot_argument_addition=boot_addition(args),
@@ -1671,7 +1833,7 @@ def check(ws, args, dest):
     need(record['auxkc_pin']['sha256'] == selected(args)[2],
          'the AuxKC differs from the preparation (give --present-damage/--present-cached-read/--present-gpumap/'
          '--present-vsync60/--present-dartpool/--present-resident/--present-beam/--present-va-reclaim/--gpu-va-wide/'
-         '--present-latch/'
+         '--present-latch/--edp-backlight/'
          '--input-ptp/--guest-net to every mode)')
     need(record['flags'] == variant_flags(st.flag_sets(ws.root)[0], args, record['variant']), 'variant flags differ from the recipe')
     need(record['gpu_steps'] == [list(s) for s in gpu_steps(ws.root, args)], 'GPU steps differ from the pinned launcher')
@@ -1757,6 +1919,8 @@ def a16gpu(ws, device, out, arguments, environment):
     """One a16gpu.py client; its record must not exist and must end unstopped."""
     log = out.with_suffix('.log')
     need(not out.exists() and not log.exists(), f'{out.name} already exists')
+    # q1n1's build/ is untracked, so a fresh checkout has no build/a16-gpu/ yet.
+    log.parent.mkdir(parents=True, exist_ok=True)
     with log.open('x') as stream:
         result = subprocess.run([sys.executable, 'tools/a16gpu.py', '--device', device, '--out', str(out), *arguments],
                                 cwd=ws.q, env=environment, stdout=stream, stderr=subprocess.STDOUT)
@@ -1983,8 +2147,10 @@ def boot(ws, args, dest, qualification):
                 need(step['serror_guard']['present'], 'GPU guard step found no SError guard')
         adoption = out('adopt').with_name(f'{args.prefix}-adopt-record.json')
         va_wide = qualification['environment'].get('SNAP_ADRENO_VA_WIDE') == '1'   # --gpu-va-wide's q1n1 half
-        code, _ = a16gpu(ws, device, out('adopt'), ['adopt', '--record', str(adoption), *(['--va-wide'] if va_wide else [])],
-                         gpu_env)
+        # --gpu-coherent's q1n1 half: adopt also proves CB0 MAIR0/CBAR read-only (the record is the same).
+        coherent = ['--coherent'] if GPU_COHERENT_DEFINE in qualification['flags'] else []
+        code, _ = a16gpu(ws, device, out('adopt'), ['adopt', '--record', str(adoption), *(['--va-wide'] if va_wide else []),
+                                                    *coherent], gpu_env)
         need(code == 0 and adoption.is_file(), 'GPU adoption refused')
         record['gpu']['adoption'] = dict(path=str(adoption), sha256=st.file_sha(adoption))
         proxy = runner.connect(device, tries=1)
@@ -2002,10 +2168,16 @@ def boot(ws, args, dest, qualification):
         minimum = record['battery_minimum_without_ac'] = battery_minimum(None)
         need(status == 0 and battery['plausible'] and (battery['ac'] or battery['percent'] >= minimum),
              f'battery preflight refused: below {minimum}% without AC')
+        long_run = int(qualification['environment'].get('SNAP_WATCHDOG', WATCHDOG)) > WATCHDOG
+        need(battery['ac'] or not long_run, f'battery preflight refused: a watchdog above {WATCHDOG} s needs AC')
         record['status'] = 'BOOTING'
         write(path, record)
+        # The resident stage binds to its own ELF (probes/stagebind.py): the regular q1n1 build, or the gadget-NCM
+        # stage tools/a16-link-rearm.py arms after a reset (q1n1 build/uefi-gadget-ncm, Q1N1_GADGET_NCM) when built.
+        stage_builds = [ws.q / 'build/uefi'] + [p for p in [ws.q / 'build/uefi-gadget-ncm'] if p.is_dir()]
         settings = dict(qualification['environment'], SNAP_SMP_REPORT_PREFIX=args.prefix, SNAP_ADRENO_ADOPT=str(adoption),
-                        SNAP_TXM_NATIVE=str(dest / 'image4.bin'), SNAP_STAGE_BUILDS=str(ws.q / 'build/uefi'))
+                        SNAP_TXM_NATIVE=str(dest / 'image4.bin'),
+                        SNAP_STAGE_BUILDS=os.pathsep.join(str(p) for p in stage_builds))
         if settings.get('SNAP_QCC2072_WIFI'):
             # probes/run.py reads the prepared, hash-pinned inputs (check() re-verified them above).
             settings['SNAP_QCC2072_INPUTS'] = str(dest / QCC2072_INPUTS)

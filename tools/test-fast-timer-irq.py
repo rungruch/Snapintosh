@@ -45,9 +45,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from source_text import read_source
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'probes/xnuboot.c').read_text()
+SOURCE = read_source(ROOT / 'probes/xnuboot.c')
 HEADER = (ROOT / 'compat/fast-timer-irq.h').read_text()
 TEST_C = (ROOT / 'tools/test-fast-timer-irq.c').read_text()
 DEFINE = '-DSNAP_FAST_TIMER_IRQ=1'
@@ -223,7 +224,7 @@ class Transcription(unittest.TestCase):
                       between(SOURCE, 'static void timer_eoi(uint64_t intid)', '\n}\n'))
 
     def test_shared_part_is_the_watchdog_polled_by_locked_ticks(self):
-        device = (ROOT / 'compat/device.c').read_text()
+        device = read_source(ROOT / 'compat/device.c')
         wait = between(device, 'uint64_t device_model_wait(', '\n}\n')
         self.assertIn('model->kind == DEVICE_WATCHDOG_WD1_V1', wait)
         self.assertEqual(wait.count('return'), 2)             # the watchdog's wait, else the budget unchanged

@@ -47,9 +47,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from source_text import read_source
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'probes/xnuboot.c').read_text()
+SOURCE = read_source(ROOT / 'probes/xnuboot.c')
 FAST_H = (ROOT / 'shadow/sprr-class-fast.h').read_text()
 LEAF_H = (ROOT / 'shadow/sprr-class-leaf-memo.h').read_text()
 TEST_C = 'tools/test-kernel-pperm-fast.c'
@@ -307,7 +308,7 @@ def source_problems_compat():
     every store made through the pointer."""
     p = []
     for path in sorted((ROOT / 'compat').glob('*.c')):
-        for size in re.findall(r'map_shadow\(\s*b->ctx\s*,\s*\w+\s*,\s*([^)]+)\)', path.read_text()):
+        for size in re.findall(r'map_shadow\(\s*b->ctx\s*,\s*\w+\s*,\s*([^)]+)\)', read_source(path)):
             if size.strip() not in ('4096', '0x1000'):
                 p.append(f'{path.name}: map_shadow of {size.strip()}')
     return p

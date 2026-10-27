@@ -272,6 +272,22 @@ def parse(argv=None):
                         'submission is in the kext. SnapI2CHID polls every 4 ms while touched, timed from the previous '
                         'poll\'s start. The release hold is off by default since b12v11. Kext only; give it to every '
                         'mode of the attempt')
+    p.add_argument('--edp-backlight', action='store_true',
+                   help='opt-in panel brightness (agents/brightness; needs --present-latch and its chain): monitor define '
+                        'SNAP_EDP_BACKLIGHT (ADRENO_GUEST_BACKLIGHT: the panel\'s DPCD backlight level over the eDP '
+                        'AUX channel, clamped to [10%% of full scale, the panel\'s maximum], fail closed), the AuxKC '
+                        'INPUT_AUXKC_DESKTOP_BACKLIGHT (AdrenoBacklight, the backlight service CoreBrightness drives) and '
+                        'guest boot-arg adreno_backlight=1; give it to every mode of the attempt')
+    p.add_argument('--edp-backlight-mode', action='store_true',
+                   help='with --edp-backlight: guest boot-arg adreno_backlight_mode=1, letting the first brightness '
+                        'change switch a panel the firmware left in PWM-pin mode to DPCD control (level written first, '
+                        'only the two mode bits changed, read back; on failure the old mode is restored and the '
+                        'monitor stops)')
+    p.add_argument('--view-reclaim', action='store_true',
+                   help='opt-in kernel view pool (shadow/sprr-view.h): monitor define SNAP_VIEW_RECLAIM, 256 private '
+                        'kernel view tables instead of 128 and, when a protecting RETYPE finds them full, the copies no '
+                        'selector2/4 leaf needs any more retired (after an all-CPU sync, publication and TLBI) and their '
+                        'pages reused; report record VIEWRCL1. Monitor only')
     p.add_argument('--present-latch-us', type=int, default=None,
                    help='with --present-latch: guest boot-arg adreno_latch_us, the slack kept before row 0 (default '
                         '3000; 0 = the beam kext\'s aim before the vblank)')
@@ -279,6 +295,16 @@ def parse(argv=None):
                    help='with --present-latch: guest boot-arg adreno_hold (default off since b12v11: on completes the swap '
                         'on screen just before the next latch and copies the pending one early; b12v11 showed early '
                         'copies of frames whose IB had not finished)')
+    p.add_argument('--present-early-done', type=int, choices=(0, 1, 2), default=None,
+                   help='with --edp-backlight and its chain: the AuxKC INPUT_AUXKC_DESKTOP_EARLY_DONE and guest '
+                        'boot-arg adreno_present_early_done: AdrenoDisplay completes a layer-0 swap right after its '
+                        'scanout copy instead of at the next tick, so WindowServer\'s two swap entries free a refresh '
+                        'earlier (1 always; 2 only while WindowServer is late, for --present-early-hold-ms after each late '
+                        'frame; 0 measures only). Every mode adds the perf done line (WindowServer\'s arrivals against '
+                        'the ticks). Not with --present-hold on; give it to every mode of the attempt')
+    p.add_argument('--present-early-hold-ms', type=int, default=None,
+                   help='with --present-early-done 2: guest boot-arg adreno_present_early_hold_ms, how long a late frame '
+                        'keeps early completion on (default 2000; 100..10000)')
     p.add_argument('--present-gate-us', type=int, default=None,
                    help='with --present-latch: guest boot-arg adreno_gate_us, the age under which a layer-0 swap is not '
                         'copied while a GPU submission is in the kext (default 4000; 0 = no gate)')
@@ -295,6 +321,12 @@ def parse(argv=None):
     p.add_argument('--input-active-us', type=int, default=None,
                    help='with --present-latch: guest boot-arg snap_i2c_active_us, the poll period while touched '
                         '(default 4000; 0 = the configured 8 ms throughout)')
+    p.add_argument('--input-fnkeys', type=lambda v: int(v, 0), default=None, metavar='FLAGS',
+                   help='with --input: guest boot-arg snap_i2c_fnkeys=FLAGS for a SnapI2CHID built with '
+                        'SNAP_I2C_HID_FNKEYS (drivers/snap-i2c-hid PROFILE=desktop-fnkeys; others ignore it): 0x1 '
+                        'the keyboard\'s ASUS hotkeys as macOS usages, 0x2 the rate-limited raw log of what the F-row '
+                        'sends, 0x4 the host Fn-lock on Fn+Esc (needs 0x1), 0x8/0x10 the brightness encoding '
+                        '(hid-keyboard.h); give it to every mode of the attempt')
     p.add_argument('--hide-amx', action='store_true',
                    help='clear the application AMX-version capability field; preserves kernel AMXIDR '
                         'and does not expose SME; give it to every mode of the attempt')
@@ -467,10 +499,19 @@ def parse(argv=None):
                    help='SNAP_EL0_CACHE_MAINT: SCTLR_EL1.UCI as SPTM installs it, so EL0 DC CVAU/CVAC/CIVAC and IC IVAU '
                         '(sys_icache_invalidate) no longer trap to EL1, where handle_msr_trap raises SIGILL; give it to '
                         'every mode of the attempt')
+    p.add_argument('--resident-mib', type=int, default=None, metavar='MIB',
+                   help='guest boot-arg adreno_resident_mib=MIB: AdrenoX2 resident-map budget (0 = off, max 4096; '
+                        'agents/resident-evict recommends 1536); give it to every mode of the attempt')
     p.add_argument('--present-maint', action='store_true',
                    help='guest boot-arg adreno_present_maint=1: AdrenoDisplay keeps its layer-0 clean+invalidate pass '
                         'even while the beam is LOCKED (tear-free fix2 skips it then); for b12v8\'s stale bands; '
                         'give it to every mode of the attempt')
+    p.add_argument('--adreno-cs-samplers', action='store_true',
+                   help='guest boot-arg adreno_cs_samplers=1: an AdrenoX2 built with ADRENO_IB_CS_SAMPLERS (the desktop '
+                        'profiles since agents/settings-icons; others ignore it) lets the IB validator admit CS sampler '
+                        'loads of up to 8 units and publishes AdrenoIBComputeSamplers, so an ADRENO_SETTINGS_ICONS '
+                        'plug-in encodes CoreImage\'s multi-input kernels (folder, document and Safari icons in System '
+                        'Settings panes); give it to every mode of the attempt')
     p.add_argument('--spmi-scratch', action='store_true',
                    help='SNAP_SPMI_SCRATCH: the emulated SPMI controller also serves the PMU scratch-pad registers '
                         '(f700-f7ff, 8f80-8fff) from RAM, so AppleDialogSPMIPMU::_readRegs stops failing with e00002bc '
@@ -515,6 +556,19 @@ def parse(argv=None):
                         'kernel-view copy words patched instead of a full view re-sync per frame, and one '
                         'publication, refresh and TLBI per run of headers (b12v16: 14,880 calls held the token 7.79 ms '
                         'each); give it to every mode of the attempt')
+    p.add_argument('--gpu-coherent', action='store_true',
+                   help='with --gpu-va-wide and --root-cache-wide: SNAP_ADRENO_COHERENT, a bounded '
+                        'boot self-test of CPU/GPU cache coherency through the ring (CP_MEMCPY <= 1 MiB, both '
+                        'directions, controls first); only if every iteration passes do CB0\'s mirror leaves become '
+                        'IO-coherent (AttrIndx 1, SH IS), and the guest boot-arg adreno_coherent=1 lets an '
+                        'ADRENO_COHERENT_SKIP_MAINT AdrenoX2 skip CPU maintenance for write-back buffers. Outcome: '
+                        'EV_GPU_COHERENT; give it to every mode of the attempt')
+    p.add_argument('--gpu-coherent-force', action='store_true',
+                   help='DEBUG ONLY, for an A/B rendering check, with --gpu-coherent: SNAP_ADRENO_COHERENT_FORCE, no '
+                        'self-test. CB0\'s mirror leaves are IO-coherent and, with the guest boot-arg '
+                        'adreno_coherent_force=1 it adds, the kext skips CPU maintenance for write-back buffers '
+                        'although nothing proved this machine coherent. EV_GPU_COHERENT and the kext\'s log say '
+                        'FORCED; give it to every mode of the attempt')
     p.add_argument('--let-panic', action='store_true',
                    help='SNAP_LET_PANIC: XNU\'s own EL1 exceptions (its panic debugger trap) resume into its handler '
                         'instead of stopping the run, so the panic text reaches the console; give it to every mode')
@@ -576,7 +630,14 @@ def parse(argv=None):
                    help='with --zone-log: records kept (boot-arg zrecs=N); give it to every mode of the attempt')
     p.add_argument('--early-stop-delay', type=int, metavar='SECONDS',
                    help='seconds from the kext\'s first-present or plug-in-failure stop request to the stop (default '
-                        '600); below the 1800 s watchdog; give it to every mode of the attempt')
+                        '600); below the watchdog; give it to every mode of the attempt')
+    p.add_argument('--watchdog', type=int, metavar='SECONDS',
+                   help='the run\'s watchdog, 1800 (default) to 7200 s; above 1800 the boot preflight requires the A16 '
+                        'on AC; give it to every mode of the attempt')
+    p.add_argument('--session', action='store_true',
+                   help='with --console: a desktop session with no first-present stop (SNAP_EARLY_STOP=console); it '
+                        'ends at the watchdog, the thermal guard or tools/request-stop.py; give it to every mode of '
+                        'the attempt')
     p.add_argument('--prime-secondaries', action='store_true',
                    help='opt-in: run all six vCPUs on Prime cluster 1 (SNAP_SMP_PRIME=1 and monitor define '
                         'SNAP_BOOT_RELOCATE: vCPU 0 moves off q1n1\'s cluster-0 CPU) instead of the lower-power '

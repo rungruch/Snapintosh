@@ -24,10 +24,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from source_text import read_source
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'probes/xnuboot.c').read_text()
-ENGINE = (ROOT / 'compat/sptm-user.c').read_text()
+SOURCE = read_source(ROOT / 'probes/xnuboot.c')
+ENGINE = read_source(ROOT / 'compat/sptm-user.c')
 KERNEL = (ROOT / 'compat/sptm-unmap.c').read_text()
 IMPL = sorted(str(p.relative_to(ROOT)) for p in (ROOT / 'compat').glob('sptm*.c'))
 IMPL += ['shadow/sprr-view.c', 'shadow/mmu.c', 'shadow/shadow.c']
@@ -145,7 +146,7 @@ MUTANTS = [
 class Mutants(unittest.TestCase):
     def test_each_mutant_fails(self):
         for n, (rel, old, new) in enumerate(MUTANTS):
-            text = (ROOT / rel).read_text()
+            text = read_source(ROOT / rel)
             self.assertEqual(text.count(old), 1, f'mutant {n} anchor: {old[:60]}')
             tree = WORK / f'mutant-{n}'
             subprocess.run(['mkdir', '-p', str(tree)], check=True)

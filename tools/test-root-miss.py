@@ -48,10 +48,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from source_text import read_source
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'probes/xnuboot.c').read_text()
-ROOT_C = (ROOT / 'compat/sptm-root.c').read_text()
+SOURCE = read_source(ROOT / 'probes/xnuboot.c')
+ROOT_C = read_source(ROOT / 'compat/sptm-root.c')
 HEADER = (ROOT / 'compat/root-miss.h').read_text()
 DEFINE = '-DSNAP_ROOT_MISS_FAST=1'
 CORE = ['compat/sptm-root.c', 'compat/sptm-user.c', 'compat/sptm.c', 'compat/sptm-refs.c',
@@ -91,7 +92,7 @@ def compile_c(directory, test, defines, overrides=None, werror=True, extra=()):
         mut = Path(directory) / 'mut'
         mut.mkdir(exist_ok=True)
         for name in ('root-miss.h', 'sptm-root.c'):
-            (mut / name).write_text(overrides.get(name, (ROOT / 'compat' / name).read_text()))
+            (mut / name).write_text(overrides.get(name, read_source(ROOT / 'compat' / name)))
         include = [f'-I{mut}']
         sources = [str(mut / 'sptm-root.c') if s == 'compat/sptm-root.c' else s for s in sources]
     flags = ['cc', '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', *(['-Werror'] if werror else []),

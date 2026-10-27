@@ -12,7 +12,8 @@ stated otherwise.
 | Kernel Debug Kit for 26A428 | Installed at `/Library/Developer/KDKs/KDK_27.0_26A428.kdk`. `kmutil` links AuxKCs against it, and `tools/kc-symbolicate.py` uses its symbols |
 | Python 3 | For every host tool |
 | Homebrew `llvm`, `meson`, `ninja` | For the air2ir3 shader compiler and its Mesa build. The scripts expect LLVM at `/opt/homebrew/opt/llvm` |
-| q1n1 | A checkout of [q1n1](https://github.com/Acelogic/q1n1) next to this repository, at `../q1n1`. Several tools import its proxy client and helpers from there |
+| Submodules | Clone with `git clone --recurse-submodules`, or run `git submodule update --init` in an existing checkout. The kext, plug-in, shader compiler and two drivers live in their own repositories (see the README's Repositories section) |
+| q1n1 | A checkout of [q1n1](https://github.com/Snapintosh/q1n1) next to this repository, at `../q1n1`. Several tools import its proxy client and helpers from there |
 
 ## 1. Apple inputs
 
@@ -98,6 +99,19 @@ AdrenoX2 build accepts feature defines (for example `ADRENO_BEAM`,
 `ADRENO_PIPELINE`, `ADRENO_PRESENT_SYNC`). The boot tool selects the matching
 build for each run flag.
 
+The deployed desktop kexts are build profiles: per-unit define sets kept in
+each component's `profiles/` folder. Without `PROFILE` the builds are unchanged.
+
+```sh
+PROFILE=desktop sh gpu/adreno-kext/kext/build.sh              # AdrenoX2 with IO-coherent skipping (--gpu-coherent)
+PROFILE=desktop-nocoherent sh gpu/adreno-kext/kext/build.sh   # the same without coherency
+PROFILE=desktop sh drivers/snap-i2c-hid/build.sh              # SnapI2CHID with input-latency polling
+```
+
+A profile writes `DEFINES.txt` beside the kext. Compare a build with a deployed
+kext using `python3 tools/macho-sections.py <deployed> <built>`: the sections
+match, while the file bytes also carry object paths, object times and a UUID.
+
 ## 4. Linking an AuxKC
 
 `kmutil` silently drops kexts that are not owned by `root:wheel`, and it still
@@ -116,6 +130,14 @@ stage, link and pin in one step. `tools/build-auxkc-user.py` links raw
 collections the same way. It runs `kmutil` as you and uses ordinary `sudo`
 (it prompts unless a sudo session is cached) only to stage and clean the
 root-owned copies.
+
+`tools/build-auxkc-desktop.sh NAME` builds the desktop collection from this
+checkout: both kexts with their `desktop` profiles (`KEXT_PROFILE=desktop-nocoherent`
+for AdrenoX2 without coherency), then `tools/build-auxkc-user.py`,
+`tools/auxkc-autoload.py` and `build/build-auxkc.py pin`. It writes
+`build/current-assets/NAME/`, prints the sha256 of every output and the two
+`tools/cycle_lib/installed_fresh.py` lines that pin the collection, and with
+`REFERENCE=<folder>` compares both kexts with a deployed collection's.
 
 To link the Wi-Fi controller into an existing guest collection, while keeping
 its graphics and input bundles:
@@ -136,6 +158,17 @@ host test harness (`regtest`). Optional environment variables:
 
 - `ADRENO_LENIENT=1` drops a pass the encoder refuses instead of failing the
   command buffer. Use it for deployment; the tests use the strict default.
+- `ADRENO_PIPELINE=1` builds for the desktop AdrenoX2's IB pipeline (IOSurface
+  shadows wait for the GPU). The deployed plug-ins use it with `ADRENO_LENIENT=1`.
+- `ADRENO_SETTINGS_ICONS=1` encodes the CoreImage kernels of the icons inside
+  System Settings panes: sampled sRGB and grey+alpha textures, and multi-input
+  kernels once AdrenoX2 publishes `AdrenoIBComputeSamplers` (its
+  `ADRENO_IB_CS_SAMPLERS`, opted in with the guest boot-arg
+  `adreno_cs_samplers=1`). `tools/test-adreno-settings-icons.py` and
+  `tools/test-adreno-settings-ci-encoding.py` test it.
+
+`ADRENO_PIPELINE` and `ADRENO_SETTINGS_ICONS` take 0 or 1; 0 or unset leaves the
+build byte for byte as without them.
 - `ADRENO_SHADER_CACHE_PACK=<file>` links a precompiled shader pack into the
   bundle.
 - `ADRENO_COMPILER_RUNTIME=<dir>` bundles the air2ir3 runtime

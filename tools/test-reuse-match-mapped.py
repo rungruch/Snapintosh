@@ -28,13 +28,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from source_text import read_source
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'probes/xnuboot.c').read_text()
+SOURCE = read_source(ROOT / 'probes/xnuboot.c')
 HEADER = (ROOT / 'shadow/sprr-reuse.h').read_text()
 TEST_C = 'tools/test-reuse-match-mapped.c'
 LINKED = ['shadow/sprr-view.c', 'shadow/shadow.c', 'shadow/mmu.c']
-BUDGET = 0x470000 - 0x400000          # probes/run.py OUT_AT - CODE_AT
+BUDGET = 0x470000 - 0x3fc000          # probes/run.py OUT_AT - CODE_AT
 
 
 def arguments():

@@ -27,9 +27,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from source_text import read_source
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = (ROOT / 'probes/xnuboot.c').read_text()
+SOURCE = read_source(ROOT / 'probes/xnuboot.c')
 VECTOR = (ROOT / 'compat/fast-vector.h').read_text()
 MEMO = (ROOT / 'compat/el0-memo.h').read_text()
 DOMAIN = (ROOT / 'compat/pauth-domain.c').read_text()
@@ -188,7 +189,7 @@ class Hooks(unittest.TestCase):
         self.assertEqual(SOURCE.count('.install='), 2)
         self.assertIn('.install=user_root_install,.ctx=c,', SOURCE)
         self.assertIn('.install=fine_user_root_install,.ctx=c,', SOURCE)
-        root = (ROOT / 'compat/sptm-root.c').read_text()
+        root = read_source(ROOT / 'compat/sptm-root.c')
         stores = [i for i in range(len(root)) if root.startswith('s->active[cpu]=', i) or
                   root.startswith('__atomic_store_n(&s->active[cpu],', i)]
         self.assertEqual(len(stores), 4)

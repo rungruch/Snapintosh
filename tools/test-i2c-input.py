@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'probes'))
 sys.path.insert(0, str(ROOT / 'tools'))
 import i2cinput  # noqa: E402
+from source_text import read_source  # noqa: E402
 
 HEADER = ROOT / 'compat/i2c-input.h'
 SOURCE = ROOT / 'probes/xnuboot.c'
@@ -141,7 +142,7 @@ class Monitor(unittest.TestCase):
         self.assertEqual(bit('S2_XN'), i2cinput.S2_XN)
 
     def test_monitor_source(self):
-        src = SOURCE.read_text()
+        src = read_source(SOURCE)
         self.assertIn('#ifndef SNAP_I2C_INPUT\n#define SNAP_I2C_INPUT 0\n#endif\n'
                       '#if SNAP_I2C_INPUT\n#include "../compat/i2c-input.h"\n#endif\n', src)
         self.assertEqual(src.count('i2c-input.h"'), 1)
@@ -239,7 +240,7 @@ class Loader(unittest.TestCase):
         self.assertTrue(names)
         self.assertTrue(all(len(n) <= 31 for n in names), [n for n in names if len(n) > 31])
         driver = ROOT / 'drivers/snap-i2c-hid/src/SnapI2CHID.cpp'
-        read = set(re.findall(r'"(snapintosh,[\w-]+)"', driver.read_text()))
+        read = set(re.findall(r'"(snapintosh,[\w-]+)"', read_source(driver)))
         self.assertLessEqual(names - {'snapintosh,hid-product'}, read, 'a node property the kext does not read')
         self.assertTrue(all(len(n) <= 31 for n in read))
 
