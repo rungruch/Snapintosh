@@ -341,12 +341,19 @@ q1n1 has no transport to the Mac yet.
     In the arena's GiB, stage 2 maps only one 36 MiB identity region,
     `0xC6200000`–`0xC85FFFFF`, which starts at the splash framebuffer
     ([run 23](GAOKUN3-USB-DEVICE-MODE.md#run-23-2026-10-27-identity-only-around-the-splash-framebuffer)).
-  - **Next:** el2qual 11's `usb-s2-fixed` (stick entry 13) walks the fixed
-    range `0xC8000000`–`0xC80FFFFF` and reports UEFI's memory map over the
-    region, both read only (built, host and QEMU tested,
-    [step 1g](GAOKUN3-USB-DEVICE-MODE.md#step-1g-a-fixed-arena-in-the-identity-region-el2qual-11-entry-13)).
-    If that range is free memory and maps 1:1, q1n1 can claim its arena
-    there; otherwise the bypass for stream `0x820`, the first SMMU write.
+  - **Run 24:** el2qual 11
+    ([step 1g](GAOKUN3-USB-DEVICE-MODE.md#step-1g-a-fixed-arena-in-the-identity-region-el2qual-11-entry-13))
+    found `0xC8000000`–`0xC80FFFFF` mapped 1:1, read and write. But UEFI
+    reserves the whole region, `0xC6200000`–`0xC8600000`, as one
+    `RESERVED` descriptor, exactly the span stage 2 maps
+    ([run 24](GAOKUN3-USB-DEVICE-MODE.md#run-24-2026-10-27-the-region-is-firmware-reserved)).
+  - **Next:** the bypass for stream `0x820` is designed
+    ([step 1h](GAOKUN3-USB-DEVICE-MODE.md#step-1h-the-s2cr-bypass-design-el2qual-12-entry-14)):
+    one field of `S2CR(6)` at `0x15000C18`, `0x00000006` to `0x00010006`,
+    which changes USB0's stream alone. el2qual 12's `usb-s2-bypass-plan`
+    (stick entry 14) checks every precondition on the machine and prints
+    the word; it writes nothing and cannot. The write itself is a separate
+    stage that does not exist yet and needs its own go-ahead.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has

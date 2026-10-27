@@ -793,6 +793,192 @@ non-empty map is printed too.
 | Host: `python3 tools/test-el2qual.py` | PASS, 600937 checks (ASan+UBSan). The memory-map scan with run 23's likely shape out of order (only the two descriptors inside the region, sorted); overlap at either end; descriptors that only touch the region excluded; no pages, a page count past 64 bits, and an end that wraps past 2^64 excluded, including one starting inside the region; twelve entries in ascending and in descending order, the eight lowest kept and `AND 4 MORE`; an OEM type; no map, a descriptor size under 40, a map shorter than one descriptor. The fixed walk over a 2 MiB identity block at `0xC8000000`: 2 reads, `RW 256`, exact lines with ` (FIXED)`, and the longest not-run line fits 64 columns. The memory map's lines follow the survey's, before `USB SERROR`. 8 deliberately broken copies of the scan in `firmware.c` (both overlap edges, zero pages, wrap, no sorting, a higher entry let into a full list, the wrong attribute offset, a short descriptor size) and one of the lines (`AND 0 MORE`) are each rejected |
 | Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 12 unchanged, entry 13 `nopac nosmp exit-vhe usb-smmu-map usb-s2-fixed` |
 | QEMU: all 26 configurations | PASS. `max-vhe-usb-s2fixed-stick` (entry 13's options): `SMMU WALK NOT RUN: NO STAGE 2 (FIXED)`, `UEFI MAP C6200000-C8600000 ENTRIES 0`. `max-vhe-usb-s2fixed`: `ARENA C8000000 READS 258 (TEST TABLES) (FIXED)`, `RW 256`, leaf `00000000C80007FF`; `UEFI MAP 40000000-42400000 ENTRIES 1 (TEST RANGE)`, one `FREE` entry `0040000000`–`0044000000`, attributes `8` (write-back). The checker's self-test rejects a missing or unavailable map, entries out of order or outside the range, an entry count that disagrees, an unnamed test range, a non-empty map where virt has none, and an unasked one |
+| gaokun3 | run 24 (below): the range maps 1:1, read and write; the whole region is one `RESERVED` descriptor |
+
+#### Run 24, 2026-10-27: the region is firmware-reserved
+
+From the `usb-read` stick: el2qual 11 `45a95b3d` from `50fb2ad`, entry 13
+(`nopac nosmp exit-vhe usb-smmu-map usb-s2-fixed`), with no SError.
+Everything through bank 126 is as runs 21 to 23; `GUSB3PIPECTL` read
+`0B081402`. Then:
+
+```
+SMMU WALK ARENA C8000000 READS 2 (FIXED)
+SMMU WALK RW 256 LIMITED 0 MOVED 0 FAULTS 0
+SMMU WALK LEAF L2 00000000C80004FD
+UEFI MAP C6200000-C8600000 ENTRIES 1
+UEFI MAP 00C6200000 00C8600000 RESERVED 000000000000100F
+```
+
+**Reading it.**
+- **The range maps 1:1, as run 23 predicted.** Two reads: level 1, then
+  a 2 MiB block at level 2. All 256 pages are identity, readable and
+  writable. The leaf `0xC80004FD` decodes as:
+  - a block (bits 1:0 `0b01`) at `0xC8000000`;
+  - `MemAttr` `0xF`: Normal, write-back inner and outer;
+  - `S2AP` `0b11`: read and write;
+  - `SH` `0b00`: non-shareable;
+  - access flag set.
+- **UEFI reserves exactly that region.** The map has one descriptor over
+  it: `EfiReservedMemoryType`, `0xC6200000`–`0xC8600000` (`0x2400` pages,
+  36 MiB). Its attribute capabilities are `UC|WC|WT|WB|WP`. Its bounds
+  match the stage-2 identity blocks of run 23 exactly. The framebuffer
+  (`0xC6200000`–`0xC71A0000`) is inside it, as el2qual's own check requires.
+- **What the rest of it is for is not known.** The firmware reserves
+  36 MiB and maps the same 36 MiB for the bank USB0's stream nests. The
+  framebuffer uses 16 MB of it. The device tree describes nothing beyond the
+  framebuffer. That it is a display carveout, perhaps more buffers, is
+  INFERRED from where it starts.
+- **`SH` non-shareable** means stage 2 makes no coherency promise for those
+  pages. Separately, the device tree's USB0 node has no `dma-coherent`. So
+  q1n1's cache maintenance around DMA is needed in any case (OBSERVED from
+  the tree; not tested).
+
+**What it decides.** By the rule set before this run, `RESERVED` means
+q1n1 should not simply allocate there:
+- **The tail past the framebuffer,** `0xC71A0000`–`0xC85FFFFF`, would be
+  usable only once something shows nothing else reads or writes it,
+  whether the display engine or anything else the firmware reserved it
+  for. One read-only way to look: read which addresses the display engine
+  scans out, from its source-address registers. That would show what the
+  display reads, though not every possible user.
+- **The bypass for stream `0x820`** avoids depending on the carveout. It is
+  the first SMMU write and needs its own go-ahead.
+
+### Step 1h: the S2CR bypass design (el2qual 12, entry 14)
+
+Runs 21 to 24 leave one way to give q1n1 usable DMA without depending on
+the firmware's carveout: stop translating USB0's stream. This section is
+the design. **Nothing in it has been written to the SMMU, and el2qual
+cannot write it:** `probes/el2qual/s2bypass.c` has no write callback, so no
+path through it reaches hardware. Entry 14 only works out the change and
+reports it.
+
+#### Why this change and not another
+
+| Option | Blast radius | Verdict |
+| --- | --- | --- |
+| **`S2CR(6).TYPE` to bypass** | stream `0x820` alone: group 6's stream match is exact (`SMR 0x80000820`, mask 0) | chosen |
+| Repoint bank 126's `VTTBR` at q1n1's own tables | every stream under VMID 3, which run 23 showed includes whatever the firmware maps | rejected |
+| Add entries to the firmware's stage-2 tables at `0xB7609000` | the same, plus writing a `no-map` region the firmware owns | rejected |
+| Put the arena in the reserved carveout | none, but run 24 showed UEFI reserves all 36 MiB | rejected unless its tail is shown unused |
+| Clear `sCR0.CLIENTPD` | every stream on apps_smmu | rejected |
+
+#### The change
+
+One field of one 32-bit register:
+
+| | |
+| --- | --- |
+| Register | `S2CR(6)`, at `0x15000000 + 0xC00 + 4×6` = **`0x15000C18`** |
+| Before | `0x00000006` (`TYPE` 0, translate; `CBNDX` 6) |
+| After | **`0x00010006`** (`TYPE` 1, bypass) |
+| Restore | `0x00000006` |
+
+Only bits 17:16 change. Every other bit is preserved, including `CBNDX`,
+which bypass ignores, and any field this project has no verified layout
+for. That is deliberate: the SMMUv2 `S2CR` reinterprets some low bits as
+memory-attribute controls when `TYPE` is bypass, and the local Linux
+reference (`arm-smmu.h`) defines only `TYPE`, `CBNDX`, `PRIVCFG` and
+`EXIDVALID`. Writing attribute fields from a guessed layout is exactly what
+AGENTS.md forbids, so the firmware's existing bits stand.
+
+**The resulting memory attributes are therefore not predicted.** USB0's
+device-tree node has no `dma-coherent`, so q1n1 must do cache maintenance
+around DMA whichever attributes result; the first DMA test is what shows
+them.
+
+#### What must be true before anyone writes it
+
+`el2q_s2b_plan` refuses unless all of this holds, and reports which one
+failed:
+
+- the SMMU read found USB0's stream and read its context bank in full;
+- `sCR0` is the measured `0x00240406`: not all ones, `CLIENTPD` clear (the
+  SMMU is on), `EXIDENABLE` clear (so group validity lives in `SMR`, not
+  `S2CR`);
+- `S2CR(6)` still translates through the bank that was read, not some other
+  bank, and is not already bypassing;
+- `SMR(6)` is valid, its mask is 0, and its id is exactly `0x820`, so the
+  group selects USB0 and no other device;
+- **no second valid group matches `0x820`.** `usbprobe.c` stops at the
+  first match, so the plan scans all `NUMSMRG` (212) groups itself;
+- `S2CR(6)` lies inside the SMMU's first 4 KiB, the only page the write
+  would touch;
+- that page translates at EL2 to itself as Device **and is writable**
+  (`AT S1E2W`, which no earlier stage needed);
+- no SError is pending, and `sGFSR` has no global fault latched, so a fault
+  after the write can be attributed to it;
+- `sCR0` and `S2CR(6)` re-read now equal what the SMMU read found, so
+  nothing moved in between.
+
+#### The write sequence, when it is authorized
+
+1. Re-run the plan; refuse unless `PLANNED` with the same values.
+2. Write the one word, `0x00010006`.
+3. Read it back; it must equal exactly what was planned. A read-back that
+   differs is the signal that the security controller (XPU) or the secure
+   world owns this register and dropped the write.
+4. Invalidate. Linux's own reset path writes `TLBIALLH` then `TLBIALLNSNH`
+   and polls `sTLBGSYNC`/`sTLBGSTATUS` (VERIFIED as Linux behaviour,
+   `arm-smmu.c`); that pair is the conservative choice for a one-off change
+   at boot. `TLBIVMID` with VMID 3 would be narrower, but whether it also
+   covers cached *configuration* is INFERRED, and Qualcomm SMMUs are known
+   to cache configuration. The cost of the broad pair is that other masters
+   re-walk once; the display is live at this point.
+5. Check `sGFSR` and `ISR_EL1` again.
+
+#### Recovery
+
+- **Restore** writes `0x00000006` back and invalidates again. The quiesce
+  path must do this before handing the machine on.
+- **Nothing is persistent.** The SMMU's registers are volatile, so a power
+  cycle with the stick removed restores the firmware's configuration
+  whatever happens, as after every run so far. Holding the power button
+  still ends any run.
+
+#### What could go wrong
+
+- **The write is dropped or faults.** Read-back catches a drop; the fault
+  fixup catches a synchronous abort; an asynchronous SError shows in
+  `ISR_EL1`. A reset by the secure world would show as the screen stopping
+  at the stage's progress line.
+- **Something else is using the stream.** The exact-match and
+  second-group checks are there for this. Nothing else on the gaokun3 is
+  expected to drive USB0 after ExitBootServices, since firmware's own
+  driver is done.
+- **A stalled master.** Bank 126's `SCTLR` has `CFCFG` set, so a stage-2
+  fault *stalls* the transaction rather than terminating it. That is an
+  argument for doing the bypass **before** any device-mode DMA: with
+  translation on and the arena unmapped, the first DMA would stall USB0
+  rather than fail cleanly.
+
+#### The staged hardware plan
+
+Each stage needs its own go-ahead; only the first exists.
+
+1. **Entry 14, now: plan only.** Confirms on the real machine that every
+   condition above holds and prints the exact word. Writes nothing.
+2. **Write and immediately restore,** with no DMA in between: the shortest
+   possible window in which the SMMU is changed. This answers whether the
+   write takes at all.
+3. **Write, leave bypassed, run q1n1's USB device mode,** then restore.
+   This also needs q1n1's gaokun3 identity (xHCI `CAPLENGTH` `0x20`, a
+   USB0-only port table) and is the first run that writes to the USB
+   controller.
+
+#### Where it ends up
+
+The bypass belongs in q1n1, which owns the DMA, not in el2qual, which
+measures. `s2bypass.c` is the model and the gate: q1n1 would carry the same
+checks and the same restore. Until stage 2 above has run, this is a design
+with host evidence only.
+
+| Check | Result, 2026-10-27 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS, 624625 checks (ASan+UBSan). Run 24's measured state gives exactly the word above, with only `TYPE` changed, `matches 1/212`, and 215 reads (`sGFSR`, `sCR0`, `S2CR(6)`, 212 `SMR`s), each allowed and none twice. Every refusal above, with nothing read for those decided from what the SMMU read already found. A second matching group, exact or by mask; an invalid or differently-addressed group that is not a match; a group past `NUMSMRG`; the matching group vanishing. A fault injected on each read in turn. Unknown `S2CR` bits preserved; a different group index moving both address and name. 17 deliberately broken copies of `s2bypass.c` (each check above removed, the other fields clobbered, fault planned instead of bypass, nothing to restore to, a hole before the last line) are each rejected |
+| Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 13 unchanged, entry 14 `nopac nosmp exit-vhe usb-smmu-map usb-s2-bypass-plan`, and no entry carries a write option |
+| QEMU: all 27 configurations | PASS. `max-vhe-usb-s2bypass-plan` (entry 14's options): virt's SMMU reads all ones, so `SMMU BYPASS NOT MEASURED`, then `SMMU BYPASS PLAN ONLY, NOTHING WRITTEN`. The checker requires that last line always, and its self-test rejects a missing plan, a different outcome, the dropped last line, a line claiming a write, and an unasked plan |
 | gaokun3 | NOT RUN |
 
 ### Step 2: decided by step 1
@@ -823,7 +1009,9 @@ non-empty map is printed too.
   ExitBootServices leaves it up.
 - **If DMA is not identity-mapped,** q1n1 needs SMMU handling for stream
   `0x820` before any device-mode run, whichever way the power question
-  falls.
+  falls. Runs 22 to 24 settled that it is not, and
+  [step 1h](#step-1h-the-s2cr-bypass-design-el2qual-12-entry-14) is the
+  design for that handling.
 
 ## Safety
 
@@ -846,6 +1034,12 @@ non-empty map is printed too.
   harm and in one level-2 table, the one run 22 read if the arena lands in
   the same GiB. A hang or reset there leaves its own progress line on the
   screen, `USB: STAGE-2 SURVEY, READ ONLY. A HANG OR RESET HERE IS IT`.
+- **Step 1h writes nothing, and cannot.** `s2bypass.c` has no write
+  callback. Its reads are the SMMU global registers earlier steps already
+  read, plus `sGFSR` and the remaining `SMR`s, all in the same page. The
+  `AT S1E2W` check it makes asks the MMU a question; it performs no write.
+  The staged plan for the write itself, which needs its own go-ahead, is in
+  step 1h.
 - **Step 1g reads no new kind of memory.** Its walk reads descriptors in
   the root and in run 23's level-2 table for GiB 3, and its memory-map
   report parses a copy el2qual already holds. Nothing at `0xC8000000` is
