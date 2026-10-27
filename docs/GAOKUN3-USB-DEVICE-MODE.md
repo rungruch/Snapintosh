@@ -1234,17 +1234,24 @@ lines does not mistake a `NO CAPLENGTH` line for a read.
 ### Step 2: decided by step 1
 
 - **If USB0 stays powered after ExitBootServices,** the A16 path applies
-  almost unchanged:
+  almost unchanged. This is the branch that holds: runs 16 and 17 found
+  USB0 powered, and run 26 found it halted.
   - give q1n1 a gaokun3 port table (USB0 only; USB1 is host-only, the cover
-    stays alone);
-  - accept the measured `GSNPSID`;
+    stays alone): **done, host tests only.** Under `Q1N1_GAOKUN3`, q1n1
+    `4ad5290` drives USB0 alone and never reads or writes USB1;
+  - accept the measured `GSNPSID`: **done, host tests only.** It already
+    matched, as did the port count; the one difference, `CAPLENGTH 0x20`, is
+    accepted exactly under `Q1N1_GAOKUN3` by q1n1 `b0c1c9a`;
   - run the role-discovery takeover, which uses the same three writes as on
-    the A16;
+    the A16: **blocked by the SMMU** (below). Until stream `0x820` is
+    handled, q1n1 `4ad5290` refuses `--boot` in a gaokun3 build, before
+    ExitBootServices, so the `--el2` foothold is its only mode;
   - host tests and a QEMU check first, then a supervised run with the Mac on
     the power-button port.
 
   That run is the first that writes to the USB controller, and it needs its
-  own go-ahead.
+  own go-ahead. q1n1's design and evidence are in its
+  `docs/GAOKUN3-USB-IDENTITY.md`.
 - **If firmware powers USB0 down,** q1n1 must power it up itself:
   - turn on the GDSC;
   - enable the clocks at the device tree's rates (master 200 MHz, mock UTMI

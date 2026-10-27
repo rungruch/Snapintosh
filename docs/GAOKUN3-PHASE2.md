@@ -322,9 +322,13 @@ q1n1 has no transport to the Mac yet.
       `snapshot()` identity check required the A16's xHCI `CAPLENGTH`
       (`0x30`), and the gaokun3's is `0x20` (VERIFIED, runs 16 and 17).
       q1n1 `b0c1c9a` accepts `0x20` exactly, only in builds with the new
-      `Q1N1_GAOKUN3` option; the default A16 build is unchanged. Design and
-      evidence: q1n1 `docs/GAOKUN3-USB-IDENTITY.md`. Not yet run on the
-      gaokun3.
+      `Q1N1_GAOKUN3` option, and q1n1 `4ad5290` makes that build drive
+      USB0 alone, never touching USB1. Because USB0's DMA is translated by
+      the SMMU and no arena q1n1 could use is mapped there, `4ad5290` also
+      makes a gaokun3 build refuse
+      `--boot` before ExitBootServices; the `--el2` foothold stays its only
+      mode. The default A16 build is unchanged. Design and evidence: q1n1
+      `docs/GAOKUN3-USB-IDENTITY.md`. Not yet run on the gaokun3.
     - **The DMA: still blocking.** USB0's DMA is translated by the SMMU
       through context bank 6, so it is not known to be identity.
   - **Run 19:** context bank 6 has stage-1 translation off, but nests a
