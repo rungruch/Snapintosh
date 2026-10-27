@@ -341,7 +341,7 @@ copy unexamined.
 
 | Duty | Phase 3 design |
 | --- | --- |
-| Boot seed | 256 bytes from a **real hardware source**, per condition 3. The gaokun3 has no `RNDR` (VERIFIED, Phase 0A), so the candidate is UEFI's RNG protocol before `ExitBootServices`. Whether this firmware offers it is unmeasured (step P7). **No source, no boot**: a fixed, derived or zero seed is fabricated entropy |
+| Boot seed | 256 bytes from a **real hardware source**, per condition 3. The gaokun3 has no `RNDR` (VERIFIED, Phase 0A), so the source is UEFI's RNG protocol before `ExitBootServices`, read with its `RAW` algorithm. This firmware offers it, and `RAW` delivered on the machine (OBSERVED, [run 27](#run-27-2026-10-27-the-firmware-offers-raw-entropy)). **No source, no boot**: a fixed, derived or zero seed is fabricated entropy |
 | NVRAM bank | a valid, empty, volatile bank. Nothing persists across boots in Phase 3. The kernel's NVRAM sync fails harmlessly with no controller behind the bank, as in QEMU (OBSERVED). The bank's size and split are examined and recorded as design choices |
 | `/cpus` | trimmed to the one CPU started; `CPU_ON` for any other fails explicitly |
 | PSCI | `PSCI_VERSION`, `SYSTEM_OFF` and `SYSTEM_RESET` forwarded to the firmware |
@@ -397,19 +397,22 @@ its own go-ahead.
   renders it to an image and checks the banner text in both regions.
 - **P5. The stick path, behind its q1n1 option:** `xnuboot`'s
   self-describing image, the preload wired into `--el2`, placement by
-  exact-address allocation, and entry. Tested in QEMU from a virtual FAT
-  disk, including the refusals for a bad hash and a held address.
+  exact-address allocation, and entry. The boot seed is read here, before
+  `ExitBootServices`, from the RNG protocol's `RAW` algorithm as P7 does.
+  Tested in QEMU from a virtual FAT disk, including the refusals for a bad
+  hash, a held address and a missing or failing `RAW` read.
 - **P6. The gaokun3 layout**, from el2qual's recorded memory map, with the
   loader refusing any overlap.
 - **P7. The entropy source:** a read-only el2qual stage that reports
   whether UEFI offers the RNG protocol and which algorithms. If it does
-  not, Phase 3 stops here until a source exists. BUILT, host and QEMU
-  only ([result](#p7-the-entropy-check)); the gaokun3 run is stick entry
-  16, not yet run.
+  not, Phase 3 stops here until a source exists. DONE, 2026-10-27: the
+  firmware lists `RAW` and `HASH`, and both deliver
+  ([run 27](#run-27-2026-10-27-the-firmware-offers-raw-entropy)).
 
 ### P7: the entropy check
 
-**2026-10-27: built, host and QEMU only; gaokun3 NOT RUN.** el2qual's
+**2026-10-27: built, then run on the gaokun3 as run 27: `USABLE, RAW`
+([below](#run-27-2026-10-27-the-firmware-offers-raw-entropy)).** el2qual's
 load option `rng` (`probes/el2qual/rng.c`) runs before
 `ExitBootServices`, while the firmware's services exist:
 
@@ -465,12 +468,46 @@ own generator is what the hardware run answers.
 - `python3 tools/test-el2qual-usb.py`: the `entropy` stick, a single
   entry, `el2qual 16` (`nopac nosmp rng`).
 
-**On the gaokun3** (stick entry 16, read only, one boot):
+#### Run 27 (2026-10-27): the firmware offers RAW entropy
 
-- a `USABLE` verdict, best `RAW`, means Phase 3 can take a real seed;
-- `UNUSABLE` or `NO SOURCE` means Phase 3 stops at condition 3 until
-  another source is found, for example the SoC's generator once its
-  registers are documented.
+Stick entry 16 (`nopac nosmp rng`), el2qual 14 `80a1036d` (`e8b288c`),
+firmware 2.18, one boot, read only
+([QUALIFICATION run 27](GAOKUN3-QUALIFICATION.md#runs-so-far)):
+
+```
+RNG PROTOCOL FOUND
+RNG ALGORITHMS 2: RAW HASH
+RNG DEFAULT 256B OK NONZERO DIFFER DISTINCT 159
+RNG RAW 256B OK NONZERO DIFFER DISTINCT 156
+RNG VERDICT: USABLE, RAW
+```
+
+What this shows (OBSERVED, on the machine):
+
+- the firmware installs `EFI_RNG_PROTOCOL` and lists two algorithms,
+  `RAW` and SP 800-90 `HASH` (a Hash_DRBG);
+- each read, the firmware's default and `RAW`, returned `EFI_SUCCESS`
+  twice, filled the zeroed buffer, and differed between reads;
+- the spreads, 159 and 156 distinct values in 256 bytes, are close to the
+  roughly 162 expected of uniform random bytes.
+
+What it does not show:
+
+- What backs `RAW`. UEFI defines it as output "directly from the
+  source"; that is the firmware's declaration, not something el2qual can
+  test. A Qualcomm hardware generator behind it is INFERRED, not
+  verified.
+- Entropy quality. Two reads of 256 bytes are a sanity check, not a
+  statistical assessment.
+- Which listed algorithm the firmware uses as its default. The report
+  does not name it, and it does not matter here: Phase 3 asks for `RAW`
+  by GUID.
+
+**So P7 does not stop Phase 3.** Condition 3's named source exists on this
+machine and delivers. The seed must be read as el2qual does it: `RAW` by
+GUID, `EFI_SUCCESS` only, before `ExitBootServices`, refusing the boot on
+any failure rather than falling back to `HASH` or a fixed seed. In the
+stick path that read belongs to the loader before ExitBootServices (P5).
 
 **On the gaokun3, each with its own go-ahead:**
 
@@ -513,7 +550,9 @@ own generator is what the hardware run answers.
 
 ## Open questions
 
-- The entropy source (step P7).
+- What the firmware's `RAW` algorithm reads from. P7 answered whether
+  it exists and delivers ([run 27](#run-27-2026-10-27-the-firmware-offers-raw-entropy)),
+  not what backs it.
 - The 26A428 contracts behind the two fixed addresses, `0x30010000` and
   `0x004FFFF8`, and whether the boot needs either
   ([P1](#p1-result-what-the-kernel-touches)).

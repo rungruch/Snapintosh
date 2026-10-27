@@ -173,7 +173,11 @@ Each check reports PASS, FAIL, SKIP or NOT RUN, with its evidence class.
    source, for example UEFI's RNG protocol before `ExitBootServices`, or
    the SoC's random-number generator once its registers are documented. It
    must refuse to boot without one. A fixed, derived or zero seed is
-   fabricated entropy and is not allowed.
+   fabricated entropy and is not allowed. *(Added after the decision,
+   2026-10-27: run 27 found the gaokun3's firmware offers the RNG protocol
+   with a `RAW` algorithm that delivers 256 non-zero, varying bytes before
+   `ExitBootServices`; see
+   [GAOKUN3-PHASE3.md](GAOKUN3-PHASE3.md#run-27-2026-10-27-the-firmware-offers-raw-entropy).)*
 4. **The VM firmware's duties become monitor requirements**, each
    implemented to its published XNU contract and failing explicitly where
    unmodelled:
