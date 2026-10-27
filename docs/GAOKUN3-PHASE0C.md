@@ -132,6 +132,14 @@ Each check reports PASS, FAIL, SKIP or NOT RUN, with its evidence class.
   - PSCI;
   - `/chosen` data the VM firmware normally supplies;
   - a GICv3, a PL011 and the timer.
+
+  *Correction, 2026-10-27, added after the decision:* the smoke had also
+  moved the other template devices into QEMU's PCIe window, which answered
+  all-ones. The kernel touched eleven unmodelled windows: nine of those
+  devices, and two fixed addresses outside the tree
+  ([Phase 3 P1](GAOKUN3-PHASE3.md#p1-result-what-the-kernel-touches)).
+  The boot tolerated them absent. This does not change the decision; it
+  lengthens condition 3's list.
 - **Every stop in it was a firmware duty.** None was Apple-only CPU
   behaviour, and none touched an implementation-defined register.
 - **What remains open cannot be settled on the host.** It needs the

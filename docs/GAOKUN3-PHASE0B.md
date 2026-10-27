@@ -1087,6 +1087,17 @@ root-mount wait:
   nodes;
 - a GICv3, a PL011 and the timer.
 
+**Correction, 2026-10-27.** The last item was too strong. The loader
+moves `/arm-io`'s `ranges` onto QEMU's map, so every other template device
+moved too, mostly into QEMU's PCIe window, which answered every read with
+all-ones. An MMIO trace of the same boot shows the kernel touched eleven
+more windows on its way to the root-mount wait, two of them at fixed
+physical addresses no tree node describes, and reached it with all of
+them effectively absent (OBSERVED, host only;
+[Phase 3 P1](GAOKUN3-PHASE3.md#p1-result-what-the-kernel-touches)). So
+"needs only" means "tolerates the rest answering all-ones". Conditions 1
+and 2 are unaffected; condition 3's list is longer than this section said.
+
 Every stop came from a firmware duty, none from Apple-only CPU behaviour.
 For overturn conditions 1 and 2, that is as far as a diskless boot can
 take them. Condition 3 remains open: storage, the framebuffer, the panic
