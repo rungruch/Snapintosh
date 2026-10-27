@@ -318,8 +318,8 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
  *   SMMU S2 CB<nn> AT <a> CBAR <w> CBA2R <w>
  *   SMMU S2 CB<nn> SCTLR <w> TCR <w>
  *   SMMU S2 CB<nn> TTBR0 <16 hex>
- * then with "usb-s2-walk" the walk's lines and with "usb-s2-survey" the
- * survey's (s2walk.c), and last
+ * then with "usb-s2-walk" the walk's lines, with "usb-s2-survey" the
+ * survey's and with "usb-s2-fixed" the memory map's (s2walk.c), and last
  *   USB SERROR <PENDING|NONE>
  * <w> is eight hex digits, or UNMAPPED, FAULT or NOT READ for a word that
  * has none. */
@@ -576,6 +576,16 @@ void el2q_usb_line(const struct el2q_usb *u, unsigned index, char out[EL2Q_USB_L
         if (!survey[0]) break;
         if (index == n) {
             put_s(&b, survey);
+            return;
+        }
+    }
+    index -= n;
+    for (n = 0; n < EL2Q_S2W_REGION_LINES; n++) {
+        char region[EL2Q_S2W_LINE_COLS + 1];
+        el2q_s2w_region_line(&u->region, n, region);
+        if (!region[0]) break;
+        if (index == n) {
+            put_s(&b, region);
             return;
         }
     }

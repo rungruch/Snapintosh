@@ -204,7 +204,7 @@ static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
     int thermal, exit_vhe, usb, usb_smmu, usb_smmu_map, emulate_map_hole;
-    int usb_s2_walk, usb_s2_survey, emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
+    int usb_s2_walk, usb_s2_survey, usb_s2_fixed, emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -602,6 +602,12 @@ static void map_smmu_window(void)
  * mappings UEFI's tables already have. */
 
 static uint64_t s2w_arena, s2w_pool;
+/* The memory map ExitBootServices accepted, for "usb-s2-fixed". */
+static uint64_t ebs_map_size, ebs_desc_size;
+/* "usb-s2-fixed" with test tables: QEMU virt's RAM starts here, so the
+ * memory map report has entries to show over a range as long as the
+ * gaokun3's region. */
+#define EL2Q_S2W_TEST_REGION 0x40000000ull
 
 /* "emulate-s2-device": QEMU virt's PL011, a page EDK2 maps as Device. */
 #define EL2Q_S2W_TEST_DEVICE_ROOT 0x09000000ull
@@ -661,6 +667,13 @@ static void walk_stage2(void)
         progress("USB: STAGE-2 SURVEY, READ ONLY. A HANG OR RESET HERE IS IT");
         el2q_s2w_survey(walked, s2w_arena, &hw, &run.usb.survey);
         run.usb.survey.test = opt.emulate_s2_tables;
+    }
+    if (opt.usb_s2_fixed) {
+        run.usb.walk.fixed = 1;
+        uint64_t base = opt.emulate_s2_tables ? EL2Q_S2W_TEST_REGION : EL2Q_S2W_REGION_BASE;
+        el2q_memmap_region(ebs_desc_size ? memory_map : 0, ebs_map_size, ebs_desc_size, base,
+                           base + (EL2Q_S2W_REGION_END - EL2Q_S2W_REGION_BASE), &run.usb.region);
+        run.usb.region.test = opt.emulate_s2_tables;
     }
 }
 
@@ -865,6 +878,7 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "emulate-map-hole")) opt.emulate_map_hole = 1;
         if (word_is(w, len, "usb-s2-walk")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = 1;
         if (word_is(w, len, "usb-s2-survey")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = opt.usb_s2_survey = 1;
+        if (word_is(w, len, "usb-s2-fixed")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = opt.usb_s2_fixed = 1;
         if (word_is(w, len, "emulate-s2-tables")) opt.emulate_s2_tables = 1;
         if (word_is(w, len, "emulate-s2-odd")) opt.emulate_s2_tables = opt.emulate_s2_odd = 1;
         if (word_is(w, len, "emulate-s2-device")) opt.emulate_s2_tables = opt.emulate_s2_device = 1;
@@ -1099,7 +1113,10 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     }
     if (opt.usb_s2_walk) {
         uint64_t below = 0xffffffffull;
-        if (!EFI_ERROR(bs->allocate_pages(1 /* MaxAddress */, 2 /* LoaderData */, EL2Q_S2W_ARENA_PAGES, &below)))
+        /* "usb-s2-fixed" walks a range it never touches: nothing to allocate. */
+        if (opt.usb_s2_fixed)
+            s2w_arena = EL2Q_S2W_FIXED_ARENA;
+        else if (!EFI_ERROR(bs->allocate_pages(1 /* MaxAddress */, 2 /* LoaderData */, EL2Q_S2W_ARENA_PAGES, &below)))
             s2w_arena = below;
         uint64_t fixture = 0;
         if (opt.emulate_s2_tables &&
@@ -1123,7 +1140,11 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
         status = bs->get_memory_map(&size, memory_map, &key, &descriptor_size, &version);
         if (EFI_ERROR(status)) break;
         status = bs->exit_boot_services(image, key);
-        if (!EFI_ERROR(status)) break;
+        if (!EFI_ERROR(status)) {
+            ebs_map_size = size;
+            ebs_desc_size = descriptor_size;
+            break;
+        }
     }
     __asm__ volatile("msr daifset, #15");
     con_out = 0;

@@ -11,6 +11,7 @@
  * already pending; the walk stops at the first fault or SError; each
  * descriptor is read once; and each arena page is classed as the SMMU would
  * treat it. */
+#include "report.h"
 #include "usbprobe.h"
 #include "s2walk.h"
 #include <stdio.h>
@@ -633,8 +634,157 @@ static void test_survey_usb_lines(void)
     CHECK(!strcmp(prev[1], "USB SERROR NONE"));
 }
 
+/* ---- The candidate region: memory map and fixed walk ----------------------- */
+
+#define DESC 48u   /* the gaokun3's descriptor size, larger than the structure */
+static uint8_t mmap_buf[32 * DESC];
+static unsigned mmap_n;
+
+static void put64(uint8_t *p, uint64_t v)
+{
+    for (unsigned i = 0; i < 8; i++) p[i] = (uint8_t)(v >> (8 * i));
+}
+
+static void mdesc(uint32_t type, uint64_t start, uint64_t pages, uint64_t attr)
+{
+    uint8_t *d = mmap_buf + mmap_n++ * DESC;
+    memset(d, 0xa5, DESC);                       /* padding and VirtualStart: not read */
+    for (unsigned i = 0; i < 4; i++) d[i] = (uint8_t)(type >> (8 * i));
+    put64(d + 8, start);
+    put64(d + 24, pages);
+    put64(d + 32, attr);
+}
+
+static void rline(const struct el2q_s2w_region *r, unsigned i, const char *want)
+{
+    char out[EL2Q_S2W_LINE_COLS + 1];
+    el2q_s2w_region_line(r, i, out);
+    if (strcmp(out, want)) fprintf(stderr, "region line %u: got \"%s\", want \"%s\"\n", i, out, want);
+    CHECK(!strcmp(out, want));
+}
+
+static void test_region(void)
+{
+    struct el2q_s2w_region r;
+    const uint64_t base = EL2Q_S2W_REGION_BASE, end = EL2Q_S2W_REGION_END;
+    CHECK(base == 0xc6200000 && end == 0xc8600000 && EL2Q_S2W_FIXED_ARENA == 0xc8000000);
+
+    /* The likely shape, out of order: free memory up to the framebuffer,
+     * the framebuffer reserved, free memory after, and a descriptor that
+     * starts where the region ends. Only the two inside it count. */
+    mmap_n = 0;
+    mdesc(7, 0xc71a0000, 0x1460, 0xf);
+    mdesc(7, 0xc0000000, 0x6200, 0xf);
+    mdesc(4, 0xc8600000, 0x100, 0xf);
+    mdesc(0, 0xc6200000, 0xfa0, 0x1);
+    el2q_memmap_region(mmap_buf, mmap_n * DESC, DESC, base, end, &r);
+    CHECK(r.state == EL2Q_S2W_REGION_READ && r.count == 2);
+    rline(&r, 0, "UEFI MAP C6200000-C8600000 ENTRIES 2");
+    rline(&r, 1, "UEFI MAP 00C6200000 00C71A0000 RESERVED 0000000000000001");
+    rline(&r, 2, "UEFI MAP 00C71A0000 00C8600000 FREE 000000000000000F");
+    rline(&r, 3, "");
+    r.test = 1;
+    rline(&r, 0, "UEFI MAP C6200000-C8600000 ENTRIES 2 (TEST RANGE)");
+
+    /* Overlap at either end counts; no pages, a page count past 64 bits
+     * and an end that wraps do not, wherever they start. */
+    mmap_n = 0;
+    mdesc(2, 0xc6000000, 0x400, 0x8000000000000000ull);
+    mdesc(4, 0xc8500000, 0x200, 0xf);
+    mdesc(7, 0xc7000000, 0, 0xf);
+    mdesc(7, 0xc7000000, 1ull << 60, 0xf);
+    mdesc(7, 0xfffffffffffff000ull, 2, 0xf);
+    mdesc(7, 0xc7000000, (1ull << 52) - 1, 0xf);    /* inside, and wraps past 2^64 */
+    el2q_memmap_region(mmap_buf, mmap_n * DESC, DESC, base, end, &r);
+    CHECK(r.count == 2);
+    rline(&r, 1, "UEFI MAP 00C6000000 00C6400000 LDR DATA 8000000000000000");
+    rline(&r, 2, "UEFI MAP 00C8500000 00C8700000 BS DATA 000000000000000F");
+
+    /* Twelve one-page descriptors, ascending and descending: the eight
+     * lowest are kept in order either way, and the rest counted. */
+    for (int order = 0; order < 2; order++) {
+        mmap_n = 0;
+        for (unsigned i = 0; i < 12; i++) {
+            unsigned k = order ? 11 - i : i;
+            mdesc(k < 15 ? k : 7, base + k * 0x100000ull, 1, k);
+        }
+        el2q_memmap_region(mmap_buf, mmap_n * DESC, DESC, base, end, &r);
+        CHECK(r.count == 12);
+        for (unsigned i = 0; i < 8; i++) CHECK(r.e[i].start == base + i * 0x100000ull && r.e[i].type == i);
+        rline(&r, 0, "UEFI MAP C6200000-C8600000 ENTRIES 12");
+        rline(&r, 8, "UEFI MAP 00C6900000 00C6901000 FREE 0000000000000007");
+        rline(&r, 9, "UEFI MAP AND 4 MORE");
+        rline(&r, 10, "");
+    }
+
+    /* An OEM type has no name. */
+    mmap_n = 0;
+    mdesc(0x70000000, base, 1, 0);
+    el2q_memmap_region(mmap_buf, mmap_n * DESC, DESC, base, end, &r);
+    rline(&r, 1, "UEFI MAP 00C6200000 00C6201000 T70000000 0000000000000000");
+
+    /* No map, or descriptors too small to hold the structure. */
+    el2q_memmap_region(0, mmap_n * DESC, DESC, base, end, &r);
+    CHECK(r.state == EL2Q_S2W_REGION_NO_MAP);
+    rline(&r, 0, "UEFI MAP NOT AVAILABLE");
+    rline(&r, 1, "");
+    el2q_memmap_region(mmap_buf, mmap_n * DESC, 32, base, end, &r);
+    CHECK(r.state == EL2Q_S2W_REGION_NO_MAP);
+    /* A map shorter than one descriptor has nothing in the region. */
+    el2q_memmap_region(mmap_buf, DESC - 1, DESC, base, end, &r);
+    CHECK(r.state == EL2Q_S2W_REGION_READ && r.count == 0);
+    rline(&r, 0, "UEFI MAP C6200000-C8600000 ENTRIES 0");
+    rline(&r, 1, "");
+    r.state = EL2Q_S2W_REGION_NOT_ASKED;
+    rline(&r, 0, "");
+}
+
+static void test_fixed_walk(void)
+{
+    struct el2q_s2w_result r;
+    /* A 2 MiB identity block at 0xC8000000, as run 23's survey shows. */
+    freset();
+    fwrite64(0, POOL + 3 * 8, (POOL + 0x1000) | 3);
+    fwrite64(0, POOL + 0x1000 + 64 * 8, 0xc8000000ull | BLOCK);
+    CHECK(el2q_s2w_walk(&bank126, EL2Q_S2W_FIXED_ARENA, &hw, &r) == EL2Q_S2W_DONE);
+    CHECK(r.reads == 2 && r.pages[EL2Q_S2W_RW] == 256 && r.leaf_level == 2);
+    r.fixed = 1;
+    line(&r, 0, "SMMU WALK ARENA C8000000 READS 2 (FIXED)");
+    line(&r, 2, "SMMU WALK LEAF L2 00000000C80007FD");
+    r.test = 1;
+    line(&r, 0, "SMMU WALK ARENA C8000000 READS 2 (TEST TABLES) (FIXED)");
+    CHECK(el2q_s2w_walk(0, EL2Q_S2W_FIXED_ARENA, &hw, &r) == EL2Q_S2W_NO_STAGE2);
+    r.test = r.fixed = 1;
+    line(&r, 0, "SMMU WALK NOT RUN: NO STAGE 2 (TEST TABLES) (FIXED)");
+    /* The longest not-run line still fits. */
+    r.state = EL2Q_S2W_PENDING;
+    line(&r, 0, "SMMU WALK NOT RUN: SERROR ALREADY PENDING (TEST TABLES) (FIXED)");
+}
+
+/* The memory map's lines follow the survey's, before the SError line. */
+static void test_region_usb_lines(void)
+{
+    struct el2q_usb u;
+    memset(&u, 0, sizeof u);
+    u.after.ran = 1;
+    u.walk.state = EL2Q_S2W_NOT_NEEDED;
+    u.region.state = EL2Q_S2W_REGION_NO_MAP;
+    char out[EL2Q_USB_LINE_COLS + 1], prev[2][EL2Q_USB_LINE_COLS + 1] = {"", ""};
+    for (unsigned i = 0;; i++) {
+        el2q_usb_line(&u, i, out);
+        if (!out[0]) break;
+        strcpy(prev[0], prev[1]);
+        strcpy(prev[1], out);
+        if (!strcmp(out, "USB SERROR NONE")) CHECK(!strcmp(prev[0], "UEFI MAP NOT AVAILABLE"));
+    }
+    CHECK(!strcmp(prev[1], "USB SERROR NONE"));
+}
+
 unsigned test_s2walk(void)
 {
+    test_region();
+    test_fixed_walk();
+    test_region_usb_lines();
     test_fixture_identity();
     test_classes();
     test_refusals();

@@ -31,7 +31,8 @@ report says so when one is in effect.
 | `emulate-map-hole` | With `usb-smmu-map`, map two test windows QEMU's EDK2 leaves unmapped instead of the SMMU's, so the map is written and checked there. Test only. |
 | `usb-s2-walk` | `usb-smmu`, then walk the stage-2 bank's tables for a 1 MiB DMA arena allocated below 4 GiB as q1n1 allocates its own (`s2walk.c`). Descriptor reads only, through mappings UEFI's tables already have, stopping at the first fault or SError. |
 | `usb-s2-survey` | `usb-s2-walk`, then survey that stage 2's top two levels: every level-1 entry, and the level-2 table under the arena (`s2walk.c`), with the walk's guards. |
-| `emulate-s2-tables` | With `usb-s2-walk`, walk a stage-2 table set el2qual builds for its arena instead of the SMMU's, every page identity read-write. Test only. |
+| `usb-s2-fixed` | `usb-s2-walk`, but walk the fixed range `0xC8000000`–`0xC80FFFFF` instead of an allocated arena, and report UEFI's memory map (as accepted by ExitBootServices) over `0xC6200000`–`0xC85FFFFF`, the identity region run 23 found. Nothing at the range is allocated or touched. |
+| `emulate-s2-tables` | With `usb-s2-walk`, walk a stage-2 table set el2qual builds for its arena instead of the SMMU's, every page identity read-write. With `usb-s2-fixed`, the memory map is reported over 36 MiB from QEMU virt's RAM base, `0x40000000`, instead. Test only. |
 | `emulate-s2-odd` | The same, with arena pages 1 to 3 moved, invalid and read-only. Test only. |
 | `emulate-s2-device` | The same tables, but with the root pointed at QEMU's PL011, a Device page the walk must refuse unread. Test only. |
 

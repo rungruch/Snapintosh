@@ -80,6 +80,15 @@ report it writes to the PL011:
                1 GiB and 2 MiB blocks must appear as I, M, L and I
   max-vhe-usb-s2survey-device  the root at virt's PL011: both passes
                refused with nothing read
+  max-vhe-usb-s2fixed-stick  the gaokun3 stick entry 13's options ("usb-
+               smmu-map usb-s2-fixed"): the walk NOT RUN: NO STAGE 2
+               (FIXED), and UEFI's memory map over 0xC6200000-0xC85FFFFF,
+               which virt's 1 GiB of RAM at 0x40000000 leaves with no entry
+  max-vhe-usb-s2fixed  "usb-s2-fixed" over el2qual's own tables, built for
+               the fixed range 0xC8000000: 258 reads, every page identity,
+               the first leaf at 0xC8000000; and the memory map over 36 MiB
+               from 0x40000000, which must list well-formed entries in
+               address order that all overlap it
 
 On every configuration that runs, all four CPUs must finish at EL2 without
 a fault, the report must name the GOP mode it drew on, and each feature's
@@ -244,6 +253,25 @@ CONFIGS = {
                                         s2survey=[r'SMMU SURVEY READS 0 \(TEST TABLES\)',
                                                   r'SMMU SURVEY REFUSED: TABLE 0000000009000000 PAR [0-9A-F]{16}'],
                                         features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The candidate region (usb-s2-fixed). region is a list of exact lines
+    # (regexes), or 'test' for the structural checks on QEMU's stand-in.
+    'max-vhe-usb-s2fixed-stick': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu-map usb-s2-fixed',
+                                      pac='Y', walk='Y', vhe=True, vhe_exit='DONE',
+                                      usb=True, smmu=True, smmumap='NOT NEEDED',
+                                      s2walk=r'SMMU WALK NOT RUN: NO STAGE 2 \(FIXED\)',
+                                      s2walk_sample='SMMU WALK NOT RUN: NO STAGE 2 (FIXED)',
+                                      region=[r'UEFI MAP C6200000-C8600000 ENTRIES 0'],
+                                      features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-vhe-usb-s2fixed': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-fixed emulate-s2-tables',
+                                pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
+                                s2walk=(r'SMMU WALK ARENA C8000000 READS 258 \(TEST TABLES\) \(FIXED\)\n'
+                                        r'SMMU WALK RW 256 LIMITED 0 MOVED 0 FAULTS 0\n'
+                                        r'SMMU WALK LEAF L3 00000000C80007FF'),
+                                s2walk_sample=('SMMU WALK ARENA C8000000 READS 258 (TEST TABLES) (FIXED)\n'
+                                               'SMMU WALK RW 256 LIMITED 0 MOVED 0 FAULTS 0\n'
+                                               'SMMU WALK LEAF L3 00000000C80007FF'),
+                                region='test',
+                                features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
     'max-vhe-usb-s2walk-device': dict(cpu='max', options='emulate-vhe exit-vhe usb-s2-walk emulate-s2-device',
                                       pac='Y', walk='Y', vhe=True, vhe_exit='DONE', usb=True, smmu=True,
                                       s2walk=(r'SMMU WALK ARENA [0-9A-F]{8} READS 0 \(TEST TABLES\)\n'
@@ -529,6 +557,7 @@ def check_usb(lines, expect):
             problems.append('a translating S2CR reported as not translated')
     problems += check_s2walk(lines, expect)
     problems += check_s2survey(lines, expect)
+    problems += check_region(lines, expect)
     if 'USB SERROR NONE' not in lines:
         problems.append('the USB read left an SError pending, or no SERROR line')
     return problems
@@ -563,6 +592,50 @@ def check_s2walk(lines, expect):
     if 's2walk_odd' in expect and (not arena or not odd or
                                    int(odd[1], 16) != int(arena[1], 16) + expect['s2walk_odd']):
         problems.append(f'the first odd page is not the arena\'s page at +{expect["s2walk_odd"]:X}')
+    return problems
+
+
+REGION_ENTRY = re.compile(r'^UEFI MAP ([0-9A-F]{10}) ([0-9A-F]{10}) (RESERVED|LDR CODE|LDR DATA|BS CODE|'
+                          r'BS DATA|RT CODE|RT DATA|FREE|UNUSABLE|ACPI RECL|ACPI NVS|MMIO|MMIO PORT|'
+                          r'PAL CODE|PERSIST|T[0-9A-F]{8}) [0-9A-F]{16}$')
+
+
+def check_region(lines, expect):
+    """The candidate region's memory-map lines: present exactly when asked;
+    exact on the gaokun3's range; on QEMU's stand-in, a header with at least
+    one entry, then that many well-formed entries (at most eight, then an
+    AND MORE line), in address order, each overlapping the range."""
+    region = [line for line in lines if line.startswith('UEFI MAP ')]
+    want = expect.get('region')
+    if not want:
+        return [f'UEFI MAP lines although usb-s2-fixed was not asked: {region[0]}'] if region else []
+    if want != 'test':
+        if len(region) != len(want) or not all(re.fullmatch(w, line) for w, line in zip(want, region)):
+            return [f'the memory map said {region!r}, not {want!r}']
+        return []
+    head = re.fullmatch(r'UEFI MAP ([0-9A-F]{8})-([0-9A-F]{8}) ENTRIES (\d+) \(TEST RANGE\)', region[0]) if region else None
+    if not head:
+        return [f'no test-range memory map header: {region[:1]!r}']
+    base, end, count = int(head[1], 16), int(head[2], 16), int(head[3])
+    shown = min(count, 8)
+    problems = []
+    if base != 0x40000000 or end - base != 0x2400000 or count < 1:
+        problems.append(f'the test range header is wrong: {region[0]}')
+    more = [f'UEFI MAP AND {count - shown} MORE'] if count > shown else []
+    if len(region) != 1 + shown + len(more) or region[1 + shown:] != more:
+        problems.append(f'{len(region) - 1} lines for {count} entries: {region!r}')
+    starts = []
+    for line in region[1:1 + shown]:
+        m = REGION_ENTRY.match(line)
+        if not m:
+            problems.append(f'a malformed memory map entry: {line}')
+            continue
+        a, b = int(m[1], 16), int(m[2], 16)
+        if not (a < end and b > base and b > a):
+            problems.append(f'an entry outside the range: {line}')
+        starts.append(a)
+    if starts != sorted(starts):
+        problems.append('memory map entries out of address order')
     return problems
 
 
@@ -707,6 +780,12 @@ def synthetic(expect, smp=SMP):
         elif expect.get('s2survey'):
             lines += [line.replace('\\', '').replace('[0-9A-F]{16}', '0000000009000B00')
                       for line in expect['s2survey']]
+        if expect.get('region') == 'test':
+            lines += ['UEFI MAP 40000000-42400000 ENTRIES 2 (TEST RANGE)',
+                      'UEFI MAP 0040000000 0040100000 BS DATA 000000000000000F',
+                      'UEFI MAP 0040100000 0047C00000 FREE 000000000000000F']
+        elif expect.get('region'):
+            lines += expect['region']
         lines.append('USB SERROR NONE')
     if expect.get('thermal'):
         lines += ['TSENS GUARD (READ ONLY) . TRIPPED: READ AT 0C222000',
@@ -918,17 +997,40 @@ def self_test():
                         'SMMU WALK SERROR PENDING AFTER 000000007E7FF008'), expect, False)
                     if '(TEST TABLES)' in first:
                         expect_result(f'{name} test tables not named', good.replace(
-                            first, first.removesuffix(' (TEST TABLES)')), expect, False)
+                            first, first.replace(' (TEST TABLES)', '')), expect, False)
                         expect_result(f'{name} too many reads', good.replace(
                             first, re.sub(r'READS \d+', 'READS 265', first)), expect, False)
                     if 'RW 256 ' in sample:
-                        expect_result(f'{name} first leaf elsewhere', good.replace(
-                            'LEAF L3 000000007E6007FF', 'LEAF L3 000000007E8007FF'), expect, False)
+                        expect_result(f'{name} first leaf elsewhere', re.sub(
+                            r'(SMMU WALK LEAF L3 [0-9A-F]{10})([0-9A-F])', lambda m: m[1] + '%X' % (int(m[2], 16) ^ 2),
+                            good), expect, False)
                         expect_result(f'{name} pages not adding up', good.replace(
                             'RW 256 LIMITED 0', 'RW 255 LIMITED 0'), expect, False)
                     if 's2walk_odd' in expect:
                         expect_result(f'{name} the wrong odd page', good.replace(
                             'ODD 7E601000', 'ODD 7E602000'), expect, False)
+                if expect.get('region'):
+                    region = [line for line in good.split('\n') if line.startswith('UEFI MAP ')]
+                    expect_result(f'{name} memory map missing', '\n'.join(
+                        line for line in good.split('\n') if not line.startswith('UEFI MAP ')), expect, False)
+                    expect_result(f'{name} memory map unavailable', good.replace(
+                        '\n'.join(region), 'UEFI MAP NOT AVAILABLE'), expect, False)
+                    if expect['region'] == 'test':
+                        expect_result(f'{name} entries out of order', good.replace(
+                            region[1] + '\n' + region[2], region[2] + '\n' + region[1]), expect, False)
+                        expect_result(f'{name} an entry outside the range', good.replace(
+                            'UEFI MAP 0040000000 0040100000', 'UEFI MAP 0050000000 0050100000'), expect, False)
+                        expect_result(f'{name} an entry count that disagrees', good.replace(
+                            'ENTRIES 2 (TEST RANGE)', 'ENTRIES 3 (TEST RANGE)'), expect, False)
+                        expect_result(f'{name} test range not named', good.replace(
+                            ' (TEST RANGE)', ''), expect, False)
+                    else:
+                        expect_result(f'{name} memory map not empty', good.replace(
+                            'ENTRIES 0', 'ENTRIES 1\nUEFI MAP 00C6200000 00C71A0000 RESERVED 0000000000000001'),
+                            expect, False)
+                else:
+                    expect_result(f'{name} memory map unasked', good.replace(
+                        'USB SERROR NONE', 'UEFI MAP NOT AVAILABLE\nUSB SERROR NONE'), expect, False)
                 if expect.get('s2survey'):
                     first = next(line for line in good.split('\n') if line.startswith('SMMU SURVEY '))
                     expect_result(f'{name} survey missing', '\n'.join(

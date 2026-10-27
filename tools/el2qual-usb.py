@@ -27,8 +27,9 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
            (load option "thermal"; docs/GAOKUN3-PHASE1-GUARDS.md).
   vhe-exit stage2's files with the two Phase 2 VHE-exit entries only (load
            option "exit-vhe"; docs/GAOKUN3-PHASE2.md).
-  usb-read stage2's files with the five USB entries only (load options
-           "usb", "usb-smmu", "usb-smmu-map", "usb-s2-walk", "usb-s2-survey";
+  usb-read stage2's files with the six USB entries only (load options
+           "usb", "usb-smmu", "usb-smmu-map", "usb-s2-walk", "usb-s2-survey",
+           "usb-s2-fixed";
            docs/GAOKUN3-USB-DEVICE-MODE.md).
   q1n1-foothold  stage2's files with q1n1 (its -DQ1N1_VHE_EXIT
            -DQ1N1_DT_FRAMEBUFFER build) in place of el2qual: its --el2
@@ -98,7 +99,8 @@ VHE_EXIT_ENTRIES = [
 # (RAM only: one table page of its own and one descriptor); then that, plus
 # the read-only walk of the stage-2 tables, whose reads the security
 # controller may refuse; then that, plus a read-only survey of the stage
-# 2's top two levels. Boot CPU and no PAuth, the steps run 9 cleared.
+# 2's top two levels; then the walk over a fixed range in the identity
+# region the survey found, with UEFI's memory map there. Boot CPU and no PAuth, the steps run 9 cleared.
 USB_READ_ENTRIES = [
     ('el2qual-8-usb.conf', 'el2qual 8: USB read (read only)', 'nopac nosmp usb'),
     ('el2qual-9-usb-smmu.conf', 'el2qual 9: USB and SMMU read after the VHE exit (read only)',
@@ -112,6 +114,9 @@ USB_READ_ENTRIES = [
     ('el2qual-12-usb-s2-survey.conf',
      'el2qual 12: as 11, then a read-only survey of the stage 2',
      'nopac nosmp exit-vhe usb-smmu-map usb-s2-survey'),
+    ('el2qual-13-usb-s2-fixed.conf',
+     'el2qual 13: as 10, then a fixed range in the identity region, and its memory map',
+     'nopac nosmp exit-vhe usb-smmu-map usb-s2-fixed'),
 ]
 STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRIES,
                  'vhe-exit': VHE_EXIT_ENTRIES, 'usb-read': USB_READ_ENTRIES}

@@ -332,6 +332,34 @@ int el2q_memmap_reserved(const void *map, uint64_t map_size, uint64_t desc_size,
     return 0;
 }
 
+/* The same descriptors, for el2q_s2w_region (s2walk.h): every one with
+ * pages that overlaps [base, end) is counted, and the lowest-starting
+ * EL2Q_S2W_MAP_ENTRIES kept in address order, since UEFI does not promise
+ * a sorted map. Attribute is at 32. */
+void el2q_memmap_region(const void *map, uint64_t map_size, uint64_t desc_size,
+                        uint64_t base, uint64_t end, struct el2q_s2w_region *out)
+{
+    *out = (struct el2q_s2w_region){.state = EL2Q_S2W_REGION_NO_MAP, .base = base, .end = end};
+    const uint8_t *m = map;
+    if (!m || desc_size < 40 || !map_size) return;
+    out->state = EL2Q_S2W_REGION_READ;
+    for (uint64_t off = 0; off + desc_size <= map_size; off += desc_size) {
+        uint64_t start = le64(m + off + 8), pages = le64(m + off + 24);
+        if (!pages || pages > UINT64_MAX >> 12 || start + (pages << 12) < start) continue;
+        if (start >= end || start + (pages << 12) <= base) continue;
+        struct el2q_s2w_map_entry e = {le32(m + off), start, pages, le64(m + off + 32)};
+        unsigned n = out->count < EL2Q_S2W_MAP_ENTRIES ? out->count : EL2Q_S2W_MAP_ENTRIES;
+        out->count++;
+        if (n == EL2Q_S2W_MAP_ENTRIES && start >= out->e[n - 1].start) continue;
+        if (n == EL2Q_S2W_MAP_ENTRIES) n--;
+        while (n && out->e[n - 1].start > start) {
+            out->e[n] = out->e[n - 1];
+            n--;
+        }
+        out->e[n] = e;
+    }
+}
+
 const char *el2q_sfb_words(uint32_t state)
 {
     static const char *const words[] = {

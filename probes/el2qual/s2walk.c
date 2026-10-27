@@ -321,7 +321,13 @@ int el2q_s2w_build_test(uint64_t arena, uint64_t pool, int odd,
  *     entries that is neither all '.' nor all '-' (never read):
  *   SMMU SURVEY L2 <8 hex> <32 entries>   (the IPA of the row's first entry)
  *     or SMMU SURVEY L2 NONE: <NOT A TABLE|OUTSIDE THE INPUT SIZE>
- * The first line ends " (TEST TABLES)" when the tables are el2qual's own. */
+ * The first line ends " (TEST TABLES)" when the tables are el2qual's own,
+ * and the walk's " (FIXED)" when it walked EL2Q_S2W_FIXED_ARENA. The
+ * candidate region's memory map:
+ *   UEFI MAP <8 hex>-<8 hex> ENTRIES <n>    (or UEFI MAP NOT AVAILABLE)
+ *   UEFI MAP <10 hex start> <10 hex end> <type> <16 hex attributes>
+ *   UEFI MAP AND <n> MORE                    (past EL2Q_S2W_MAP_ENTRIES)
+ * the first ending " (TEST RANGE)" on QEMU's stand-in range. */
 
 struct lbuf { char *s; unsigned n; };
 
@@ -391,6 +397,7 @@ void el2q_s2w_line(const struct el2q_s2w_result *r, unsigned index, char out[EL2
         put_s(&b, "SMMU WALK ");
         put_s(&b, not_run);
         if (r->test) put_s(&b, " (TEST TABLES)");
+        if (r->fixed) put_s(&b, " (FIXED)");
         return;
     }
     if (index == 0) {
@@ -399,6 +406,7 @@ void el2q_s2w_line(const struct el2q_s2w_result *r, unsigned index, char out[EL2
         put_s(&b, " READS ");
         put_dec(&b, r->reads);
         if (r->test) put_s(&b, " (TEST TABLES)");
+        if (r->fixed) put_s(&b, " (FIXED)");
     } else if (index == 1) {
         put_s(&b, "SMMU WALK ");
         if (r->state == EL2Q_S2W_DONE) {
@@ -510,5 +518,40 @@ void el2q_s2w_survey_line(const struct el2q_s2w_survey *s, unsigned index,
         put_s(&b, " ");
         put_row(&b, s->l2, r, 512);
         return;
+    }
+}
+
+/* EFI_MEMORY_TYPE (UEFI 2.10, 7.2), at most nine characters each. */
+static const char *const map_types[] = {
+    "RESERVED", "LDR CODE", "LDR DATA", "BS CODE", "BS DATA", "RT CODE", "RT DATA", "FREE",
+    "UNUSABLE", "ACPI RECL", "ACPI NVS", "MMIO", "MMIO PORT", "PAL CODE", "PERSIST",
+};
+
+void el2q_s2w_region_line(const struct el2q_s2w_region *r, unsigned index,
+                          char out[EL2Q_S2W_LINE_COLS + 1])
+{
+    struct lbuf b = {out, 0};
+    out[0] = 0;
+    if (r->state == EL2Q_S2W_REGION_NOT_ASKED || r->state > EL2Q_S2W_REGION_READ) return;
+    if (r->state == EL2Q_S2W_REGION_NO_MAP) {
+        if (!index) put_s(&b, "UEFI MAP NOT AVAILABLE");
+        return;
+    }
+    unsigned shown = r->count < EL2Q_S2W_MAP_ENTRIES ? r->count : EL2Q_S2W_MAP_ENTRIES;
+    if (index == 0) {
+        put_s(&b, "UEFI MAP "); put_hex(&b, r->base, 8);
+        put_s(&b, "-"); put_hex(&b, r->end, 8);
+        put_s(&b, " ENTRIES "); put_dec(&b, r->count);
+        if (r->test) put_s(&b, " (TEST RANGE)");
+    } else if (index <= shown) {
+        const struct el2q_s2w_map_entry *e = &r->e[index - 1];
+        put_s(&b, "UEFI MAP "); put_hex(&b, e->start, 10);
+        put_s(&b, " "); put_hex(&b, e->start + (e->pages << 12), 10);
+        put_s(&b, " ");
+        if (e->type < sizeof map_types / sizeof map_types[0]) put_s(&b, map_types[e->type]);
+        else { put_s(&b, "T"); put_hex(&b, e->type, 8); }
+        put_s(&b, " "); put_hex(&b, e->attr, 16);
+    } else if (index == shown + 1 && r->count > shown) {
+        put_s(&b, "UEFI MAP AND "); put_dec(&b, r->count - shown); put_s(&b, " MORE");
     }
 }

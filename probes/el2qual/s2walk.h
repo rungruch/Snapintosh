@@ -94,6 +94,7 @@ struct el2q_s2w_hw {
 struct el2q_s2w_result {
     uint32_t state;                          /* enum el2q_s2w */
     uint32_t test;                           /* the tables are el2qual's own fixture */
+    uint32_t fixed;                          /* the arena is EL2Q_S2W_FIXED_ARENA, not allocated */
     uint64_t arena;
     uint32_t pages[EL2Q_S2W_PAGE_COUNT];     /* DONE: arena pages in each class */
     uint32_t reads;                          /* descriptor loads made */
@@ -169,11 +170,44 @@ int el2q_s2w_build_test(uint64_t arena, uint64_t pool, int odd,
                         void (*write64)(void *ctx, uint64_t address, uint64_t value), void *ctx,
                         struct el2q_s2w_bank *bank);
 
+/* The candidate region (load option "usb-s2-fixed"). Run 23 found one
+ * identity region below 4 GiB in bank 126's stage 2, 2 MiB blocks from the
+ * splash framebuffer at 0xC6200000 to 0xC85FFFFF (OBSERVED, from the
+ * photographed map). Whether q1n1's arena could sit in it past the
+ * framebuffer depends on what UEFI's memory map says those pages are, and
+ * on the walk over an exact 1 MiB there; the walk reads only descriptors,
+ * so the range is walked without being allocated or touched. */
+#define EL2Q_S2W_REGION_BASE 0xC6200000ull
+#define EL2Q_S2W_REGION_END  0xC8600000ull
+#define EL2Q_S2W_FIXED_ARENA 0xC8000000ull   /* past the framebuffer's 0xC71A0000 */
+
+/* One EFI_MEMORY_DESCRIPTOR, as far as the report needs it. */
+struct el2q_s2w_map_entry {
+    uint32_t type;                           /* EFI_MEMORY_TYPE */
+    uint64_t start, pages, attr;
+};
+#define EL2Q_S2W_MAP_ENTRIES 8
+
+enum el2q_s2w_region_state { EL2Q_S2W_REGION_NOT_ASKED, EL2Q_S2W_REGION_NO_MAP, EL2Q_S2W_REGION_READ };
+
+/* The memory map's descriptors overlapping [base, end), as captured at
+ * ExitBootServices (el2q_memmap_region, firmware.c). */
+struct el2q_s2w_region {
+    uint32_t state;                          /* enum el2q_s2w_region_state */
+    uint32_t test;                           /* a QEMU test range, not the gaokun3's region */
+    uint64_t base, end;
+    uint32_t count;                          /* overlapping descriptors in all */
+    struct el2q_s2w_map_entry e[EL2Q_S2W_MAP_ENTRIES];   /* the lowest-starting ones, in address order */
+};
+
 /* Fixed-format report lines, empty past the last; see s2walk.c. */
 #define EL2Q_S2W_LINE_COLS 64
 void el2q_s2w_line(const struct el2q_s2w_result *r, unsigned index, char out[EL2Q_S2W_LINE_COLS + 1]);
 #define EL2Q_S2W_SURVEY_LINES 36   /* at most: 2 status, 16 + 1 level-1, 1 + 16 level-2 */
 void el2q_s2w_survey_line(const struct el2q_s2w_survey *s, unsigned index,
+                          char out[EL2Q_S2W_LINE_COLS + 1]);
+#define EL2Q_S2W_REGION_LINES (2 + EL2Q_S2W_MAP_ENTRIES)
+void el2q_s2w_region_line(const struct el2q_s2w_region *r, unsigned index,
                           char out[EL2Q_S2W_LINE_COLS + 1]);
 
 #endif

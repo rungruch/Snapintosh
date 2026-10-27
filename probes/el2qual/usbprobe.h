@@ -147,6 +147,8 @@ struct el2q_usb {
     struct el2q_s2w_result walk;
     /* Option "usb-s2-survey": that stage 2's top two levels (s2walk.c). */
     struct el2q_s2w_survey survey;
+    /* Option "usb-s2-fixed": UEFI's memory map over the candidate region. */
+    struct el2q_s2w_region region;
     uint64_t smmu_esr;
     uint64_t isr;                            /* ISR_EL1 after the reads: a pending SError shows here */
 };

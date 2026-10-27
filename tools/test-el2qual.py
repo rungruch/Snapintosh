@@ -23,7 +23,8 @@
 5. The same for probes/el2qual/s2walk.c: the table mapping check, the
    SError checks, stopping at a fault, reading each descriptor once, the
    format refusals and the page classes, and the survey's choice of
-   table, bound and map rows.
+   table, bound and map rows; and for the memory-map scan in
+   probes/el2qual/firmware.c that reports the candidate region.
 """
 import argparse
 import os
@@ -203,14 +204,14 @@ def check_exit_vhe():
     return problems, len(sequence_mutations(insns))
 
 
-def compile_test(cc, out, sanitizers, pagemap=None, s2walk=None):
+def compile_test(cc, out, sanitizers, pagemap=None, s2walk=None, firmware=None):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'),
            str(ROOT / 'tools' / 'test-el2qual-vhe.c'), str(ROOT / 'tools' / 'test-el2qual-usbprobe.c'),
            str(ROOT / 'tools' / 'test-el2qual-pagemap.c'), str(ROOT / 'tools' / 'test-el2qual-s2walk.c'),
            str(EL2Q / 'report.c'), str(EL2Q / 'usbprobe.c'), str(pagemap or EL2Q / 'pagemap.c'),
            str(s2walk or EL2Q / 's2walk.c'),
-           str(EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'), str(EL2Q / 'vhe.c'),
+           str(firmware or EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'), str(EL2Q / 'vhe.c'),
            str(ROOT / 'compat' / 'sc8280xp-thermal.c'), '-o', str(out)]
     return cmd, subprocess.run(cmd, capture_output=True, text=True)
 
@@ -279,6 +280,25 @@ S2WALK_MUTATIONS = [
     ('unread rows printed', "if (row_all(s->l2, r, '.') || row_all(s->l2, r, '-')) continue;",
      "if (row_all(s->l2, r, '.')) continue;"),
     ('a row labelled with the wrong address', '((uint64_t)r * ROW << 21)', '((uint64_t)r * ROW << 20)'),
+    # The candidate region's lines.
+    ('"AND 0 MORE" printed', 'index == shown + 1 && r->count > shown', 'index == shown + 1'),
+]
+
+# The memory-map scan for the candidate region (el2q_memmap_region in
+# firmware.c).
+FIRMWARE_MUTATIONS = [
+    ('a descriptor starting at the end counted', 'if (start >= end || start + (pages << 12) <= base) continue;',
+     'if (start > end || start + (pages << 12) <= base) continue;'),
+    ('a descriptor ending at the base counted', 'if (start >= end || start + (pages << 12) <= base) continue;',
+     'if (start >= end || start + (pages << 12) < base) continue;'),
+    ('a descriptor without pages counted', 'if (!pages || pages > UINT64_MAX >> 12 || start + (pages << 12) < start) continue;',
+     'if (pages > UINT64_MAX >> 12 || start + (pages << 12) < start) continue;'),
+    ('a wrapping descriptor counted', 'if (!pages || pages > UINT64_MAX >> 12 || start + (pages << 12) < start) continue;',
+     'if (!pages || pages > UINT64_MAX >> 12) continue;'),
+    ('the entries left unsorted', 'while (n && out->e[n - 1].start > start) {', 'while (0 && n) {'),
+    ('a higher entry let into a full list', '        if (n == EL2Q_S2W_MAP_ENTRIES && start >= out->e[n - 1].start) continue;\n', ''),
+    ('the attribute read from the page count', 'le64(m + off + 32)}', 'le64(m + off + 24)}'),
+    ('a short descriptor size accepted', 'if (!m || desc_size < 40 || !map_size) return;', 'if (!m || !map_size) return;'),
 ]
 
 
@@ -343,7 +363,8 @@ def main():
         verdict = 'PASS' if ran.returncode == 0 else f'FAIL (exit {ran.returncode})'
         print(f'{verdict} test-el2qual.c [{mode}]')
         if ran.returncode == 0:
-            for name, mutations in (('pagemap.c', PAGEMAP_MUTATIONS), ('s2walk.c', S2WALK_MUTATIONS)):
+            for name, mutations in (('pagemap.c', PAGEMAP_MUTATIONS), ('s2walk.c', S2WALK_MUTATIONS),
+                                    ('firmware.c', FIRMWARE_MUTATIONS)):
                 mutants = check_mutations(cc, flags, tmp, name, mutations)
                 for m in mutants:
                     print(f'FAIL {Path(name).stem} mutation: {m}')

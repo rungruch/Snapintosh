@@ -13,7 +13,7 @@
 #include "vhe.h"
 #include "usbprobe.h"
 
-#define EL2Q_VERSION      10    /* 2: counter rate, GICv3 virtualization, SMBIOS;
+#define EL2Q_VERSION      11    /* 2: counter rate, GICv3 virtualization, SMBIOS;
                                    3: the tsens read (option "thermal");
                                    4: the VHE exit (option "exit-vhe");
                                    5: the USB read (options "usb", "usb-smmu");
@@ -24,7 +24,10 @@
                                    9: "usb-s2-walk" walks that stage 2 for a
                                       q1n1-style DMA arena (s2walk.c);
                                    10: "usb-s2-survey" surveys its top two
-                                      levels */
+                                      levels;
+                                   11: "usb-s2-fixed" walks a fixed range in
+                                      run 23's identity region and reports
+                                      UEFI's memory map there */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4
@@ -246,6 +249,8 @@ enum el2q_sfb_state el2q_fdt_simplefb(const void *fdt, size_t limit, struct el2q
 
 /* Whether [base, base + size) lies inside a single EfiReservedMemoryType
  * descriptor of a GetMemoryMap buffer (descriptors desc_size bytes apart). */
+void el2q_memmap_region(const void *map, uint64_t map_size, uint64_t desc_size,
+                        uint64_t base, uint64_t end, struct el2q_s2w_region *out);
 int el2q_memmap_reserved(const void *map, uint64_t map_size, uint64_t desc_size,
                          uint64_t base, uint64_t size);
 
