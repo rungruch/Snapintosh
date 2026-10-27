@@ -36,6 +36,10 @@ report says so when one is in effect.
 | `emulate-s2-tables` | With `usb-s2-walk`, walk a stage-2 table set el2qual builds for its arena instead of the SMMU's, every page identity read-write. With `usb-s2-fixed`, the memory map is reported over 36 MiB from QEMU virt's RAM base, `0x40000000`, instead. Test only. |
 | `emulate-s2-odd` | The same, with arena pages 1 to 3 moved, invalid and read-only. Test only. |
 | `emulate-s2-device` | The same tables, but with the root pointed at QEMU's PL011, a Device page the walk must refuse unread. Test only. |
+| `usb-halt` | `usb`, then read USB0's xHCI `USBCMD` and `USBSTS` from the operational base the controller's own `CAPLENGTH` gives, and report whether it is halted (`usbprobe.c`). Read only. |
+| `emulate-usb-halt` | The halt read against a page el2qual owns, standing in for the controller (`CAPLENGTH` `0x30`, halted), through the real mapping check and guarded read with only the Device-attribute requirement relaxed; the line is marked `(TEST)`. Test only. |
+| `emulate-usb-halt-running` | The same, with the stand-in running. Test only. |
+| `rng` | Before ExitBootServices, look for UEFI's RNG protocol, list its algorithms, and read 256 bytes twice from the default algorithm, and from `RAW` when it is listed; report whether they are non-zero and differ (`rng.c`; Phase 3 step P7). Read only. |
 
 What each USB option is for, and what it found on the gaokun3, is in
 [docs/GAOKUN3-USB-DEVICE-MODE.md](../../docs/GAOKUN3-USB-DEVICE-MODE.md).

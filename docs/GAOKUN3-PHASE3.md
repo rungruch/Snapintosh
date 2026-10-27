@@ -403,7 +403,74 @@ its own go-ahead.
   loader refusing any overlap.
 - **P7. The entropy source:** a read-only el2qual stage that reports
   whether UEFI offers the RNG protocol and which algorithms. If it does
-  not, Phase 3 stops here until a source exists.
+  not, Phase 3 stops here until a source exists. BUILT, host and QEMU
+  only ([result](#p7-the-entropy-check)); the gaokun3 run is stick entry
+  16, not yet run.
+
+### P7: the entropy check
+
+**2026-10-27: built, host and QEMU only; gaokun3 NOT RUN.** el2qual's
+load option `rng` (`probes/el2qual/rng.c`) runs before
+`ExitBootServices`, while the firmware's services exist:
+
+- it looks for UEFI's RNG protocol;
+- it lists the protocol's algorithms;
+- it reads 256 bytes twice from the default algorithm, and twice from
+  `RAW` when `RAW` is listed;
+- it reports whether the bytes are non-zero and differ between reads,
+  and how many distinct values the first read held.
+
+A read counts only on a status of exactly `EFI_SUCCESS`: a warning is not
+delivered entropy. Each buffer is zeroed first, so a driver that claims
+success without writing reads as all zero. `RAW` is preferred when it
+works: UEFI defines it as entropy "directly from the source", which is
+what Phase 0C condition 3 asks for. The other algorithms are DRBGs whose
+seed this cannot see. The protocol's GUIDs, interface and status codes are
+UEFI 2.10's, checked against EDK2's `MdePkg/Include/Guid/Rng.h`.
+
+The screen shows up to five lines, ending in a verdict:
+
+```
+RNG PROTOCOL FOUND | NOT FOUND, STATUS <16 hex> | FOUND, NO INTERFACE
+RNG ALGORITHMS <n>: <RAW CTR HASH HMAC AES 3DES RNDR ?>
+RNG DEFAULT 256B OK NONZERO DIFFER DISTINCT <n>   (or the failure)
+RNG RAW 256B ...                                  (only when RAW is listed)
+RNG VERDICT: USABLE, RAW | USABLE, DEFAULT ALGORITHM | UNUSABLE | NO SOURCE
+```
+
+**What QEMU showed** (OBSERVED, host only). QEMU's EDK2 builds its RNG
+protocol on the CPU's `RNDR`:
+
+| Configuration | Result |
+| --- | --- |
+| `max-rng` (`-cpu max`, has `RNDR`) | `FOUND`, one algorithm, `RNDR`; 256 bytes non-zero and different on each read, 171 distinct values; `USABLE, DEFAULT ALGORITHM` |
+| `cortex-a76-rng` (no `RNDR`, like the gaokun3) | `NOT FOUND, STATUS 800000000000000E`; `NO SOURCE` |
+
+So QEMU cannot stand in for the gaokun3 here. The gaokun3 has no `RNDR`
+(VERIFIED, Phase 0A), and its firmware is Qualcomm's and Huawei's, not
+EDK2's QEMU build. Whether that firmware backs the protocol with the SoC's
+own generator is what the hardware run answers.
+
+**Evidence.**
+
+- `python3 tools/test-el2qual.py`: the RNG tests are part of the suite.
+  A fake firmware answers every way the real one might: not found, no
+  interface, `GetInfo` unsupported or too small, and good, all-zero,
+  repeating, failing, warning or unwritten reads. Twelve deliberately
+  broken copies of `rng.c` are each rejected.
+- `python3 tools/qemu-el2qual.py --config max-rng --config
+  cortex-a76-rng`: PASS, the two results above. The checker's self-test
+  also rejects a missing or flipped verdict, a missing pre-ExitBootServices
+  line, a narrow byte spread, and RNG lines on a run that did not ask.
+- `python3 tools/test-el2qual-usb.py`: the `entropy` stick, a single
+  entry, `el2qual 16` (`nopac nosmp rng`).
+
+**On the gaokun3** (stick entry 16, read only, one boot):
+
+- a `USABLE` verdict, best `RAW`, means Phase 3 can take a real seed;
+- `UNUSABLE` or `NO SOURCE` means Phase 3 stops at condition 3 until
+  another source is found, for example the SoC's generator once its
+  registers are documented.
 
 **On the gaokun3, each with its own go-ahead:**
 
