@@ -37,6 +37,7 @@ struct el2q_opt {
     int usb_s2_walk, usb_s2_survey, usb_s2_fixed, usb_s2_bypass_plan, usb_halt;
     int emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
     int emulate_usb_halt, emulate_usb_halt_running;
+    int rng;
 };
 
 extern struct el2q_opt opt;

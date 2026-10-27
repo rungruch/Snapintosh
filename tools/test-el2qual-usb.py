@@ -117,6 +117,23 @@ class Layout(unittest.TestCase):
         for e in (self.out() / 'loader/entries').iterdir():
             self.assertNotIn('devicetree', e.read_text())
 
+    def test_entropy_stage_has_one_entry(self):
+        m = usb.build_layout('entropy', self.out(), self.efi, self.sdboot, self.slb, self.tcb,
+                             self.dtb)
+        out = self.out()
+        self.assert_manifest_complete(out, m)
+        self.assertEqual(m['stage'], 'entropy')
+        self.assertEqual((out / 'EFI/systemd/drivers/slbounceaa64.efi').read_bytes(),
+                         self.slb.read_bytes())
+        entries = sorted((out / 'loader/entries').iterdir())
+        self.assertEqual([e.name for e in entries], ['el2qual-16-rng.conf'])
+        text = entries[0].read_text()
+        self.assertIn('options nopac nosmp rng\n', text)        # read only, no VHE exit, no USB
+        self.assertNotIn('emulate', text)
+        self.assertNotIn('usb', text)
+        self.assertIn('default el2qual-16-rng.conf', (out / 'loader/loader.conf').read_text())
+        self.refused('entropy needs --slbounce', stage='entropy', slbounce=None)
+
     def test_thermal_stage_has_one_entry(self):
         m = usb.build_layout('thermal', self.out(), self.efi, self.sdboot, self.slb, self.tcb,
                              self.dtb)

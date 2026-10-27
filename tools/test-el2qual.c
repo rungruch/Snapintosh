@@ -1442,6 +1442,8 @@ unsigned test_pagemap(void);
 unsigned test_s2walk(void);
 unsigned test_s2bypass(void);
 unsigned test_s2bwrite(void);
+/* tools/test-el2qual-rng.c: rng.c, the entropy check. */
+unsigned test_rng(void);
 
 int main(void)
 {
@@ -1461,6 +1463,7 @@ int main(void)
     checks += test_s2walk();
     checks += test_s2bypass();
     checks += test_s2bwrite();
+    checks += test_rng();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

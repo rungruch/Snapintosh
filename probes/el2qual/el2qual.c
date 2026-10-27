@@ -593,6 +593,12 @@ static void start_secondaries(void)
 
 /* ---- Before ExitBootServices ------------------------------------------------ */
 
+/* rng.c's only route to the firmware. */
+static efi_status rng_locate(void *bs, const struct efi_guid *guid, void **protocol)
+{
+    return ((struct efi_boot_services *)bs)->locate_protocol(guid, 0, protocol);
+}
+
 static int word_is(const char16 *w, unsigned n, const char *s)
 {
     unsigned i = 0;
@@ -632,6 +638,7 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "usb-s2-bypass-plan")) opt.usb = opt.usb_smmu = opt.usb_s2_bypass_plan = 1;
         /* The halt read needs the controller, not the SMMU or the VHE exit. */
         if (word_is(w, len, "usb-halt")) opt.usb = opt.usb_halt = 1;
+        if (word_is(w, len, "rng")) opt.rng = 1;
         if (word_is(w, len, "emulate-s2-tables")) opt.emulate_s2_tables = 1;
         if (word_is(w, len, "emulate-s2-odd")) opt.emulate_s2_tables = opt.emulate_s2_odd = 1;
         if (word_is(w, len, "emulate-s2-device")) opt.emulate_s2_tables = opt.emulate_s2_device = 1;
@@ -861,6 +868,12 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
     if (!EFI_ERROR(bs->allocate_pages(0 /* AnyPages */, 2 /* LoaderData */, 8, &pages)))
         table = (pages + 0x3fff) & ~0x3fffull;
     usb_stage_reserve(bs);
+    /* The entropy check needs boot services, so it runs here, before
+     * ExitBootServices; its result is reported after (rng.c). */
+    if (opt.rng) {
+        progress("RNG: ASKING UEFI'S RNG PROTOCOL FOR 256 BYTES, READ ONLY");
+        el2q_rng_probe(rng_locate, bs, &run.rng);
+    }
 
     char line[] = "SNAPINTOSH EL2QUAL: STARTED AT EL., CALLING EXITBOOTSERVICES";
     line[33] = (char)('0' + run.start_el);

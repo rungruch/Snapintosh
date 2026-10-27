@@ -241,6 +241,19 @@ static enum el2q_color usb_line_color(const char *line)
                                                                                    : EL2Q_YELLOW;
 }
 
+/* The entropy verdict is a gate for Phase 3 (Phase 0C condition 3), so it is
+ * coloured like one; the lines leading to it are plain. */
+static enum el2q_color rng_line_color(const char *line)
+{
+    static const char verdict[] = "RNG VERDICT: ", usable[] = "USABLE";
+    unsigned n = 0;
+    while (verdict[n] && line[n] == verdict[n]) n++;
+    if (verdict[n]) return EL2Q_WHITE;
+    for (unsigned i = 0; usable[i]; i++)
+        if (line[n + i] != usable[i]) return EL2Q_RED;
+    return EL2Q_GREEN;
+}
+
 static void header(const struct el2q_run *r, struct el2q_text *t)
 {
     struct lb b = new_line(t, EL2Q_CYAN);
@@ -297,6 +310,16 @@ static void header(const struct el2q_run *r, struct el2q_text *t)
         if (!usb[0]) break;
         b = new_line(t, usb_line_color(usb));
         put_s(&b, usb);
+    }
+    /* The entropy check (option "rng"), beside the USB read for the same
+     * reason. */
+    _Static_assert(EL2Q_RNG_LINE_COLS <= EL2Q_TEXT_COLS, "an RNG line fits a report line");
+    for (unsigned i = 0;; i++) {
+        char rng[EL2Q_RNG_LINE_COLS + 1];
+        el2q_rng_line(&r->rng, i, rng);
+        if (!rng[0]) break;
+        b = new_line(t, rng_line_color(rng));
+        put_s(&b, rng);
     }
 
     enum el2q_color c = r->start_el == 2 ? EL2Q_WHITE

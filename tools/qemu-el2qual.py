@@ -168,6 +168,23 @@ CONFIGS = {
     # the controller only when they say ON, and leave no SError. The second
     # runs in the order the gaokun3 would: slbounce's state, the VHE exit,
     # then the read with the SMMU.
+    # The entropy check (rng.c, Phase 3 P7): what QEMU's EDK2 offers, with a
+    # CPU that has RNDR and with one that, like the gaokun3, does not.
+    # EDK2 builds its RNG protocol on RNDR (OBSERVED, 2026-10-27): with it,
+    # one algorithm, RNDR, and usable bytes; without it, no protocol at all.
+    'max-rng': dict(cpu='max', options='rng', pac='Y', walk='Y',
+                    rng=[r'RNG PROTOCOL FOUND', r'RNG ALGORITHMS 1: RNDR',
+                         r'RNG DEFAULT 256B OK NONZERO DIFFER DISTINCT \d+',
+                         r'RNG VERDICT: USABLE, DEFAULT ALGORITHM'],
+                    rng_sample=['RNG PROTOCOL FOUND', 'RNG ALGORITHMS 1: RNDR',
+                                'RNG DEFAULT 256B OK NONZERO DIFFER DISTINCT 171',
+                                'RNG VERDICT: USABLE, DEFAULT ALGORITHM'],
+                    features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'cortex-a76-rng': dict(cpu='cortex-a76', options='rng', pac='N', walk='Y',
+                           rng=[r'RNG PROTOCOL NOT FOUND, STATUS 800000000000000E',
+                                r'RNG VERDICT: NO SOURCE'],
+                           features=dict.fromkeys(FEATURES, False),
+                           routes=('BLOCKED: NV2 ECV RNDR PAUTH', 'BLOCKED: PAUTH')),
     'max-usb': dict(cpu='max', options='usb', pac='Y', walk='Y', usb=True,
                     features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
     # The xHCI halt read (usbprobe.c). virt has no Qualcomm USB, so power is
@@ -501,7 +518,37 @@ def check(log, expect, smp=SMP):
     problems += check_tsens(lines, expect)
     problems += check_vhe_exit(lines, expect)
     problems += check_usb(lines, expect)
+    problems += check_rng(lines, expect, log)
     return problems
+
+
+def check_rng(lines, expect, log):
+    """The entropy check's lines (rng.c): present exactly when asked, equal to
+    this configuration's expected lines, and ending in the verdict. Its
+    progress line must be on the firmware console before the report, which is
+    where a line printed before ExitBootServices goes, and so shows the probe
+    ran while boot services existed. A usable read of 256 random bytes must
+    also show a plausible spread of byte values: about 162 are expected, and
+    fewer than 100 from a working generator is vanishingly unlikely."""
+    rng = [line for line in lines if line.startswith('RNG ')]
+    console = [line.rstrip('\r') for line in log.splitlines()]
+    before = console[:console.index('EL2QUAL BEGIN')] if 'EL2QUAL BEGIN' in console else console
+    asked = any(line.startswith('RNG: ASKING') for line in before)
+    want = expect.get('rng')
+    if not want:
+        return ([f'RNG lines although rng was not asked: {(rng or ["RNG: ASKING"])[0]}']
+                if rng or asked else [])
+    if not asked:
+        return ['rng asked, but no progress line before ExitBootServices']
+    if len(rng) != len(want) or not all(re.fullmatch(w, line) for w, line in zip(want, rng)):
+        return [f'the entropy check said {rng!r}, not {want!r}']
+    if not rng[-1].startswith('RNG VERDICT: '):
+        return [f'the entropy check does not end in its verdict: {rng[-1]}']
+    for line in rng:
+        spread = re.fullmatch(r'RNG (?:DEFAULT|RAW) 256B OK NONZERO DIFFER DISTINCT (\d+)', line)
+        if spread and int(spread[1]) < 100:
+            return [f'only {spread[1]} distinct byte values in 256 "random" bytes: {line}']
+    return []
 
 
 USB_WORD = r'([0-9A-F]{8}|UNMAPPED|FAULT|NOT READ)'
@@ -870,6 +917,11 @@ def synthetic(expect, smp=SMP):
         elif expect.get('region'):
             lines += expect['region']
         lines.append('USB SERROR NONE')
+    if expect.get('rng'):
+        # Printed on the firmware console before ExitBootServices, so before
+        # the report; the report carries only the result lines.
+        lines.insert(lines.index('EL2QUAL BEGIN'), "RNG: ASKING UEFI'S RNG PROTOCOL FOR 256 BYTES, READ ONLY")
+        lines += [line.replace('\\', '') for line in expect.get('rng_sample', expect['rng'])]
     if expect.get('thermal'):
         lines += ['TSENS GUARD (READ ONLY) . TRIPPED: READ AT 0C222000',
                   'TSENS TRIPPED CHECKED=58 UNMAPPED=0 ADMIT=1 POLLS=1 VALID=0',
@@ -918,6 +970,23 @@ def self_test():
             expect_result(f'{name} moved unasked', good.replace(
                 'FB 0000000080000000', 'FB 0000000080000000  FROM MODE 0'), expect, False)
         expect_result(f'{name} truncated', good.replace('EL2QUAL END', ''), expect, False)
+        # The entropy check: its lines must match, end in the verdict, show a
+        # plausible spread, and appear only when asked.
+        if expect.get('rng'):
+            verdict = next(l for l in good.splitlines() if l.startswith('RNG VERDICT: '))
+            expect_result(f'{name} rng verdict missing', good.replace(verdict + '\n', ''), expect, False)
+            expect_result(f'{name} rng verdict flipped', good.replace(
+                verdict, 'RNG VERDICT: NO SOURCE' if 'USABLE' in verdict else 'RNG VERDICT: USABLE, RAW'),
+                expect, False)
+            expect_result(f'{name} rng not asked first',
+                          good.replace("RNG: ASKING UEFI'S RNG PROTOCOL FOR 256 BYTES, READ ONLY\n", ''),
+                          expect, False)
+            if 'DISTINCT 171' in good:
+                expect_result(f'{name} rng spread too narrow', good.replace('DISTINCT 171', 'DISTINCT 40'),
+                              expect, False)
+        else:
+            expect_result(f'{name} rng lines unasked', good.replace(
+                'EL2QUAL END', 'RNG PROTOCOL FOUND\nRNG VERDICT: USABLE, RAW\nEL2QUAL END'), expect, False)
         expect_result(f'{name} missing slot', good.replace('SUM 3 ', 'XUM 3 '), expect, False)
         expect_result(f'{name} slot faulted',
                       re.sub(r'SUM 2 EL2 DONE .*', 'SUM 2 EL2 FAULT', good), expect, False)

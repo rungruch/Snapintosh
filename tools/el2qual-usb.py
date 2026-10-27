@@ -31,6 +31,8 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
            "usb", "usb-smmu", "usb-smmu-map", "usb-s2-walk", "usb-s2-survey",
            "usb-s2-fixed", "usb-s2-bypass-plan", "usb-halt";
            docs/GAOKUN3-USB-DEVICE-MODE.md).
+  entropy  stage2's files with one entry only: the Phase 3 entropy check
+           (load option "rng"; docs/GAOKUN3-PHASE3.md, step P7).
   q1n1-foothold  stage2's files with q1n1 (its -DQ1N1_VHE_EXIT
            -DQ1N1_DT_FRAMEBUFFER build) in place of el2qual: its --el2
            foothold under slbounce, then the same after --exit-vhe.
@@ -125,8 +127,16 @@ USB_READ_ENTRIES = [
      'el2qual 15: USB0 xHCI halt state from the measured CAPLENGTH (read only)',
      'nopac nosmp usb-halt'),
 ]
+# Phase 3 step P7 (docs/GAOKUN3-PHASE3.md): whether the firmware offers an
+# entropy source a Route B boot could take its seed from. The check runs
+# before ExitBootServices and is read only; one entry, so nothing else on
+# the stick can be chosen by mistake.
+ENTROPY_ENTRIES = [
+    ('el2qual-16-rng.conf', 'el2qual 16: UEFI RNG protocol check (read only)', 'nopac nosmp rng'),
+]
 STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRIES,
-                 'vhe-exit': VHE_EXIT_ENTRIES, 'usb-read': USB_READ_ENTRIES}
+                 'vhe-exit': VHE_EXIT_ENTRIES, 'usb-read': USB_READ_ENTRIES,
+                 'entropy': ENTROPY_ENTRIES}
 
 # Phase 2's USB question (docs/GAOKUN3-PHASE2.md): which USB protocols the
 # gaokun3's firmware installs. q1n1's passive inventory, built to hold its
@@ -134,7 +144,7 @@ STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRI
 USB_PROBE_PATH = 'EFI/q1n1/q1n1-usb-probe-hold.efi'
 USB_INVENTORY_ENTRY = ('q1n1-usb-inventory.conf', 'q1n1: USB protocol inventory (read only, no EL2 switch)')
 STAGES = ('stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit', 'usb-inventory', 'q1n1-foothold',
-          'usb-read')
+          'usb-read', 'entropy')
 
 # q1n1's first boot on the gaokun3 (docs/GAOKUN3-PHASE2.md), in order: its
 # --el2 foothold under slbounce's VHE state, drawing on the device tree's
@@ -235,7 +245,7 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
                                    any((slbounce, tcblaunch, dtb, always_switch, efi)))
     if usb_probe:
         raise LayoutError('--usb-probe belongs to the usb-inventory stage only')
-    switches = stage in ('stage2', 'thermal', 'vhe-exit', 'q1n1-foothold', 'usb-read')
+    switches = stage in ('stage2', 'thermal', 'vhe-exit', 'q1n1-foothold', 'usb-read', 'entropy')
     q1n1 = stage == 'q1n1-foothold'
     require_pe(efi, 'q1n1' if q1n1 else 'el2qual', {SUBSYSTEM_EFI_APPLICATION})
     if q1n1:

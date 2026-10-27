@@ -210,13 +210,14 @@ def check_exit_vhe():
 
 
 def compile_test(cc, out, sanitizers, pagemap=None, s2walk=None, firmware=None, s2bypass=None,
-                 s2bwrite=None):
+                 s2bwrite=None, rng=None):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'),
            str(ROOT / 'tools' / 'test-el2qual-vhe.c'), str(ROOT / 'tools' / 'test-el2qual-usbprobe.c'),
            str(ROOT / 'tools' / 'test-el2qual-pagemap.c'), str(ROOT / 'tools' / 'test-el2qual-s2walk.c'),
            str(ROOT / 'tools' / 'test-el2qual-s2bypass.c'), str(s2bypass or EL2Q / 's2bypass.c'),
            str(ROOT / 'tools' / 'test-el2qual-s2bwrite.c'), str(s2bwrite or EL2Q / 's2bwrite.c'),
+           str(ROOT / 'tools' / 'test-el2qual-rng.c'), str(rng or EL2Q / 'rng.c'),
            str(EL2Q / 'report.c'), str(EL2Q / 'usbprobe.c'), str(pagemap or EL2Q / 'pagemap.c'),
            str(s2walk or EL2Q / 's2walk.c'),
            str(firmware or EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'), str(EL2Q / 'vhe.c'),
@@ -376,6 +377,36 @@ S2BWRITE_MUTATIONS = [
     ('a global fault ignored', '    if (out->gfsr) return out->state = EL2Q_S2BW_GFAULT;\n', ''),
     ('a hole in the lines', '    if (r->restored) kinds[n++] = L_RESTORE;', '    kinds[n++] = L_RESTORE;'),
 ]
+# The entropy check (rng.c, Phase 3 step P7). Two things are deliberately not
+# mutated: a warning status is refused both in read_twice and in usable(), so
+# breaking either alone changes nothing visible; and the buffers' zeroing
+# guards against uninitialised stack bytes, which a sanitizer build does not
+# flag, so a mutant there would pass or fail with whatever the stack held.
+RNG_MUTATIONS = [
+    ('a repeated answer accepted', 'r->nonzero && r->differ;', 'r->nonzero;'),
+    ('an all-zero answer counted non-zero', '    out->nonzero = !zero_a && !zero_b;\n',
+     '    out->nonzero = (!zero_a && !zero_b) || 1;\n'),
+    ('RAW not preferred over the default',
+     'out->state = usable(&out->raw) ? EL2Q_RNG_USABLE_RAW\n'
+     '               : usable(&out->def) ? EL2Q_RNG_USABLE_DEFAULT : EL2Q_RNG_UNUSABLE;',
+     'out->state = usable(&out->def) ? EL2Q_RNG_USABLE_DEFAULT\n'
+     '               : usable(&out->raw) ? EL2Q_RNG_USABLE_RAW : EL2Q_RNG_UNUSABLE;'),
+    ('RAW read when it is not listed', '    if (raw) read_twice(p, &known[0].guid, &out->raw);',
+     '    if (raw || 1) read_twice(p, &known[0].guid, &out->raw);'),
+    ('a list GetInfo could not fill trusted', '    if (out->info_status == 0)\n        for',
+     '    if (out->info_status == 0 || out->info_status == EFI_BUFFER_TOO_SMALL)\n        for'),
+    ('a list longer than fit not counted',
+     '    if (out->info_status == 0 || out->info_status == EFI_BUFFER_TOO_SMALL)\n        out->listed',
+     '    if (out->info_status == 0)\n        out->listed'),
+    ('a null interface used', '    if (!found) {', '    if (0) {'),
+    ('a wrong protocol GUID', '0x3152bca5, 0xeade, 0x433d', '0x3152bca6, 0xeade, 0x433d'),
+    ('a wrong RAW GUID', '{0xb7, 0x84, 0x7f, 0xfd, 0xc4, 0xb6, 0x85, 0x61}',
+     '{0xb7, 0x84, 0x7f, 0xfd, 0xc4, 0xb6, 0x85, 0x62}'),
+    ('a wrong RNDR GUID', '{0x02, 0x96, 0xa8, 0x9b, 0xca, 0x78, 0x08, 0x41}',
+     '{0x02, 0x96, 0xa8, 0x9b, 0xca, 0x78, 0x08, 0x40}'),
+    ('a hole in the lines', '        if (r->raw.asked) order[n++] = RAW;', '        order[n++] = RAW;'),
+    ('the verdict misnamed', '"USABLE, RAW"', '"USABLE, DEFAULT ALGORITHM"'),
+]
 MUTANT_TIMEOUT = 120
 
 
@@ -449,7 +480,8 @@ def main():
             for name, mutations in (('pagemap.c', PAGEMAP_MUTATIONS), ('s2walk.c', S2WALK_MUTATIONS),
                                     ('firmware.c', FIRMWARE_MUTATIONS),
                                     ('s2bypass.c', S2BYPASS_MUTATIONS),
-                                    ('s2bwrite.c', S2BWRITE_MUTATIONS)):
+                                    ('s2bwrite.c', S2BWRITE_MUTATIONS),
+                                    ('rng.c', RNG_MUTATIONS)):
                 mutants = check_mutations(cc, flags, tmp, name, mutations)
                 for m in mutants:
                     print(f'FAIL {Path(name).stem} mutation: {m}')

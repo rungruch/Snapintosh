@@ -12,6 +12,7 @@
 #include <stdint.h>
 #include "vhe.h"
 #include "usbprobe.h"
+#include "rng.h"
 
 #define EL2Q_VERSION      13    /* 2: counter rate, GICv3 virtualization, SMBIOS;
                                    3: the tsens read (option "thermal");
@@ -190,6 +191,7 @@ struct el2q_run {
     struct el2q_cpu cpu[EL2Q_MAX_CPUS];
     struct el2q_tsens tsens;
     struct el2q_usb usb;             /* options "usb", "usb-smmu"; zero when not asked */
+    struct el2q_rng rng;             /* option "rng"; zero (not asked) otherwise */
 };
 
 enum el2q_color { EL2Q_WHITE, EL2Q_GREEN, EL2Q_RED, EL2Q_YELLOW, EL2Q_CYAN };
