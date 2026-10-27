@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include "pagemap.h"
 #include "s2walk.h"
+#include "s2bypass.h"
 
 /* The GCC words read in each phase, in this order. */
 enum el2q_usb_gcc {
@@ -149,6 +150,9 @@ struct el2q_usb {
     struct el2q_s2w_survey survey;
     /* Option "usb-s2-fixed": UEFI's memory map over the candidate region. */
     struct el2q_s2w_region region;
+    /* Option "usb-s2-bypass-plan": the one-word change that would give USB0
+     * untranslated DMA, planned and never made (s2bypass.c). */
+    struct el2q_s2b_result bypass;
     uint64_t smmu_esr;
     uint64_t isr;                            /* ISR_EL1 after the reads: a pending SError shows here */
 };

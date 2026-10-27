@@ -84,6 +84,10 @@ report it writes to the PL011:
                smmu-map usb-s2-fixed"): the walk NOT RUN: NO STAGE 2
                (FIXED), and UEFI's memory map over 0xC6200000-0xC85FFFFF,
                which virt's 1 GiB of RAM at 0x40000000 leaves with no entry
+  max-vhe-usb-s2bypass-plan  the gaokun3 stick entry 14's options ("usb-
+               smmu-map usb-s2-bypass-plan"): virt's SMMU reads all ones, so
+               the plan has nothing measured to plan from and must say so,
+               and must still end with the line saying nothing was written
   max-vhe-usb-s2fixed  "usb-s2-fixed" over el2qual's own tables, built for
                the fixed range 0xC8000000: 258 reads, every page identity,
                the first leaf at 0xC8000000; and the memory map over 36 MiB
@@ -255,6 +259,13 @@ CONFIGS = {
                                         features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
     # The candidate region (usb-s2-fixed). region is a list of exact lines
     # (regexes), or 'test' for the structural checks on QEMU's stand-in.
+    # The S2CR bypass plan (s2bypass.c). bypass is the exact lines (regexes).
+    'max-vhe-usb-s2bypass-plan': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu-map usb-s2-bypass-plan',
+                                      pac='Y', walk='Y', vhe=True, vhe_exit='DONE',
+                                      usb=True, smmu=True, smmumap='NOT NEEDED',
+                                      bypass=[r'SMMU BYPASS NOT MEASURED',
+                                              r'SMMU BYPASS PLAN ONLY, NOTHING WRITTEN'],
+                                      features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
     'max-vhe-usb-s2fixed-stick': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu-map usb-s2-fixed',
                                       pac='Y', walk='Y', vhe=True, vhe_exit='DONE',
                                       usb=True, smmu=True, smmumap='NOT NEEDED',
@@ -511,7 +522,8 @@ def check_usb(lines, expect):
                             f'{power.get("A")}: {core}')
     smmu = [line for line in lines if line.startswith('SMMU ')]
     smmu = [line for line in smmu
-            if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 ', 'SMMU MAP', 'SMMU WALK', 'SMMU SURVEY'))]
+            if not line.startswith(('SMMU CB', 'SMMU ID1', 'SMMU S2 ', 'SMMU MAP', 'SMMU WALK',
+                                    'SMMU SURVEY', 'SMMU BYPASS'))]
     if expect.get('smmu') and len(smmu) != 2:
         problems.append(f'usb-smmu asked but {len(smmu)} SMMU lines')
     if not expect.get('smmu') and smmu:
@@ -558,6 +570,7 @@ def check_usb(lines, expect):
     problems += check_s2walk(lines, expect)
     problems += check_s2survey(lines, expect)
     problems += check_region(lines, expect)
+    problems += check_bypass(lines, expect)
     if 'USB SERROR NONE' not in lines:
         problems.append('the USB read left an SError pending, or no SERROR line')
     return problems
@@ -593,6 +606,21 @@ def check_s2walk(lines, expect):
                                    int(odd[1], 16) != int(arena[1], 16) + expect['s2walk_odd']):
         problems.append(f'the first odd page is not the arena\'s page at +{expect["s2walk_odd"]:X}')
     return problems
+
+
+def check_bypass(lines, expect):
+    """The bypass plan's lines: present exactly when asked, matching this
+    configuration's outcome, and always ending with the line that says
+    nothing was written, since that is the point of the stage."""
+    bypass = [line for line in lines if line.startswith('SMMU BYPASS ')]
+    want = expect.get('bypass')
+    if not want:
+        return [f'SMMU BYPASS lines although usb-s2-bypass-plan was not asked: {bypass[0]}'] if bypass else []
+    if len(bypass) != len(want) or not all(re.fullmatch(w, line) for w, line in zip(want, bypass)):
+        return [f'the bypass plan said {bypass!r}, not {want!r}']
+    if bypass[-1] != 'SMMU BYPASS PLAN ONLY, NOTHING WRITTEN':
+        return [f'the bypass plan does not end by saying nothing was written: {bypass[-1]}']
+    return []
 
 
 REGION_ENTRY = re.compile(r'^UEFI MAP ([0-9A-F]{10}) ([0-9A-F]{10}) (RESERVED|LDR CODE|LDR DATA|BS CODE|'
@@ -780,6 +808,8 @@ def synthetic(expect, smp=SMP):
         elif expect.get('s2survey'):
             lines += [line.replace('\\', '').replace('[0-9A-F]{16}', '0000000009000B00')
                       for line in expect['s2survey']]
+        if expect.get('bypass'):
+            lines += expect['bypass']
         if expect.get('region') == 'test':
             lines += ['UEFI MAP 40000000-42400000 ENTRIES 2 (TEST RANGE)',
                       'UEFI MAP 0040000000 0040100000 BS DATA 000000000000000F',
@@ -1009,6 +1039,20 @@ def self_test():
                     if 's2walk_odd' in expect:
                         expect_result(f'{name} the wrong odd page', good.replace(
                             'ODD 7E601000', 'ODD 7E602000'), expect, False)
+                if expect.get('bypass'):
+                    expect_result(f'{name} bypass plan missing', '\n'.join(
+                        line for line in good.split('\n') if not line.startswith('SMMU BYPASS ')),
+                        expect, False)
+                    expect_result(f'{name} bypass plan different', good.replace(
+                        'SMMU BYPASS NOT MEASURED', 'SMMU BYPASS REFUSED: S2CR TYPE'), expect, False)
+                    expect_result(f'{name} nothing-written line dropped', good.replace(
+                        '\nSMMU BYPASS PLAN ONLY, NOTHING WRITTEN', ''), expect, False)
+                    expect_result(f'{name} a write reported', good.replace(
+                        'SMMU BYPASS PLAN ONLY, NOTHING WRITTEN',
+                        'SMMU BYPASS WROTE 00010006'), expect, False)
+                else:
+                    expect_result(f'{name} bypass plan unasked', good.replace(
+                        'USB SERROR NONE', 'SMMU BYPASS NOT MEASURED\nUSB SERROR NONE'), expect, False)
                 if expect.get('region'):
                     region = [line for line in good.split('\n') if line.startswith('UEFI MAP ')]
                     expect_result(f'{name} memory map missing', '\n'.join(

@@ -24,7 +24,9 @@
    SError checks, stopping at a fault, reading each descriptor once, the
    format refusals and the page classes, and the survey's choice of
    table, bound and map rows; and for the memory-map scan in
-   probes/el2qual/firmware.c that reports the candidate region.
+   probes/el2qual/firmware.c that reports the candidate region; and for
+   probes/el2qual/s2bypass.c, which plans the S2CR bypass and must refuse
+   unless every condition for making that write by hand holds.
 """
 import argparse
 import os
@@ -204,11 +206,12 @@ def check_exit_vhe():
     return problems, len(sequence_mutations(insns))
 
 
-def compile_test(cc, out, sanitizers, pagemap=None, s2walk=None, firmware=None):
+def compile_test(cc, out, sanitizers, pagemap=None, s2walk=None, firmware=None, s2bypass=None):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'),
            str(ROOT / 'tools' / 'test-el2qual-vhe.c'), str(ROOT / 'tools' / 'test-el2qual-usbprobe.c'),
            str(ROOT / 'tools' / 'test-el2qual-pagemap.c'), str(ROOT / 'tools' / 'test-el2qual-s2walk.c'),
+           str(ROOT / 'tools' / 'test-el2qual-s2bypass.c'), str(s2bypass or EL2Q / 's2bypass.c'),
            str(EL2Q / 'report.c'), str(EL2Q / 'usbprobe.c'), str(pagemap or EL2Q / 'pagemap.c'),
            str(s2walk or EL2Q / 's2walk.c'),
            str(firmware or EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'), str(EL2Q / 'vhe.c'),
@@ -302,6 +305,36 @@ FIRMWARE_MUTATIONS = [
 ]
 
 
+# The planned-but-never-made S2CR bypass (s2bypass.c). Every safeguard the
+# plan makes before anyone writes that word by hand.
+S2BYPASS_MUTATIONS = [
+    ('a masked group accepted', 'out->mask != 0 ||', ''),
+    ('a second matching group ignored',
+     '    if (out->matches != 1) return out->state = EL2Q_S2B_REFUSED_SHARED;\n', ''),
+    ('the write permission check dropped', 'if (hw->writable(hw->ctx, page)) {', 'if (0) {'),
+    ('the mapping check dropped', 'if (hw->mapped(hw->ctx, page)) {', 'if (0) {'),
+    ('an SError already pending ignored',
+     '    if (hw->serror(hw->ctx)) return out->state = EL2Q_S2B_REFUSED_PENDING;\n', ''),
+    ('a latched global fault ignored',
+     '    if (out->gfsr) return out->state = EL2Q_S2B_REFUSED_FAULT;\n', ''),
+    ('the S2CR re-read not compared',
+     '    if (now != seen->s2cr) return out->state = EL2Q_S2B_REFUSED_TYPE;\n', ''),
+    ('the sCR0 re-read not compared',
+     '    if (now != seen->scr0) return out->state = EL2Q_S2B_REFUSED_SCR0;\n', ''),
+    ('extended stream IDs accepted', '(seen->scr0 & sCR0_EXIDENABLE)', '0'),
+    ('a disabled SMMU accepted', '(seen->scr0 & sCR0_CLIENTPD) ||', ''),
+    ('another bank accepted', '(seen->s2cr & S2CR_CBNDX) != (seen->cb_index & S2CR_CBNDX)', '0'),
+    ('a non-translating S2CR accepted', '(seen->s2cr & S2CR_TYPE) != S2CR_TRANSLATE ||', ''),
+    ('the group range check dropped',
+     '    if (seen->group >= groups) return out->state = EL2Q_S2B_REFUSED_RANGE;\n', ''),
+    ('the other S2CR fields clobbered',
+     'out->planned = (seen->s2cr & ~S2CR_TYPE) | S2CR_BYPASS;', 'out->planned = S2CR_BYPASS;'),
+    ('fault planned instead of bypass', '| S2CR_BYPASS;\n    out->restore', '| (2u << 16);\n    out->restore'),
+    ('nothing to restore to', 'out->restore = seen->s2cr;', 'out->restore = out->planned;'),
+    ('a hole before the last line', 'index == (r->scanned ? 2u : 1u)', 'index == 2'),
+]
+
+
 def check_mutations(cc, flags, tmp, name, mutations):
     """Problems: mutations of probes/el2qual/<name> that do not apply, or
     that the suite accepts."""
@@ -364,7 +397,8 @@ def main():
         print(f'{verdict} test-el2qual.c [{mode}]')
         if ran.returncode == 0:
             for name, mutations in (('pagemap.c', PAGEMAP_MUTATIONS), ('s2walk.c', S2WALK_MUTATIONS),
-                                    ('firmware.c', FIRMWARE_MUTATIONS)):
+                                    ('firmware.c', FIRMWARE_MUTATIONS),
+                                    ('s2bypass.c', S2BYPASS_MUTATIONS)):
                 mutants = check_mutations(cc, flags, tmp, name, mutations)
                 for m in mutants:
                     print(f'FAIL {Path(name).stem} mutation: {m}')

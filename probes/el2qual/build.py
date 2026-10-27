@@ -42,6 +42,7 @@ UNITS = [
     (SRC / 'pagemap.c', 'pagemap.o', []),
     (SRC / 'usbprobe.c', 'usbprobe.o', []),
     (SRC / 's2walk.c', 's2walk.o', []),
+    (SRC / 's2bypass.c', 's2bypass.o', []),
     # The Phase 1 guard itself, unchanged: the "thermal" option runs it live.
     (ROOT / 'compat' / 'sc8280xp-thermal.c', 'sc8280xp-thermal.o', []),
     (ROOT / 'probes' / 'tgran16.c', 'tgran16.o', []),

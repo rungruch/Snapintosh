@@ -32,6 +32,7 @@
 #include "pagemap.h"
 #include "usbprobe.h"
 #include "s2walk.h"
+#include "s2bypass.h"
 #include "uefi.h"
 
 /* idregs.h is the monitor's: id_register() is shared so both read exactly
@@ -204,7 +205,8 @@ static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
     int thermal, exit_vhe, usb, usb_smmu, usb_smmu_map, emulate_map_hole;
-    int usb_s2_walk, usb_s2_survey, usb_s2_fixed, emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
+    int usb_s2_walk, usb_s2_survey, usb_s2_fixed, usb_s2_bypass_plan;
+    int emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -677,6 +679,45 @@ static void walk_stage2(void)
     }
 }
 
+/* ---- The S2CR bypass plan (option "usb-s2-bypass-plan"; s2bypass.c) -------
+ * The plan is described and never performed: s2bypass.c has no write
+ * callback, so no path through it reaches the SMMU. */
+
+static int s2b_writable(void *unused, uint64_t address)
+{
+    (void)unused;
+    __asm__ volatile("at s1e2w, %0" :: "r"(address) : "memory");
+    ISB();
+    uint64_t p = RD("par_el1");
+    if (p & 1) return 1;
+    if ((p >> 56) & 0xf0) return 2;
+    if ((p ^ address) & 0x0000fffffffff000ull) return 3;
+    return 0;
+}
+
+static uint64_t s2b_read32(void *unused, uint64_t address, uint32_t *value)
+{
+    (void)unused;
+    uint64_t word = 0, esr = el2q_try_read32(&ctx[0], &word, address);
+    *value = (uint32_t)word;
+    return esr;
+}
+
+static void plan_bypass(void)
+{
+    const struct el2q_s2b_hw hw = {0, usb_mapped_el2, s2b_writable, s2b_read32, s2w_serror};
+    const struct el2q_s2b_seen seen = {
+        .matched = run.usb.smmu == EL2Q_USB_SMMU_MATCH,
+        .bank_read = run.usb.cb == EL2Q_USB_CB_READ,
+        .base = EL2Q_USB_SMMU_BASE,
+        .stream = EL2Q_USB_STREAM,
+        .scr0 = run.usb.scr0, .idr0 = run.usb.idr0, .smr = run.usb.smr,
+        .s2cr = run.usb.s2cr, .group = run.usb.group, .cb_index = run.usb.cb_index,
+    };
+    progress("USB: PLANNING THE SMMU BYPASS, READ ONLY. NOTHING IS WRITTEN");
+    el2q_s2b_plan(&seen, &hw, &run.usb.bypass);
+}
+
 static void measure_usb_before(void)
 {
     const struct el2q_usb_hw hw = {0, usb_mapped_now, usb_read_unguarded};
@@ -697,6 +738,7 @@ static void measure_usb_after(void)
         progress("USB: READING APPS_SMMU. A HANG HERE IS AN SMMU READ");
         el2q_usb_smmu(&run.usb, &hw);
         if (opt.usb_s2_walk) walk_stage2();
+        if (opt.usb_s2_bypass_plan) plan_bypass();
     }
     run.usb.isr = RD("isr_el1");
 }
@@ -879,6 +921,7 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "usb-s2-walk")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = 1;
         if (word_is(w, len, "usb-s2-survey")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = opt.usb_s2_survey = 1;
         if (word_is(w, len, "usb-s2-fixed")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = opt.usb_s2_fixed = 1;
+        if (word_is(w, len, "usb-s2-bypass-plan")) opt.usb = opt.usb_smmu = opt.usb_s2_bypass_plan = 1;
         if (word_is(w, len, "emulate-s2-tables")) opt.emulate_s2_tables = 1;
         if (word_is(w, len, "emulate-s2-odd")) opt.emulate_s2_tables = opt.emulate_s2_odd = 1;
         if (word_is(w, len, "emulate-s2-device")) opt.emulate_s2_tables = opt.emulate_s2_device = 1;

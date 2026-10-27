@@ -1440,6 +1440,7 @@ unsigned test_usbprobe(void);
 /* tools/test-el2qual-pagemap.c: pagemap.c, the private SMMU window map. */
 unsigned test_pagemap(void);
 unsigned test_s2walk(void);
+unsigned test_s2bypass(void);
 
 int main(void)
 {
@@ -1457,6 +1458,7 @@ int main(void)
     checks += test_usbprobe();
     checks += test_pagemap();
     checks += test_s2walk();
+    checks += test_s2bypass();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;
