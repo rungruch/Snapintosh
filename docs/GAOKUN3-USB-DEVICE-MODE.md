@@ -859,7 +859,7 @@ reports it.
 | Option | Blast radius | Verdict |
 | --- | --- | --- |
 | **`S2CR(6).TYPE` to bypass** | stream `0x820` alone: group 6's stream match is exact (`SMR 0x80000820`, mask 0) | chosen |
-| Repoint bank 126's `VTTBR` at q1n1's own tables | every stream under VMID 3, which run 23 showed includes whatever the firmware maps | rejected |
+| Repoint bank 126's `VTTBR` at q1n1's own tables | every stream whose bank nests bank 126 (VMID 3); run 23's map of the framebuffer region suggests the display is one (INFERRED) | rejected |
 | Add entries to the firmware's stage-2 tables at `0xB7609000` | the same, plus writing a `no-map` region the firmware owns | rejected |
 | Put the arena in the reserved carveout | none, but run 24 showed UEFI reserves all 36 MiB | rejected unless its tail is shown unused |
 | Clear `sCR0.CLIENTPD` | every stream on apps_smmu | rejected |
@@ -877,11 +877,12 @@ One field of one 32-bit register:
 
 Only bits 17:16 change. Every other bit is preserved, including `CBNDX`,
 which bypass ignores, and any field this project has no verified layout
-for. That is deliberate: the SMMUv2 `S2CR` reinterprets some low bits as
-memory-attribute controls when `TYPE` is bypass, and the local Linux
-reference (`arm-smmu.h`) defines only `TYPE`, `CBNDX`, `PRIVCFG` and
-`EXIDVALID`. Writing attribute fields from a guessed layout is exactly what
-AGENTS.md forbids, so the firmware's existing bits stand.
+for. That is deliberate. The local Linux reference (`arm-smmu.h`) defines
+only `TYPE`, `CBNDX`, `PRIVCFG` and `EXIDVALID` in `S2CR`. The SMMUv2
+architecture is understood to give bypass streams attribute controls in
+`S2CR` too, but no source in this tree says where, so that is INFERRED.
+Writing attribute fields from a guessed layout is what AGENTS.md forbids,
+so the firmware's existing bits stand.
 
 **The resulting memory attributes are therefore not predicted.** USB0's
 device-tree node has no `dma-coherent`, so q1n1 must do cache maintenance
@@ -903,14 +904,24 @@ failed:
   group selects USB0 and no other device;
 - **no second valid group matches `0x820`.** `usbprobe.c` stops at the
   first match, so the plan scans all `NUMSMRG` (212) groups itself;
-- `S2CR(6)` lies inside the SMMU's first 4 KiB, the only page the write
-  would touch;
+- the group is below `NUMSMRG`. `NUMSMRG` is 8 bits, so `S2CR(group)` then
+  always lies inside the SMMU's first 4 KiB, the only page the write would
+  touch;
 - that page translates at EL2 to itself as Device **and is writable**
   (`AT S1E2W`, which no earlier stage needed);
 - no SError is pending, and `sGFSR` has no global fault latched, so a fault
-  after the write can be attributed to it;
-- `sCR0` and `S2CR(6)` re-read now equal what the SMMU read found, so
-  nothing moved in between.
+  after the write can be attributed to it. The plan refuses rather than
+  clearing `sGFSR`, since clearing it is a write;
+- `sCR0`, `S2CR(6)` **and `SMR(6)`** re-read now equal what the SMMU read
+  found, so nothing moved in between. Re-reading `SMR(6)` matters: a count
+  of one matching group alone would accept `SMR(6)` having moved to another
+  stream while some other group took `0x820`, and the plan would then name
+  an `S2CR` serving a different device;
+- no SError became pending during the plan's own reads.
+
+The `SMR(6)` re-read and the last check were added on recheck, after the
+first version was committed (`fe98671`). That version would have planned
+the write in the moved-group case above. No hardware ran it.
 
 #### The write sequence, when it is authorized
 
@@ -923,9 +934,10 @@ failed:
    and polls `sTLBGSYNC`/`sTLBGSTATUS` (VERIFIED as Linux behaviour,
    `arm-smmu.c`); that pair is the conservative choice for a one-off change
    at boot. `TLBIVMID` with VMID 3 would be narrower, but whether it also
-   covers cached *configuration* is INFERRED, and Qualcomm SMMUs are known
-   to cache configuration. The cost of the broad pair is that other masters
-   re-walk once; the display is live at this point.
+   covers any cached stream-to-context *configuration* is not known here:
+   nothing in this tree says whether this SMMU caches it. The broad pair
+   covers both cases. Its cost is that other masters re-walk once; the
+   display is live at this point.
 5. Check `sGFSR` and `ISR_EL1` again.
 
 #### Recovery
@@ -976,7 +988,7 @@ with host evidence only.
 
 | Check | Result, 2026-10-27 |
 | --- | --- |
-| Host: `python3 tools/test-el2qual.py` | PASS, 624625 checks (ASan+UBSan). Run 24's measured state gives exactly the word above, with only `TYPE` changed, `matches 1/212`, and 215 reads (`sGFSR`, `sCR0`, `S2CR(6)`, 212 `SMR`s), each allowed and none twice. Every refusal above, with nothing read for those decided from what the SMMU read already found. A second matching group, exact or by mask; an invalid or differently-addressed group that is not a match; a group past `NUMSMRG`; the matching group vanishing. A fault injected on each read in turn. Unknown `S2CR` bits preserved; a different group index moving both address and name. 17 deliberately broken copies of `s2bypass.c` (each check above removed, the other fields clobbered, fault planned instead of bypass, nothing to restore to, a hole before the last line) are each rejected |
+| Host: `python3 tools/test-el2qual.py` | PASS, 624633 checks (ASan+UBSan). Run 24's measured state gives exactly the word above, with only `TYPE` changed, `matches 1/212`, and 215 reads (`sGFSR`, `sCR0`, `S2CR(6)`, 212 `SMR`s), each allowed and none twice. Every refusal above, with nothing read for those decided from what the SMMU read already found. A second matching group, exact or by mask; an invalid or differently-addressed group that is not a match; a group past `NUMSMRG`; the matching group vanishing, widening its mask, or moving to another stream while a different group takes `0x820`; an SError raised by the plan's own reads. A fault injected on each read in turn. Unknown `S2CR` bits preserved; a different group index moving both address and name. 19 deliberately broken copies of `s2bypass.c` (each check above removed, including the `SMR(6)` re-check, which reproduces the first committed version; the other fields clobbered; fault planned instead of bypass; nothing to restore to; a hole before the last line) are each rejected |
 | Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 13 unchanged, entry 14 `nopac nosmp exit-vhe usb-smmu-map usb-s2-bypass-plan`, and no entry carries a write option |
 | QEMU: all 27 configurations | PASS. `max-vhe-usb-s2bypass-plan` (entry 14's options): virt's SMMU reads all ones, so `SMMU BYPASS NOT MEASURED`, then `SMMU BYPASS PLAN ONLY, NOTHING WRITTEN`. The checker requires that last line always, and its self-test rejects a missing plan, a different outcome, the dropped last line, a line claiming a write, and an unasked plan |
 | gaokun3 | NOT RUN |
