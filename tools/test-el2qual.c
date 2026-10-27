@@ -1441,6 +1441,7 @@ unsigned test_usbprobe(void);
 unsigned test_pagemap(void);
 unsigned test_s2walk(void);
 unsigned test_s2bypass(void);
+unsigned test_s2bwrite(void);
 
 int main(void)
 {
@@ -1459,6 +1460,7 @@ int main(void)
     checks += test_pagemap();
     checks += test_s2walk();
     checks += test_s2bypass();
+    checks += test_s2bwrite();
     test_render();
     printf("test-el2qual: %u checks passed\n", checks);
     return 0;

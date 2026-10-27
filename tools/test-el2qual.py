@@ -26,7 +26,10 @@
    table, bound and map rows; and for the memory-map scan in
    probes/el2qual/firmware.c that reports the candidate region; and for
    probes/el2qual/s2bypass.c, which plans the S2CR bypass and must refuse
-   unless every condition for making that write by hand holds.
+   unless every condition for making that write by hand holds; and for
+   probes/el2qual/s2bwrite.c, the model of the first SMMU write. A copy
+   that removes a loop bound may hang: a run that times out counts as
+   rejected.
 """
 import argparse
 import os
@@ -206,12 +209,14 @@ def check_exit_vhe():
     return problems, len(sequence_mutations(insns))
 
 
-def compile_test(cc, out, sanitizers, pagemap=None, s2walk=None, firmware=None, s2bypass=None):
+def compile_test(cc, out, sanitizers, pagemap=None, s2walk=None, firmware=None, s2bypass=None,
+                 s2bwrite=None):
     cmd = [cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *sanitizers,
            f'-I{EL2Q}', str(ROOT / 'tools' / 'test-el2qual.c'),
            str(ROOT / 'tools' / 'test-el2qual-vhe.c'), str(ROOT / 'tools' / 'test-el2qual-usbprobe.c'),
            str(ROOT / 'tools' / 'test-el2qual-pagemap.c'), str(ROOT / 'tools' / 'test-el2qual-s2walk.c'),
            str(ROOT / 'tools' / 'test-el2qual-s2bypass.c'), str(s2bypass or EL2Q / 's2bypass.c'),
+           str(ROOT / 'tools' / 'test-el2qual-s2bwrite.c'), str(s2bwrite or EL2Q / 's2bwrite.c'),
            str(EL2Q / 'report.c'), str(EL2Q / 'usbprobe.c'), str(pagemap or EL2Q / 'pagemap.c'),
            str(s2walk or EL2Q / 's2walk.c'),
            str(firmware or EL2Q / 'firmware.c'), str(EL2Q / 'thermal.c'), str(EL2Q / 'vhe.c'),
@@ -339,6 +344,41 @@ S2BYPASS_MUTATIONS = [
 ]
 
 
+# Stage 2 of the bypass (s2bwrite.c): the first SMMU write, as a model.
+S2BWRITE_MUTATIONS = [
+    ('no restore after a faulting bypass store',
+     '        first = EL2Q_S2BW_WRITE_FAULT;\n', '        return out->state = EL2Q_S2BW_WRITE_FAULT;\n'),
+    ('a dropped write not recognised',
+     '        if (out->readback == plan->old) return out->state = EL2Q_S2BW_DROPPED;\n', ''),
+    ('the read-back not compared',
+     '        if (out->readback != plan->planned) first = EL2Q_S2BW_UNEXPECTED;\n', ''),
+    ('the restore read-back not compared',
+     '    if (out->restore_readback != plan->old) return out->state = EL2Q_S2BW_RESTORE_FAILED;\n', ''),
+    ('the invalidations swapped',
+     'uint64_t esr = store(hw, out, smmu + SMMU_TLBIALLH, DUMMY);\n    if (!esr) esr = store(hw, out, smmu + SMMU_TLBIALLNSNH, DUMMY);',
+     'uint64_t esr = store(hw, out, smmu + SMMU_TLBIALLNSNH, DUMMY);\n    if (!esr) esr = store(hw, out, smmu + SMMU_TLBIALLH, DUMMY);'),
+    ('the sync not polled', 'if (!(status & GSACTIVE)) {', 'if (1) {'),
+    ('the poll limit removed', 'out->polls >= POLL_LIMIT || ', ''),
+    ('the counter timeout removed', ' || hw->now(hw->ctx) - start > hw->sync_ticks',
+     ' || (hw->now(hw->ctx) - start > hw->sync_ticks && 0)'),
+    ('a running USB0 accepted', '(out->usbcmd & USBCMD_RUN) || ', ''),
+    ('a USB0 not halted accepted', ' || !(out->usbsts & USBSTS_HALT)', ''),
+    ('S2CR not checked before writing', 'if (esr || now != plan->old) return', 'if (esr) return'),
+    ('a plan for another word accepted', 'plan->planned == ((plan->old & ~S2CR_TYPE) | S2CR_BYPASS) &&', ''),
+    ('a plan for another address accepted', 'plan->at == smmu + SMMU_S2CR(plan->group) && ',
+     '(plan->at == smmu + SMMU_S2CR(plan->group) || 1) && '),
+    ('a plan with another restore accepted', 'plan->restore == plan->old;', '1;'),
+    ('an SError already pending ignored',
+     '    if (hw->serror(hw->ctx)) return out->state = EL2Q_S2BW_REFUSED_PENDING;\n', ''),
+    ('no barrier after a store', '    hw->barrier(hw->ctx);\n', ''),
+    ('an SError after the writes ignored',
+     '    if (hw->serror(hw->ctx)) return out->state = EL2Q_S2BW_SERROR;\n', ''),
+    ('a global fault ignored', '    if (out->gfsr) return out->state = EL2Q_S2BW_GFAULT;\n', ''),
+    ('a hole in the lines', '    if (r->restored) kinds[n++] = L_RESTORE;', '    kinds[n++] = L_RESTORE;'),
+]
+MUTANT_TIMEOUT = 120
+
+
 def check_mutations(cc, flags, tmp, name, mutations):
     """Problems: mutations of probes/el2qual/<name> that do not apply, or
     that the suite accepts."""
@@ -355,7 +395,13 @@ def check_mutations(cc, flags, tmp, name, mutations):
         if built.returncode:
             problems.append(f'{what}: does not build')
             continue
-        if subprocess.run([str(exe)], capture_output=True, text=True).returncode == 0:
+        # A copy that removes a loop bound may never return: running out of
+        # time is the suite noticing, not accepting.
+        try:
+            ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=MUTANT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            continue
+        if ran.returncode == 0:
             problems.append(f'{what}: accepted')
     return problems
 
@@ -402,7 +448,8 @@ def main():
         if ran.returncode == 0:
             for name, mutations in (('pagemap.c', PAGEMAP_MUTATIONS), ('s2walk.c', S2WALK_MUTATIONS),
                                     ('firmware.c', FIRMWARE_MUTATIONS),
-                                    ('s2bypass.c', S2BYPASS_MUTATIONS)):
+                                    ('s2bypass.c', S2BYPASS_MUTATIONS),
+                                    ('s2bwrite.c', S2BWRITE_MUTATIONS)):
                 mutants = check_mutations(cc, flags, tmp, name, mutations)
                 for m in mutants:
                     print(f'FAIL {Path(name).stem} mutation: {m}')
