@@ -317,11 +317,10 @@ q1n1 has no transport to the Mac yet.
   mode. Its first step, el2qual's read-only `usb` stage, ran on the gaokun3
   (runs 16 and 17).
   - **USB0 stays powered after ExitBootServices.**
-  - **Two things block a device-mode run.** q1n1's identity check expects
-    the A16's xHCI `CAPLENGTH` (`0x30`); the gaokun3's own value has not been
-    measured (q1n1's A16 path assumes `0x20`, and step 1j reads it), and
-    USB0's DMA is translated by the SMMU through context bank 6, so it is
-    not known to be identity.
+  - **Two things block a device-mode run.** q1n1's `snapshot()` identity
+    check requires the A16's xHCI `CAPLENGTH` (`0x30`), and the gaokun3's is
+    `0x20` (VERIFIED, runs 16 and 17), and USB0's DMA is translated by the
+    SMMU through context bank 6, so it is not known to be identity.
   - **Run 19:** context bank 6 has stage-1 translation off, but nests a
     stage 2, INFERRED to be bank 126.
   - **Run 20:** el2qual 7 could not read that stage-2 bank. Its page is not

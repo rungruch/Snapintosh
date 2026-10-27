@@ -1063,12 +1063,14 @@ Each of these must hold, or nothing is written and the line says
   premise of the stage, and this is what checks it. Offsets and bits are
   from Linux `drivers/usb/host/xhci.h` (`struct xhci_op_regs`) and
   `xhci-ext-caps.h` (`XHCI_CMD_RUN`, `XHCI_STS_HALT`), read as a reference.
-  The operational base is not an assumed offset: `CAPLENGTH` is read from
-  the controller, which
-  [step 1j](#step-1j-the-usb0-halt-check-el2qual-13-entry-15) does on its
-  own (the A16 reports `0x30`, not the `0x20` q1n1 assumed). **These
-  registers have not been read on the gaokun3 yet**: if UEFI left the
-  controller running, the stage refuses, and that is an answer too;
+  The operational base is derived from `CAPLENGTH`, not an assumed offset:
+  the gaokun3's `CAPLENGTH` is `0x20` (VERIFIED, runs 16 and 17), so its
+  operational registers are at `0x0A600020`, while the A16's `0x30` puts
+  them at `0x0A600030`.
+  [Step 1j](#step-1j-the-usb0-halt-check-el2qual-13-entry-15) reads the
+  halt state from that derived base. **`USBCMD` and `USBSTS` have not been
+  read on the gaokun3 yet**: if UEFI left the controller running, the stage
+  refuses, and that is an answer too;
 - `S2CR(group)` still reads as the old word.
 
 #### The writes
@@ -1158,11 +1160,14 @@ takes `CAPLENGTH` from `XCAP`'s low byte, forms the operational base
 each mapping-checked first. USB0 is **HALTED** when `USBCMD.R/S` (bit 0) is
 clear and `USBSTS.HCH` (bit 0) is set; otherwise **RUNNING**.
 
-**Why the base is measured, not assumed.** q1n1's A16 path takes the
-operational registers at core + `0x20`. The A16's own `CAPLENGTH`, in
-q1n1's firmware-running capture, is `0x30`. An operational base off by
-`0x10` would read the wrong registers, so step 1j derives it from the
-controller's `CAPLENGTH` and reports the base it used.
+**Why the base is derived, not assumed.** The two machines disagree: the
+gaokun3's `CAPLENGTH` is `0x20` (VERIFIED, runs 16 and 17) and the A16's is
+`0x30`, so the operational registers sit at `0x0A600020` here and
+`0x0A600030` there. A base fixed at either value would read the wrong
+registers on the other machine, so step 1j takes it from the controller's
+own `CAPLENGTH` and reports the base it used. This is also the one value
+q1n1's `snapshot()` rejects the gaokun3 on
+([step 1](#step-1-read-only-el2qual-stage-usb), item 3 of the results).
 
 **Status: read only, on the stick.** Unlike step 1i's model, this is a
 real el2qual read (stage `usb-halt`), built into el2qual at version 13, on
@@ -1191,7 +1196,7 @@ lines does not mistake a `NO CAPLENGTH` line for a read.
 | --- | --- |
 | Host: `python3 tools/test-el2qual.py` | PASS. Against the fake controller: with the A16's `XCAP` (`CAPLENGTH` `0x30`) the base is `0x0A600030`; `R/S` clear and `HCH` set reads `HALTED`, `R/S` set or `HCH` clear reads `RUNNING`; a `CAPLENGTH` of `0x20` moves the base to `0x0A600020`; an unmapped operational register is `UNMAPPED` and is not read; a faulting `USBCMD` is `FAULT` with its ESR, and `USBSTS` is not read; power off gives `NO CAPLENGTH` with nothing in the controller's range touched |
 | QEMU: `python3 tools/qemu-el2qual.py --config max-usb-halt` (and `--self-test`) | PASS. `max-usb-halt`: virt never powers the controller, so the one `USB0 HALT` line says `NO CAPLENGTH` and touches nothing in its range |
-| QEMU: `--config max-usb-halt-emulated`, `--config max-usb-halt-running` | PASS. virt has no USB0, and pagemap cannot turn RAM into Device memory, so `emulate-usb-halt` stands a page el2qual owns in for the controller (`CAPLENGTH 0x30`, base `0x0A600030`). The read runs end to end through the real `AT S1E2R` identity check and guarded read — only the Device-attribute requirement relaxed, since virt offers no controllable Device MMIO — and the live line reads `OP 0A600030 CMD 00000000 STS 00000001 HALTED (TEST)`, or `CMD 00000001 STS 00000000 RUNNING (TEST)` for the running stand-in. The `UNMAPPED`/`FAULT` paths stay host-test-only |
+| QEMU: `--config max-usb-halt-emulated`, `--config max-usb-halt-running` | PASS. virt has no USB0, and pagemap cannot turn RAM into Device memory, so `emulate-usb-halt` stands a page el2qual owns in for the controller (`CAPLENGTH 0x30`, base `0x0A600030` — deliberately the A16's value rather than the gaokun3's `0x20`, so a base fixed at the target's value would fail this test). The read runs end to end through the real `AT S1E2R` identity check and guarded read — only the Device-attribute requirement relaxed, since virt offers no controllable Device MMIO — and the live line reads `OP 0A600030 CMD 00000000 STS 00000001 HALTED (TEST)`, or `CMD 00000001 STS 00000000 RUNNING (TEST)` for the running stand-in. The `UNMAPPED`/`FAULT` paths stay host-test-only |
 | el2qual.efi | Changed: version 13 adds the `usb-halt` option (and the test-only `emulate-usb-halt`). Entry 15 needs el2qual 13 |
 | gaokun3 | NOT RUN |
 
