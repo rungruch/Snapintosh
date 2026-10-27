@@ -682,6 +682,117 @@ derives every map character from the arena address el2qual prints.
 | Host: `python3 tools/test-el2qual.py` | PASS, 600882 checks (ASan+UBSan). The survey over run 22's layout: 576 reads, each once and each after its page's `AT` check. Exact lines for the fixture, the odd fixture's `I`, `M`, `L`, `I`, an arena across 1 GiB, and every character class at both levels from hand-built tables, with no level-3 page read. The arena's entry a block or invalid: no level-2 read. An arena past the input size. A 512-entry root of 16 rows, at exactly the 1,024-read bound. A level-2 start refused with no `AT` and no read, as are no stage 2, translation off and an SError already pending. A fault on a level-1 entry (earlier entries kept, the rest `-`), an SError on a level-2 entry (that entry not trusted, unread rows left out), and a refused level-2 page (nothing of it read). The walk's tests are unchanged and pass on the shared code. 35 deliberately broken copies of `s2walk.c` are rejected, 10 of them aimed at the survey: a level-2 table surveyed under a non-table, a level-2 start accepted, `X` shown as `T`, the walk's bound, the wrong arena entry, the table address unmasked, level-2 entries classed as pages, empty or unread rows printed, and wrong row addresses |
 | Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 11 unchanged, entry 12 `nopac nosmp exit-vhe usb-smmu-map usb-s2-survey` |
 | QEMU: all 24 configurations | PASS. `max-vhe-usb-s2survey-stick` (entry 12's options): both passes `NOT RUN: NO STAGE 2`. `max-vhe-usb-s2survey`: arena `7C120000`, 576 survey reads, level 1 `.T…`, `GIB 01` pointing at the surveyed level-2 table, 15 empty rows and the row at `7C000000` `TT…`. `-odd`: level 1 `IT…`, and the row at `40000000` `MLI…`. `-device`: both refused with 0 reads. No SError. The checker's self-test rejects a missing or refused survey, a wrong level-1 character, a wrong empty-row count, a level-1 descriptor pointing elsewhere, a missing level-2 row, and an unasked survey |
+| gaokun3 | run 23 (below): 576 reads; one 36 MiB identity region in the arena's GiB, starting at the splash framebuffer |
+
+#### Run 23, 2026-10-27: identity only around the splash framebuffer
+
+From the `usb-read` stick: el2qual 10 `76057a70` from `4c0f474`, entry 12
+(`nopac nosmp exit-vhe usb-smmu-map usb-s2-survey`), with no SError.
+Everything through the walk is as run 22, including the arena, again at
+`0xEFD41000`, and `FAULTS 256`. `GUSB3PIPECTL` read `0B0C1402`. The map
+rows were counted on an enlarged crop of the photograph, against the
+32-character width of the `L1 020` row:
+
+```
+SMMU SURVEY READS 576
+SMMU SURVEY L1 000 TTTT............TTTTTTTTTTTTTTTT
+SMMU SURVEY L1 020 ................................
+SMMU SURVEY GIB 03 00000000B76B1003
+SMMU SURVEY L2 AT 00000000B76B1000 EMPTY ROWS 14
+SMMU SURVEY L2 C4000000 .................IIIIIIIIIIIIIII
+SMMU SURVEY L2 C8000000 III.............................
+```
+
+**Reading it.**
+- **The whole survey read without a fault or SError.** The root and the
+  level-2 table under GiB 3 (`0xB76B1000`, also inside
+  `reserved-region@aeb00000`) are ordinary readable memory from EL2.
+- **Level 1:** tables for GiBs 0 to 3 (`0x0`–`0xFFFFFFFF`) and 16 to 31
+  (`0x400000000`–`0x7FFFFFFFF`). No blocks, and nothing above 32 GiB. The
+  tables under GiBs 0 to 2 and 16 to 31 were not read, so what they map is
+  not known. Why GiBs 16 to 31 have tables is not known either.
+- **Level 2 under GiB 3 (`0xC0000000`–`0xFFFFFFFF`):** 18 identity 2 MiB
+  blocks, read and write, access flag set: entries 49 to 66, which is
+  `0xC6200000`–`0xC85FFFFF`, 36 MiB in one run. Every other entry is
+  invalid, with no level-3 tables. The arena's entries, 382 and 383 in row
+  11, are among the invalid ones, agreeing with run 22.
+- **The region starts exactly at the splash framebuffer.** The device
+  tree's `framebuffer@c6200000` is `0xFA0000` bytes, so it ends at
+  `0xC71A0000`; el2qual draws there, and the display scans it out. That the
+  mapping exists for the display engine's DMA, through a bank that shares
+  this stage 2 (VMID 3), is INFERRED. Nothing in the device tree describes
+  the remaining `0xC71A0000`–`0xC85FFFFF`, about 20 MiB.
+
+**What it decides.** In the 4 GiB q1n1 allocates from, USB0's stage 2 maps
+only this region. Two ways remain:
+- **Put q1n1's arena inside it,** past the framebuffer, at a fixed address
+  such as `0xC8000000`–`0xC80FFFFF`. Before that is safe, two things need
+  checking, both read only:
+  - what UEFI's memory map says those pages are (free, reserved for the
+    display, or something else), since the display or firmware may still
+    use them;
+  - the walk over that exact range, for its leaf descriptors.
+- **The bypass for stream `0x820`:** the first SMMU write, which needs its
+  own go-ahead. It is independent of what the display region holds.
+
+### Step 1g: a fixed arena in the identity region (el2qual 11, entry 13)
+
+Load option `usb-s2-fixed` checks, read only, whether q1n1's arena could
+sit in run 23's identity region past the framebuffer. On the stick it is
+entry 13: entry 10's options plus `usb-s2-fixed`, which implies the walk.
+Entries 11 and 12 are unchanged.
+
+- **The walk over a fixed range.** It walks `0xC8000000`–`0xC80FFFFF`
+  (`EL2Q_S2W_FIXED_ARENA`) instead of an allocated arena, with the same
+  code and guards as step 1e. The walk reads only descriptors, so nothing
+  at the range is allocated, read or written. Its lines end ` (FIXED)`.
+  Run 23's map predicts two reads (level 1, then the 2 MiB block at level
+  2), `RW 256`, and a level-2 leaf at `0xC8000000`.
+- **UEFI's memory map over the whole region**, `0xC6200000`–`0xC85FFFFF`
+  (`el2q_memmap_region`, `firmware.c`). The map is the one ExitBootServices
+  accepted, already captured; nothing new is asked of the firmware.
+  - Every descriptor with pages that overlaps the region is counted.
+  - The eight lowest-starting are listed in address order (UEFI does not
+    promise a sorted map), with start, end, type and attributes.
+  - Any further ones are summed in `AND <n> MORE`.
+
+```
+UEFI MAP C6200000-C8600000 ENTRIES <n>
+UEFI MAP <start> <end> <type> <attributes>
+```
+
+The type is the `EFI_MEMORY_TYPE` name: `RESERVED`, `LDR CODE`, `LDR
+DATA`, `BS CODE`, `BS DATA`, `RT CODE`, `RT DATA`, `FREE`, `UNUSABLE`,
+`ACPI RECL`, `ACPI NVS`, `MMIO`, `MMIO PORT`, `PAL CODE` or `PERSIST`.
+Anything else prints as `T` plus 8 hex digits. If no map was captured, the
+line is `UEFI MAP NOT AVAILABLE`.
+
+How the answer decides the next step:
+- **`FREE` over `0xC8000000`–`0xC80FFFFF`, and the walk `RW 256`:** q1n1
+  can claim that 1 MiB with `AllocatePages(AllocateAddress)` before
+  ExitBootServices, so firmware will not hand it out. Its DMA reaches it
+  1:1, and the walk stays as a guard.
+- **`BS CODE`, `BS DATA` or loader memory there:** something owns it until
+  ExitBootServices, so the allocation would fail. q1n1 could use it only
+  after ExitBootServices, and only if nothing still in use lives there.
+- **`RESERVED` there:** firmware keeps the pages for something, perhaps the
+  display. Using them would need to know what for. Then the bypass.
+- **No entry there:** UEFI does not describe it as memory at all. The
+  bypass.
+- The framebuffer, `0xC6200000`–`0xC71A0000`, is expected inside a
+  `RESERVED` entry: el2qual draws on it only after checking exactly that.
+
+On QEMU, entry 13's own options give the walk `NOT RUN: NO STAGE 2
+(FIXED)` and `ENTRIES 0`, since virt's RAM ends at 2 GiB. With
+`emulate-s2-tables`, the test tables are built for the fixed range, and the
+map is reported over 36 MiB from virt's RAM base (` (TEST RANGE)`), so a
+non-empty map is printed too.
+
+| Check | Result, 2026-10-27 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS, 600937 checks (ASan+UBSan). The memory-map scan with run 23's likely shape out of order (only the two descriptors inside the region, sorted); overlap at either end; descriptors that only touch the region excluded; no pages, a page count past 64 bits, and an end that wraps past 2^64 excluded, including one starting inside the region; twelve entries in ascending and in descending order, the eight lowest kept and `AND 4 MORE`; an OEM type; no map, a descriptor size under 40, a map shorter than one descriptor. The fixed walk over a 2 MiB identity block at `0xC8000000`: 2 reads, `RW 256`, exact lines with ` (FIXED)`, and the longest not-run line fits 64 columns. The memory map's lines follow the survey's, before `USB SERROR`. 8 deliberately broken copies of the scan in `firmware.c` (both overlap edges, zero pages, wrap, no sorting, a higher entry let into a full list, the wrong attribute offset, a short descriptor size) and one of the lines (`AND 0 MORE`) are each rejected |
+| Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 12 unchanged, entry 13 `nopac nosmp exit-vhe usb-smmu-map usb-s2-fixed` |
+| QEMU: all 26 configurations | PASS. `max-vhe-usb-s2fixed-stick` (entry 13's options): `SMMU WALK NOT RUN: NO STAGE 2 (FIXED)`, `UEFI MAP C6200000-C8600000 ENTRIES 0`. `max-vhe-usb-s2fixed`: `ARENA C8000000 READS 258 (TEST TABLES) (FIXED)`, `RW 256`, leaf `00000000C80007FF`; `UEFI MAP 40000000-42400000 ENTRIES 1 (TEST RANGE)`, one `FREE` entry `0040000000`–`0044000000`, attributes `8` (write-back). The checker's self-test rejects a missing or unavailable map, entries out of order or outside the range, an entry count that disagrees, an unnamed test range, a non-empty map where virt has none, and an unasked one |
 | gaokun3 | NOT RUN |
 
 ### Step 2: decided by step 1
@@ -735,6 +846,10 @@ derives every map character from the arena address el2qual prints.
   harm and in one level-2 table, the one run 22 read if the arena lands in
   the same GiB. A hang or reset there leaves its own progress line on the
   screen, `USB: STAGE-2 SURVEY, READ ONLY. A HANG OR RESET HERE IS IT`.
+- **Step 1g reads no new kind of memory.** Its walk reads descriptors in
+  the root and in run 23's level-2 table for GiB 3, and its memory-map
+  report parses a copy el2qual already holds. Nothing at `0xC8000000` is
+  read or written.
 - **No PD or UCSI request is sent, ever,** in either step. The EC owns
   Type-C.
 - **Linux is a reference only.** The GCC offsets and bit meanings come from

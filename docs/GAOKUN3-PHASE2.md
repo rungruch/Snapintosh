@@ -336,12 +336,17 @@ q1n1 has no transport to the Mac yet.
     The tables read without a fault, but stage 2 does not map the arena:
     both level-2 descriptors are 0, so all 256 pages would fault
     ([run 22](GAOKUN3-USB-DEVICE-MODE.md#run-22-2026-10-27-stage-2-does-not-map-the-arena)).
-  - **Next:** el2qual 10's `usb-s2-survey` (stick entry 12) surveys what
-    stage 2 maps at its top two levels, read only, so q1n1 could place its
-    arena inside an identity region (built, host and QEMU tested,
-    [step 1f](GAOKUN3-USB-DEVICE-MODE.md#step-1f-surveying-bank-126s-top-two-levels-el2qual-10-entry-12)).
-    If nothing usable is mapped, the bypass for stream `0x820`, the first
-    SMMU write, is next.
+  - **Run 23:** el2qual 10 surveyed stage 2's top two levels
+    ([step 1f](GAOKUN3-USB-DEVICE-MODE.md#step-1f-surveying-bank-126s-top-two-levels-el2qual-10-entry-12)).
+    In the arena's GiB, stage 2 maps only one 36 MiB identity region,
+    `0xC6200000`–`0xC85FFFFF`, which starts at the splash framebuffer
+    ([run 23](GAOKUN3-USB-DEVICE-MODE.md#run-23-2026-10-27-identity-only-around-the-splash-framebuffer)).
+  - **Next:** el2qual 11's `usb-s2-fixed` (stick entry 13) walks the fixed
+    range `0xC8000000`–`0xC80FFFFF` and reports UEFI's memory map over the
+    region, both read only (built, host and QEMU tested,
+    [step 1g](GAOKUN3-USB-DEVICE-MODE.md#step-1g-a-fixed-arena-in-the-identity-region-el2qual-11-entry-13)).
+    If that range is free memory and maps 1:1, q1n1 can claim its arena
+    there; otherwise the bypass for stream `0x820`, the first SMMU write.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has
