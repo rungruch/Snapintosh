@@ -47,6 +47,10 @@ report it writes to the PL011:
   max-usb-halt  the xHCI halt read ("usb-halt"): virt never powers the
                controller, so CAPLENGTH is never read and the one HALT line
                must say NO CAPLENGTH and touch nothing in its range
+  max-usb-halt-emulated  the powered path ("emulate-usb-halt"): a page
+               el2qual owns stands in for the controller (CAPLENGTH 0x30),
+               so the read runs end to end and the line reads HALTED (TEST)
+  max-usb-halt-running  the same with the stand-in set running: RUNNING (TEST)
   max-vhe-usb-smmu  the same with the SMMU, after the slbounce emulation
                and the VHE exit, the order the gaokun3 runs it in
   max-vhe-usb-smmu-map  the same, with "usb-smmu-map": el2qual first adds its
@@ -174,6 +178,20 @@ CONFIGS = {
     'max-usb-halt': dict(cpu='max', options='usb-halt', pac='Y', walk='Y', usb=True,
                          halt='NOT READ: NO CAPLENGTH',
                          features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The powered paths. virt has no USB0 and pagemap cannot make RAM Device,
+    # so "emulate-usb-halt" stands a page el2qual owns in for the controller
+    # (CAPLENGTH 0x30, so the base is 0x0A600030): the halt read runs end to
+    # end through the real AT identity check and guarded read, only the
+    # Device-attribute requirement relaxed. HALTED is R/S clear and HCH set;
+    # the running variant sets R/S and clears HCH. The line is marked (TEST).
+    'max-usb-halt-emulated': dict(cpu='max', options='emulate-usb-halt', pac='Y', walk='Y', usb=True,
+                                  halt=r'OP 0A600030 CMD 00000000 STS 00000001 HALTED \(TEST\)',
+                                  halt_sample='OP 0A600030 CMD 00000000 STS 00000001 HALTED (TEST)',
+                                  features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    'max-usb-halt-running': dict(cpu='max', options='emulate-usb-halt-running', pac='Y', walk='Y', usb=True,
+                                 halt=r'OP 0A600030 CMD 00000001 STS 00000000 RUNNING \(TEST\)',
+                                 halt_sample='OP 0A600030 CMD 00000001 STS 00000000 RUNNING (TEST)',
+                                 features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
     'max-vhe-usb-smmu': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu', pac='Y', walk='Y',
                              vhe=True, vhe_exit='DONE', usb=True, smmu=True,
                              features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
@@ -597,7 +615,7 @@ def check_halt(lines, expect):
     want = expect.get('halt')
     if not want:
         return [f'a USB0 HALT line although usb-halt was not asked: {halt[0]}'] if halt else []
-    HALT_LINE = (r'^USB0 HALT (OP [0-9A-F]{8} CMD [0-9A-F]{8} STS [0-9A-F]{8} (HALTED|RUNNING)|'
+    HALT_LINE = (r'^USB0 HALT (OP [0-9A-F]{8} CMD [0-9A-F]{8} STS [0-9A-F]{8} (HALTED|RUNNING)( \(TEST\))?|'
                  r'NOT READ: NO CAPLENGTH|NOT READ: UNMAPPED AT [0-9A-F]{8}|'
                  r'FAULT AT [0-9A-F]{8} ESR [0-9A-F]{8})$')
     if len(halt) != 1:

@@ -207,6 +207,7 @@ static struct {
     int thermal, exit_vhe, usb, usb_smmu, usb_smmu_map, emulate_map_hole;
     int usb_s2_walk, usb_s2_survey, usb_s2_fixed, usb_s2_bypass_plan, usb_halt;
     int emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
+    int emulate_usb_halt, emulate_usb_halt_running;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
  * caches, and nothing says how firmware mapped it, so every draw is cleaned
@@ -507,6 +508,41 @@ static uint64_t usb_read_guarded(void *unused, uint64_t address, uint64_t *value
     return el2q_try_read32(&ctx[0], value, address);
 }
 
+/* "emulate-usb-halt" (test only): virt has no USB0 controller, so the halt
+ * read's powered paths (HALTED/RUNNING) cannot run against real hardware,
+ * and pagemap cannot turn a RAM page into Device memory (it fills only
+ * absent entries). A page el2qual owns stands in for the controller; the
+ * reads below map the controller's address range onto it. The read is a
+ * real guarded read of real memory through the real AT identity check; only
+ * the Device-attribute requirement is dropped, since virt offers no
+ * controllable Device MMIO. */
+static uint64_t usb_halt_fake;           /* the stand-in controller page */
+
+static uint64_t emu_halt_target(uint64_t address)
+{
+    uint64_t core = el2q_usb_word_address[EL2Q_USB_XCAP];   /* USB0 controller base */
+    if (address >= core && address < core + 0x1000)
+        return usb_halt_fake + (address - core);
+    return address;
+}
+
+static int emu_halt_mapped(void *unused, uint64_t address)
+{
+    (void)unused;
+    uint64_t t = emu_halt_target(address);
+    __asm__ volatile("at s1e2r, %0" :: "r"(t) : "memory");
+    ISB();
+    uint64_t p = RD("par_el1");
+    if (p & 1) return 1;
+    if ((p ^ t) & 0x0000fffffffff000ull) return 3;   /* present and identity; Device not required */
+    return 0;
+}
+
+static uint64_t emu_halt_read(void *unused, uint64_t address, uint64_t *value)
+{
+    return usb_read_guarded(unused, emu_halt_target(address), value);
+}
+
 /* ---- The private SMMU window map (option "usb-smmu-map"; pagemap.c) --------
  * The table page comes from a pool allocated before ExitBootServices, only
  * when the option is given. The only stores into a pre-existing page are to
@@ -736,6 +772,21 @@ static void measure_usb_after(void)
     if (opt.usb_halt) {
         progress("USB: READING USB0 XHCI HALT STATE (USBCMD/USBSTS), READ ONLY");
         el2q_usb_halt(&run.usb, &hw);
+    } else if (opt.emulate_usb_halt && usb_halt_fake) {
+        progress("USB: EMULATED XHCI HALT READ, STAND-IN CONTROLLER (TEST ONLY)");
+        /* A stand-in xHCI in RAM el2qual owns: CAPLENGTH 0x30 (the A16's) so
+         * the operational base is core + 0x30, and USBCMD/USBSTS set to the
+         * halted or running state. The controller words were not really read,
+         * so XCAP is seeded for the CAPLENGTH the read derives the base from. */
+        uint32_t cmd = opt.emulate_usb_halt_running ? 0x00000001u : 0x00000000u;
+        uint32_t sts = opt.emulate_usb_halt_running ? 0x00000000u : 0x00000001u;
+        *(volatile uint32_t *)(uintptr_t)(usb_halt_fake + 0x30) = cmd;
+        *(volatile uint32_t *)(uintptr_t)(usb_halt_fake + 0x34) = sts;
+        run.usb.after.word[EL2Q_USB_XCAP] = 0x01100030u;
+        run.usb.after.word_read[EL2Q_USB_XCAP] = EL2Q_USB_READ_OK;
+        const struct el2q_usb_hw emuhw = {0, emu_halt_mapped, emu_halt_read};
+        el2q_usb_halt(&run.usb, &emuhw);
+        run.usb.halt_test = 1;
     }
     if (opt.usb_smmu) {
         if (opt.usb_smmu_map) map_smmu_window();
@@ -931,6 +982,9 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "emulate-s2-tables")) opt.emulate_s2_tables = 1;
         if (word_is(w, len, "emulate-s2-odd")) opt.emulate_s2_tables = opt.emulate_s2_odd = 1;
         if (word_is(w, len, "emulate-s2-device")) opt.emulate_s2_tables = opt.emulate_s2_device = 1;
+        if (word_is(w, len, "emulate-usb-halt")) opt.usb = opt.emulate_usb_halt = 1;
+        if (word_is(w, len, "emulate-usb-halt-running"))
+            opt.usb = opt.emulate_usb_halt = opt.emulate_usb_halt_running = 1;
     }
 }
 
@@ -1171,6 +1225,12 @@ uint64_t efi_main(void *image, struct efi_system_table *st)
         if (opt.emulate_s2_tables &&
             !EFI_ERROR(bs->allocate_pages(0 /* AnyPages */, 2 /* LoaderData */, EL2Q_S2W_TEST_PAGES, &fixture)))
             s2w_pool = fixture;
+    }
+    /* "emulate-usb-halt": one page stands in for the USB0 controller. */
+    if (opt.emulate_usb_halt) {
+        uint64_t fake = 0;
+        if (!EFI_ERROR(bs->allocate_pages(0 /* AnyPages */, 2 /* LoaderData */, 1, &fake)))
+            usb_halt_fake = fake;
     }
 
     char line[] = "SNAPINTOSH EL2QUAL: STARTED AT EL., CALLING EXITBOOTSERVICES";

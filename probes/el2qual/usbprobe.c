@@ -332,8 +332,10 @@ void el2q_usb_halt(struct el2q_usb *u, const struct el2q_usb_hw *hw)
  *   USB0 DWC3 DCTL <w> EVNT <w>
  *   USB0 QSCRATCH HS <w> SS <w>
  * (the last five only when a read was attempted), then with "usb-halt"
- *   USB0 HALT <OP <a> CMD <w> STS <w> <HALTED|RUNNING>|NOT READ: NO CAPLENGTH|
- *            NOT READ: UNMAPPED AT <a>|FAULT AT <a> ESR <e>>
+ *   USB0 HALT <OP <a> CMD <w> STS <w> <HALTED|RUNNING>[ (TEST)]|
+ *            NOT READ: NO CAPLENGTH|NOT READ: UNMAPPED AT <a>|
+ *            FAULT AT <a> ESR <e>>
+ * (the " (TEST)" suffix marks a stand-in controller under "emulate-usb-halt"),
  * then with "usb-smmu-map"
  *   SMMU MAP <OK <CLONE|NEW TABLE> KEPT <n>/256|NOT NEEDED|
  *            REFUSED: <REGIME|DEVICE|ALLOC|STRUCTURE <16 hex>|VERIFY <n>/256>>
@@ -546,6 +548,7 @@ static unsigned halt_lines(const struct el2q_usb *u, unsigned index, struct lbuf
             put_s(b, " CMD "); put_hex(b, u->usbcmd, 8);
             put_s(b, " STS "); put_hex(b, u->usbsts, 8);
             put_s(b, u->halt == EL2Q_USB_HALT_HALTED ? " HALTED" : " RUNNING");
+            if (u->halt_test) put_s(b, " (TEST)");
         }
     }
     return 1;

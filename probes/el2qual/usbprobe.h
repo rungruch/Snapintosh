@@ -174,6 +174,7 @@ struct el2q_usb {
     uint64_t op_base;                        /* controller base + measured CAPLENGTH */
     uint32_t usbcmd, usbsts;                 /* xHCI USBCMD, USBSTS, as read */
     uint64_t halt_esr, halt_at;              /* the refused or faulting register */
+    uint32_t halt_test;                      /* the halt read ran against a stand-in (QEMU) */
     uint64_t smmu_esr;
     uint64_t isr;                            /* ISR_EL1 after the reads: a pending SError shows here */
 };
