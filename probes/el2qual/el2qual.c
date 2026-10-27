@@ -15,60 +15,8 @@
  * loop: holding the power button ends the run. PSCI is used to start and
  * stop secondary CPUs and, with "poweroff", to end a QEMU run.
  *
- * Load options (space separated, any order):
- *   serial      also write the report to the SPCR UART (PL011/SBSA only)
- *   poweroff    PSCI SYSTEM_OFF after reporting (QEMU runs)
- *   nopac       skip every PAuth key access and PAC instruction
- *   nosmp       measure the boot CPU only
- *   emulate-vhe recreate slbounce's E2H|TGE handoff first; test only, and
- *               refused unless the machine started at EL2 without E2H
- *   exit-vhe    leave slbounce's E2H|TGE state for the non-VHE EL2 q1n1 and
- *               the monitor assume (vhe.c plans it, el2q_exit_vhe switches),
- *               then measure there. Refused, with the reason reported, if
- *               the entry state is not one the plan recognises. Off by
- *               default.
- *   emulate-rotated  treat the firmware's GOP mode as having no framebuffer
- *               address, as the gaokun3's does; test only
- *   emulate-no-fb    treat every GOP mode that way; test only
- *   emulate-dt-fb    describe the firmware's real GOP framebuffer as if it
- *               were the device tree's /chosen simple-framebuffer; test only
- *   thermal     after the CPU measurements, run the SC8280XP tsens guard
- *               (thermal.c) on the boot CPU for 12 s: read only, and only
- *               the guard's 58 words, each checked against the firmware's
- *               page tables before the first read. Off by default.
- *   usb         read whether the gaokun3's USB0 controller is powered, from
- *               the clock controller's status words, before and after
- *               ExitBootServices; after it, and only if powered and
- *               clocked, the controller's own state (usbprobe.c). Read
- *               only. Off by default.
- *   usb-smmu    "usb", then also apps_smmu's state for USB0's stream and,
- *               when it translates, the context bank it names, and the
- *               stage-2 bank that one nests, if any. Off by default.
- *   usb-smmu-map  "usb-smmu", but first add the SMMU's 1 MiB register
- *               window to el2qual's own EL2 tables as Device, read-only
- *               identity pages (pagemap.c), so the nested stage-2 bank the
- *               UEFI tables leave unmapped can be read too. Writes RAM (one
- *               table page of el2qual's own and one descriptor in UEFI's
- *               leftover tables), never hardware. Off by default.
- *   emulate-map-hole  with "usb-smmu-map", map two test windows QEMU's
- *               EDK2 leaves unmapped instead of the SMMU's, so the map is
- *               written and checked there; test only, reported as such
- *   usb-s2-walk "usb-smmu", then walk the stage-2 bank's tables for a 1 MiB
- *               DMA arena allocated below 4 GiB as q1n1 allocates its own
- *               (s2walk.c): descriptor reads only, through mappings UEFI's
- *               tables already have, stopping at the first fault or
- *               SError. Off by default.
- *   usb-s2-survey  "usb-s2-walk", then survey that stage 2's top two
- *               levels: every level-1 entry, and the level-2 table under
- *               the arena (s2walk.c), with the walk's guards. Off by
- *               default.
- *   emulate-s2-tables  with "usb-s2-walk", walk a stage-2 table set
- *               el2qual builds for its arena instead of the SMMU's, every
- *               page identity read-write; test only, reported as such
- *   emulate-s2-odd     the same, with arena pages 1 to 3 moved, invalid
- *               and read-only; test only
- *   emulate-s2-device  the same tables, but the root pointed at QEMU's
- *               PL011, a Device page the walk must refuse unread; test only
+ * Load options: README.md in this directory lists them, each off by
+ * default; parse_options below reads them.
  *
  * With no GOP mode that has a framebuffer address, el2qual draws on the
  * device tree's /chosen simple-framebuffer if the firmware's memory map
