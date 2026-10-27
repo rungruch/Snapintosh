@@ -1190,8 +1190,9 @@ lines does not mistake a `NO CAPLENGTH` line for a read.
 | Check | Result, 2026-10-27 |
 | --- | --- |
 | Host: `python3 tools/test-el2qual.py` | PASS. Against the fake controller: with the A16's `XCAP` (`CAPLENGTH` `0x30`) the base is `0x0A600030`; `R/S` clear and `HCH` set reads `HALTED`, `R/S` set or `HCH` clear reads `RUNNING`; a `CAPLENGTH` of `0x20` moves the base to `0x0A600020`; an unmapped operational register is `UNMAPPED` and is not read; a faulting `USBCMD` is `FAULT` with its ESR, and `USBSTS` is not read; power off gives `NO CAPLENGTH` with nothing in the controller's range touched |
-| QEMU: `python3 tools/qemu-el2qual.py --self-test` | PASS. `max-usb-halt`: virt never powers the controller, so the one `USB0 HALT` line must say `NO CAPLENGTH` and touch nothing in its range. The `HALTED`/`RUNNING` paths need a powered controller and are covered by the host tests, not QEMU |
-| el2qual.efi | Changed: version 13 adds the `usb-halt` option. Entry 15 needs el2qual 13 |
+| QEMU: `python3 tools/qemu-el2qual.py --config max-usb-halt` (and `--self-test`) | PASS. `max-usb-halt`: virt never powers the controller, so the one `USB0 HALT` line says `NO CAPLENGTH` and touches nothing in its range |
+| QEMU: `--config max-usb-halt-emulated`, `--config max-usb-halt-running` | PASS. virt has no USB0, and pagemap cannot turn RAM into Device memory, so `emulate-usb-halt` stands a page el2qual owns in for the controller (`CAPLENGTH 0x30`, base `0x0A600030`). The read runs end to end through the real `AT S1E2R` identity check and guarded read — only the Device-attribute requirement relaxed, since virt offers no controllable Device MMIO — and the live line reads `OP 0A600030 CMD 00000000 STS 00000001 HALTED (TEST)`, or `CMD 00000001 STS 00000000 RUNNING (TEST)` for the running stand-in. The `UNMAPPED`/`FAULT` paths stay host-test-only |
+| el2qual.efi | Changed: version 13 adds the `usb-halt` option (and the test-only `emulate-usb-halt`). Entry 15 needs el2qual 13 |
 | gaokun3 | NOT RUN |
 
 ### Step 2: decided by step 1
