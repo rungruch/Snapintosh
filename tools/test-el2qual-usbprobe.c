@@ -174,6 +174,101 @@ static void test_gate(void)
     CHECK(p.core == EL2Q_USB_CORE_NOT_TRIED);
 }
 
+/* The xHCI halt read (el2q_usb_halt): the operational base from the measured
+ * CAPLENGTH, USBCMD/USBSTS read there, and the HALTED verdict. powered()'s
+ * XCAP is 0x01100030, so CAPLENGTH is 0x30 (the A16's, not the assumed
+ * 0x20). */
+static void test_halt(void)
+{
+    struct el2q_usb u;
+    const uint64_t op = 0x0a600000ull + 0x30;
+
+    struct { uint32_t cmd, sts, want; } verdict[] = {
+        {0x00000000, 0x00000001, EL2Q_USB_HALT_HALTED},    /* R/S clear, HCH set */
+        {0x00000001, 0x00000001, EL2Q_USB_HALT_RUNNING},   /* R/S set */
+        {0x00000000, 0x00000000, EL2Q_USB_HALT_RUNNING},   /* HCH clear */
+        {0x00000001, 0x00000000, EL2Q_USB_HALT_RUNNING},
+    };
+    for (unsigned i = 0; i < sizeof verdict / sizeof verdict[0]; i++) {
+        powered();
+        set(op + 0x0, verdict[i].cmd);
+        set(op + 0x4, verdict[i].sts);
+        memset(&u, 0, sizeof u);
+        el2q_usb_gcc(&u.after, &hw);
+        el2q_usb_core(&u.after, &hw);
+        el2q_usb_halt(&u, &hw);
+        CHECK(u.halt == verdict[i].want && u.op_base == op);
+        CHECK(u.usbcmd == verdict[i].cmd && u.usbsts == verdict[i].sts);
+    }
+
+    /* The operational base follows the measured CAPLENGTH, not a fixed 0x20. */
+    powered();
+    set(el2q_usb_word_address[EL2Q_USB_XCAP], 0x01100020u);
+    set(0x0a600000ull + 0x20, 0x00000000);
+    set(0x0a600000ull + 0x24, 0x00000001);
+    memset(&u, 0, sizeof u);
+    el2q_usb_gcc(&u.after, &hw);
+    el2q_usb_core(&u.after, &hw);
+    el2q_usb_halt(&u, &hw);
+    CHECK(u.op_base == 0x0a600020ull && u.halt == EL2Q_USB_HALT_HALTED);
+
+    /* An operational register unmapped: UNMAPPED, and it is not read. */
+    powered();
+    set(op + 0x0, 0x00000000);
+    set(op + 0x4, 0x00000001);
+    memset(&u, 0, sizeof u);
+    el2q_usb_gcc(&u.after, &hw);
+    el2q_usb_core(&u.after, &hw);
+    hw_state.unmapped[hw_state.nunmapped++] = op + 0x0;
+    int before = controller_reads();
+    el2q_usb_halt(&u, &hw);
+    CHECK(u.halt == EL2Q_USB_HALT_UNMAPPED && u.halt_at == op);
+    CHECK(controller_reads() == before);
+
+    /* A faulting USBCMD: FAULT, its ESR kept, USBSTS not read. */
+    powered();
+    memset(&u, 0, sizeof u);
+    el2q_usb_gcc(&u.after, &hw);
+    el2q_usb_core(&u.after, &hw);
+    hw_state.fault[hw_state.nfault++] = op + 0x0;
+    el2q_usb_halt(&u, &hw);
+    CHECK(u.halt == EL2Q_USB_HALT_FAULT && u.halt_esr == 0x96000010 && u.halt_at == op);
+
+    /* No CAPLENGTH: the controller was never read (power off), so nothing in
+     * its range is touched and op_base stays zero. */
+    powered();
+    set(el2q_usb_gcc_address[EL2Q_USB_GDSC], 0x00000010u);
+    memset(&u, 0, sizeof u);
+    el2q_usb_gcc(&u.after, &hw);
+    el2q_usb_core(&u.after, &hw);
+    CHECK(u.after.core == EL2Q_USB_CORE_NOT_TRIED);
+    before = controller_reads();
+    el2q_usb_halt(&u, &hw);
+    CHECK(u.halt == EL2Q_USB_HALT_NO_CAP && u.op_base == 0);
+    CHECK(controller_reads() == before);
+
+    /* No hardware operations: NO_CAP, nothing read. */
+    memset(&u, 0, sizeof u);
+    el2q_usb_halt(&u, NULL);
+    CHECK(u.halt == EL2Q_USB_HALT_NO_CAP);
+
+    /* The report line, halted. */
+    powered();
+    set(op + 0x0, 0x00000000);
+    set(op + 0x4, 0x00000001);
+    memset(&u, 0, sizeof u);
+    el2q_usb_gcc(&u.after, &hw);
+    el2q_usb_core(&u.after, &hw);
+    el2q_usb_halt(&u, &hw);
+    char line[EL2Q_USB_LINE_COLS + 1];
+    int found = 0;
+    for (unsigned i = 0; i < 40; i++) {
+        el2q_usb_line(&u, i, line);
+        if (!strcmp(line, "USB0 HALT OP 0A600030 CMD 00000000 STS 00000001 HALTED")) found = 1;
+    }
+    CHECK(found);
+}
+
 #define SMMU(off) (EL2Q_USB_SMMU_BASE + (off))
 
 static void test_smmu(void)
@@ -621,6 +716,7 @@ static void test_map(void)
 unsigned test_usbprobe(void)
 {
     test_gate();
+    test_halt();
     test_smmu();
     test_bank();
     test_stage2();

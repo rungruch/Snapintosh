@@ -27,9 +27,9 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
            (load option "thermal"; docs/GAOKUN3-PHASE1-GUARDS.md).
   vhe-exit stage2's files with the two Phase 2 VHE-exit entries only (load
            option "exit-vhe"; docs/GAOKUN3-PHASE2.md).
-  usb-read stage2's files with the six USB entries only (load options
+  usb-read stage2's files with the eight USB entries only (load options
            "usb", "usb-smmu", "usb-smmu-map", "usb-s2-walk", "usb-s2-survey",
-           "usb-s2-fixed", "usb-s2-bypass-plan";
+           "usb-s2-fixed", "usb-s2-bypass-plan", "usb-halt";
            docs/GAOKUN3-USB-DEVICE-MODE.md).
   q1n1-foothold  stage2's files with q1n1 (its -DQ1N1_VHE_EXIT
            -DQ1N1_DT_FRAMEBUFFER build) in place of el2qual: its --el2
@@ -121,6 +121,9 @@ USB_READ_ENTRIES = [
     ('el2qual-14-usb-s2-bypass-plan.conf',
      'el2qual 14: the S2CR bypass plan, nothing written',
      'nopac nosmp exit-vhe usb-smmu-map usb-s2-bypass-plan'),
+    ('el2qual-15-usb-halt.conf',
+     'el2qual 15: USB0 xHCI halt state from the measured CAPLENGTH (read only)',
+     'nopac nosmp usb-halt'),
 ]
 STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRIES,
                  'vhe-exit': VHE_EXIT_ENTRIES, 'usb-read': USB_READ_ENTRIES}

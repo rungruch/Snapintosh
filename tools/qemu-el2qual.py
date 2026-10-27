@@ -44,6 +44,9 @@ report it writes to the PL011:
                refuse or read without harm; the checker recomputes the
                power decision from the words printed, and fails any
                controller read made while it is not ON, and any SError
+  max-usb-halt  the xHCI halt read ("usb-halt"): virt never powers the
+               controller, so CAPLENGTH is never read and the one HALT line
+               must say NO CAPLENGTH and touch nothing in its range
   max-vhe-usb-smmu  the same with the SMMU, after the slbounce emulation
                and the VHE exit, the order the gaokun3 runs it in
   max-vhe-usb-smmu-map  the same, with "usb-smmu-map": el2qual first adds its
@@ -163,6 +166,14 @@ CONFIGS = {
     # then the read with the SMMU.
     'max-usb': dict(cpu='max', options='usb', pac='Y', walk='Y', usb=True,
                     features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
+    # The xHCI halt read (usbprobe.c). virt has no Qualcomm USB, so power is
+    # never ON, the controller is never read, and CAPLENGTH is never known:
+    # the one HALT line must say NO CAPLENGTH, read nothing in the controller's
+    # range, and leave no SError. The HALTED/RUNNING paths need a powered
+    # controller and are covered by the host tests, not QEMU.
+    'max-usb-halt': dict(cpu='max', options='usb-halt', pac='Y', walk='Y', usb=True,
+                         halt='NOT READ: NO CAPLENGTH',
+                         features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
     'max-vhe-usb-smmu': dict(cpu='max', options='emulate-vhe exit-vhe usb-smmu', pac='Y', walk='Y',
                              vhe=True, vhe_exit='DONE', usb=True, smmu=True,
                              features=dict.fromkeys(FEATURES, True), routes=('CPU OK', 'CPU OK')),
@@ -567,6 +578,7 @@ def check_usb(lines, expect):
             problems.append(f'a bypassing or faulting S2CR, yet the bank was read: {bank}')
         elif translate and 'SMMU CB NOT TRANSLATED' in bank:
             problems.append('a translating S2CR reported as not translated')
+    problems += check_halt(lines, expect)
     problems += check_s2walk(lines, expect)
     problems += check_s2survey(lines, expect)
     problems += check_region(lines, expect)
@@ -574,6 +586,27 @@ def check_usb(lines, expect):
     if 'USB SERROR NONE' not in lines:
         problems.append('the USB read left an SError pending, or no SERROR line')
     return problems
+
+
+def check_halt(lines, expect):
+    """The "usb-halt" line: present exactly when asked, well-formed, and equal
+    to this configuration's outcome. The line carries "USB0 HALT", not
+    "USB0 XHCI", so check_usb's controller-read count never mistakes a
+    NO CAPLENGTH line (emitted when the controller was not read) for a read."""
+    halt = [line for line in lines if line.startswith('USB0 HALT ')]
+    want = expect.get('halt')
+    if not want:
+        return [f'a USB0 HALT line although usb-halt was not asked: {halt[0]}'] if halt else []
+    HALT_LINE = (r'^USB0 HALT (OP [0-9A-F]{8} CMD [0-9A-F]{8} STS [0-9A-F]{8} (HALTED|RUNNING)|'
+                 r'NOT READ: NO CAPLENGTH|NOT READ: UNMAPPED AT [0-9A-F]{8}|'
+                 r'FAULT AT [0-9A-F]{8} ESR [0-9A-F]{8})$')
+    if len(halt) != 1:
+        return [f'usb-halt asked but {len(halt)} USB0 HALT lines']
+    if not re.match(HALT_LINE, halt[0]):
+        return [f'malformed USB0 HALT line: {halt[0]}']
+    if not re.fullmatch(want, halt[0].removeprefix('USB0 HALT ')):
+        return [f'{halt[0]}, not USB0 HALT {want}']
+    return []
 
 
 def check_s2walk(lines, expect):
@@ -796,6 +829,8 @@ def synthetic(expect, smp=SMP):
                       f'USB1 GCC {phase} GDSC UNMAPPED MASTER UNMAPPED',
                       f'USB0 POWER {phase} UNREAD']
         lines.append('USB0 CORE NOT READ: POWER NOT ON')
+        if expect.get('halt'):
+            lines.append(f'USB0 HALT {expect.get("halt_sample", expect["halt"])}')
         if expect.get('smmumap'):
             lines.append(f'SMMU MAP {expect.get("smmumap_sample", expect["smmumap"])}')
         if expect.get('smmu'):

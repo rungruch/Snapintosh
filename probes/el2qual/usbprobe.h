@@ -105,6 +105,20 @@ enum el2q_usb_cb {
     EL2Q_USB_CB_NOT_STAGE2      /* the nested bank's own CBAR is not a stage-2 bank's */
 };
 
+/* USB0's xHCI run/halt state (option "usb-halt"). The operational registers
+ * start at the controller base plus CAPLENGTH, the low byte of XCAP; q1n1
+ * assumed 0x20, but the base must come from the controller itself (the A16
+ * reports 0x30), so USBCMD and USBSTS are read only after XCAP, from the
+ * measured length. */
+enum el2q_usb_halt_state {
+    EL2Q_USB_HALT_NOT_ASKED,   /* option "usb-halt" not given */
+    EL2Q_USB_HALT_NO_CAP,      /* XCAP was not read, so CAPLENGTH is unknown */
+    EL2Q_USB_HALT_UNMAPPED,    /* an operational register does not translate as Device */
+    EL2Q_USB_HALT_FAULT,       /* a read raised an exception */
+    EL2Q_USB_HALT_HALTED,      /* USBCMD.R/S clear and USBSTS.HCH set */
+    EL2Q_USB_HALT_RUNNING      /* read, but not halted */
+};
+
 struct el2q_usb_phase {
     uint32_t ran;
     uint32_t gcc_read[EL2Q_USB_GCC_COUNT];   /* enum el2q_usb_read */
@@ -153,6 +167,13 @@ struct el2q_usb {
     /* Option "usb-s2-bypass-plan": the one-word change that would give USB0
      * untranslated DMA, planned and never made (s2bypass.c). */
     struct el2q_s2b_result bypass;
+    /* Option "usb-halt": USB0's xHCI run/halt state, read from the measured
+     * CAPLENGTH (usbprobe.c). Stage 2 of the bypass requires HALTED, and
+     * takes its operational-register base from op_base. */
+    uint32_t halt;                           /* enum el2q_usb_halt_state */
+    uint64_t op_base;                        /* controller base + measured CAPLENGTH */
+    uint32_t usbcmd, usbsts;                 /* xHCI USBCMD, USBSTS, as read */
+    uint64_t halt_esr, halt_at;              /* the refused or faulting register */
     uint64_t smmu_esr;
     uint64_t isr;                            /* ISR_EL1 after the reads: a pending SError shows here */
 };
@@ -198,6 +219,14 @@ void el2q_usb_core(struct el2q_usb_phase *phase, const struct el2q_usb_hw *hw);
  * interpreted; otherwise NOT_STAGE2. Read with the same range and mapping
  * rules: CBAR, CBA2R, SCTLR, TCR and TTBR0. */
 void el2q_usb_smmu(struct el2q_usb *usb, const struct el2q_usb_hw *hw);
+
+/* USB0's xHCI run/halt state (option "usb-halt"). Only when XCAP was read:
+ * the operational-register base is the controller base plus XCAP's CAPLENGTH
+ * byte (not an assumed offset), and USBCMD and USBSTS are read there, each
+ * mapping-checked first and nothing read after a fault. HALTED means
+ * USBCMD.R/S clear and USBSTS.HCH set. Reads nothing, and reports NO_CAP,
+ * when the controller words were not read. */
+void el2q_usb_halt(struct el2q_usb *usb, const struct el2q_usb_hw *hw);
 
 /* Fixed-format report lines, empty past the last; see usbprobe.c. */
 #define EL2Q_USB_LINE_COLS 64

@@ -243,7 +243,7 @@ class Layout(unittest.TestCase):
         with self.assertRaises(usb.LayoutError):                    # so is the gate's tree
             usb.build_layout('q1n1-foothold', self.out('z'), good, self.sdboot, self.slb, self.tcb)
 
-    def test_usb_read_stage_has_its_seven_entries(self):
+    def test_usb_read_stage_has_its_eight_entries(self):
         m = usb.build_layout('usb-read', self.out(), self.efi, self.sdboot, self.slb, self.tcb,
                              self.dtb)
         out = self.out()
@@ -257,7 +257,8 @@ class Layout(unittest.TestCase):
                                                 'el2qual-11-usb-s2-walk.conf',
                                                 'el2qual-12-usb-s2-survey.conf',
                                                 'el2qual-13-usb-s2-fixed.conf',
-                                                'el2qual-14-usb-s2-bypass-plan.conf']))
+                                                'el2qual-14-usb-s2-bypass-plan.conf',
+                                                'el2qual-15-usb-halt.conf']))
         texts = {e.name: e.read_text() for e in entries}
         self.assertIn('options nopac nosmp usb\n', texts['el2qual-8-usb.conf'])  # no SMMU, no VHE exit first
         # Entry 9 stays what runs 17, 19 and 20 ran; the map is entry 10's alone.
@@ -276,6 +277,8 @@ class Layout(unittest.TestCase):
         # Entry 14 plans the SMMU write; no entry performs one.
         self.assertIn('options nopac nosmp exit-vhe usb-smmu-map usb-s2-bypass-plan\n',
                       texts['el2qual-14-usb-s2-bypass-plan.conf'])
+        # Entry 15 reads the xHCI halt state; the controller alone, no VHE exit.
+        self.assertIn('options nopac nosmp usb-halt\n', texts['el2qual-15-usb-halt.conf'])
         for text in texts.values():
             self.assertNotIn('bypass-write', text)
         texts = list(texts.values())

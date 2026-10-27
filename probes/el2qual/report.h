@@ -13,7 +13,7 @@
 #include "vhe.h"
 #include "usbprobe.h"
 
-#define EL2Q_VERSION      12    /* 2: counter rate, GICv3 virtualization, SMBIOS;
+#define EL2Q_VERSION      13    /* 2: counter rate, GICv3 virtualization, SMBIOS;
                                    3: the tsens read (option "thermal");
                                    4: the VHE exit (option "exit-vhe");
                                    5: the USB read (options "usb", "usb-smmu");
@@ -29,7 +29,9 @@
                                       run 23's identity region and reports
                                       UEFI's memory map there;
                                    12: "usb-s2-bypass-plan" plans the S2CR
-                                      bypass without writing it */
+                                      bypass without writing it;
+                                   13: "usb-halt" reads USB0's xHCI run/halt
+                                      state from the measured CAPLENGTH */
 #define EL2Q_MAX_CPUS     16
 #define EL2Q_ID_COUNT     45    /* the allocated encodings probes/idregs.h reads */
 #define EL2Q_PAC_TRIALS   4

@@ -283,6 +283,39 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
     u->smmu = EL2Q_USB_SMMU_NO_MATCH;
 }
 
+/* xHCI operational registers, offsets from the operational base. USBCMD.R/S
+ * (bit 0) runs the controller; USBSTS.HCH (bit 0) is set while it is halted.
+ * From Linux drivers/usb/host/xhci.h (struct xhci_op_regs: command, status)
+ * and xhci-ext-caps.h (XHCI_CMD_RUN, XHCI_STS_HALT), read as references. */
+#define XHCI_USBCMD   0x0u
+#define XHCI_USBSTS   0x4u
+#define USBCMD_RUN    (1u << 0)
+#define USBSTS_HALT   (1u << 0)
+
+void el2q_usb_halt(struct el2q_usb *u, const struct el2q_usb_hw *hw)
+{
+    u->halt = EL2Q_USB_HALT_NO_CAP;
+    u->op_base = u->usbcmd = u->usbsts = 0;
+    u->halt_esr = u->halt_at = 0;
+    if (!hw || !hw->mapped || !hw->read32) return;
+    /* CAPLENGTH is the low byte of XCAP (core + 0), read by el2q_usb_core.
+     * Without it there is no operational base to read, and guessing one would
+     * read an address the controller does not define. */
+    if (u->after.word_read[EL2Q_USB_XCAP] != EL2Q_USB_READ_OK) return;
+    uint64_t op = USB0_CORE + (u->after.word[EL2Q_USB_XCAP] & 0xff);
+    u->op_base = op;
+    uint32_t st = read_word(hw, op + XHCI_USBCMD, &u->usbcmd, &u->halt_esr, &u->halt_at);
+    if (st == EL2Q_USB_READ_OK)
+        st = read_word(hw, op + XHCI_USBSTS, &u->usbsts, &u->halt_esr, &u->halt_at);
+    if (st == EL2Q_USB_UNMAPPED)
+        u->halt = EL2Q_USB_HALT_UNMAPPED;
+    else if (st == EL2Q_USB_FAULT)
+        u->halt = EL2Q_USB_HALT_FAULT;
+    else
+        u->halt = (!(u->usbcmd & USBCMD_RUN) && (u->usbsts & USBSTS_HALT))
+                      ? EL2Q_USB_HALT_HALTED : EL2Q_USB_HALT_RUNNING;
+}
+
 /* ---- Report lines -----------------------------------------------------------
  * The gaokun3's screen is the only record of these (its SPCR UART is not one
  * el2qual drives), so every value is on a line of its own kind:
@@ -298,7 +331,10 @@ void el2q_usb_smmu(struct el2q_usb *u, const struct el2q_usb_hw *hw)
  *   USB0 DWC3 U2PHY <w> U3PIPE <w> DCFG <w>
  *   USB0 DWC3 DCTL <w> EVNT <w>
  *   USB0 QSCRATCH HS <w> SS <w>
- * (the last five only when a read was attempted), then with "usb-smmu-map"
+ * (the last five only when a read was attempted), then with "usb-halt"
+ *   USB0 HALT <OP <a> CMD <w> STS <w> <HALTED|RUNNING>|NOT READ: NO CAPLENGTH|
+ *            NOT READ: UNMAPPED AT <a>|FAULT AT <a> ESR <e>>
+ * then with "usb-smmu-map"
  *   SMMU MAP <OK <CLONE|NEW TABLE> KEPT <n>/256|NOT NEEDED|
  *            REFUSED: <REGIME|DEVICE|ALLOC|STRUCTURE <16 hex>|VERIFY <n>/256>>
  * ending " (TEST WINDOW)" when "emulate-map-hole" mapped QEMU's test window
@@ -493,6 +529,28 @@ static unsigned s2_lines(const struct el2q_usb *u, unsigned index, struct lbuf *
     return count;
 }
 
+/* The halt line carries the "USB0 HALT" prefix, not "USB0 XHCI", so a
+ * checker that counts controller-read lines does not mistake a NO_CAP line
+ * (emitted when the controller was never read) for a read. */
+static unsigned halt_lines(const struct el2q_usb *u, unsigned index, struct lbuf *b)
+{
+    if (u->halt == EL2Q_USB_HALT_NOT_ASKED) return 0;
+    if (index == 0) {
+        put_s(b, "USB0 HALT ");
+        if (u->halt == EL2Q_USB_HALT_NO_CAP) put_s(b, "NOT READ: NO CAPLENGTH");
+        else if (u->halt == EL2Q_USB_HALT_UNMAPPED) { put_s(b, "NOT READ: UNMAPPED AT "); put_hex(b, u->halt_at, 8); }
+        else if (u->halt == EL2Q_USB_HALT_FAULT) {
+            put_s(b, "FAULT AT "); put_hex(b, u->halt_at, 8); put_s(b, " ESR "); put_hex(b, u->halt_esr, 8);
+        } else {
+            put_s(b, "OP "); put_hex(b, u->op_base, 8);
+            put_s(b, " CMD "); put_hex(b, u->usbcmd, 8);
+            put_s(b, " STS "); put_hex(b, u->usbsts, 8);
+            put_s(b, u->halt == EL2Q_USB_HALT_HALTED ? " HALTED" : " RUNNING");
+        }
+    }
+    return 1;
+}
+
 static unsigned map_lines(const struct el2q_usb *u, unsigned index, struct lbuf *b)
 {
     if (u->map == EL2Q_PM_NOT_ASKED) return 0;
@@ -552,6 +610,8 @@ void el2q_usb_line(const struct el2q_usb *u, unsigned index, char out[EL2Q_USB_L
     if (index < (n = phase_lines(&u->after, 'A', index, &b))) return;
     index -= n;
     if (index < (n = core_lines(&u->after, index, &b))) return;
+    index -= n;
+    if (index < (n = halt_lines(u, index, &b))) return;
     index -= n;
     if (index < (n = map_lines(u, index, &b))) return;
     index -= n;

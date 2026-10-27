@@ -205,7 +205,7 @@ static struct el2q_text text;
 static struct {
     int serial, poweroff, nopac, nosmp, emulate_vhe, emulate_rotated, emulate_no_fb, emulate_dt_fb;
     int thermal, exit_vhe, usb, usb_smmu, usb_smmu_map, emulate_map_hole;
-    int usb_s2_walk, usb_s2_survey, usb_s2_fixed, usb_s2_bypass_plan;
+    int usb_s2_walk, usb_s2_survey, usb_s2_fixed, usb_s2_bypass_plan, usb_halt;
     int emulate_s2_tables, emulate_s2_odd, emulate_s2_device;
 } opt;
 /* clean: the display reads this buffer from memory, not through the CPU's
@@ -733,6 +733,10 @@ static void measure_usb_after(void)
     if (run.usb.after.power == EL2Q_USB_POWER_ON)
         progress("USB: READING THE USB0 CONTROLLER. A HANG HERE IS A USB0 READ");
     el2q_usb_core(&run.usb.after, &hw);
+    if (opt.usb_halt) {
+        progress("USB: READING USB0 XHCI HALT STATE (USBCMD/USBSTS), READ ONLY");
+        el2q_usb_halt(&run.usb, &hw);
+    }
     if (opt.usb_smmu) {
         if (opt.usb_smmu_map) map_smmu_window();
         progress("USB: READING APPS_SMMU. A HANG HERE IS AN SMMU READ");
@@ -922,6 +926,8 @@ static void parse_options(const char16 *o, uint32_t bytes)
         if (word_is(w, len, "usb-s2-survey")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = opt.usb_s2_survey = 1;
         if (word_is(w, len, "usb-s2-fixed")) opt.usb = opt.usb_smmu = opt.usb_s2_walk = opt.usb_s2_fixed = 1;
         if (word_is(w, len, "usb-s2-bypass-plan")) opt.usb = opt.usb_smmu = opt.usb_s2_bypass_plan = 1;
+        /* The halt read needs the controller, not the SMMU or the VHE exit. */
+        if (word_is(w, len, "usb-halt")) opt.usb = opt.usb_halt = 1;
         if (word_is(w, len, "emulate-s2-tables")) opt.emulate_s2_tables = 1;
         if (word_is(w, len, "emulate-s2-odd")) opt.emulate_s2_tables = opt.emulate_s2_odd = 1;
         if (word_is(w, len, "emulate-s2-device")) opt.emulate_s2_tables = opt.emulate_s2_device = 1;
