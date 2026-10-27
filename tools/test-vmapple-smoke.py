@@ -248,6 +248,80 @@ def test_tidcp_report_distinguishes_empty_from_unreadable(capsys=None):
     check('UNKNOWN' in out, f'an unreadable log is stated as unknown: {out!r}')
 
 
+def mmio_tree(rtc_offset=0x10050000, ranges=None):
+    # The smoke's arm-io ranges, a PL011 and GIC already moved onto QEMU's
+    # map, and one device left at a template-style offset.
+    if ranges is None:
+        ranges = struct.pack('<QQQ', 0, kcload.ARMIO_PARENT_BASE, 0x40000000)
+    uart = node('uart0', [prop('reg', struct.pack('<QQ', kcload.QEMU_UART_OFF, 0x1000))])
+    gic = node('gic', [prop('reg', struct.pack('<QQQQQQ', kcload.QEMU_GICD_OFF, 0x10000,
+                                               kcload.QEMU_GICR_OFF, 0x20000, 0xfff0000, 0x10000))])
+    rtc = node('rtc', [prop('reg', struct.pack('<QQ', rtc_offset, 0x1000))])
+    return node('device-tree', [], [node('arm-io', [prop('ranges', ranges)], [uart, gic, rtc])])
+
+
+def trace_line(direction, pa, value, size, region):
+    return (f'memory_region_ops_{direction} cpu 0 mr 0x10a0b0c0 addr {pa:#x} '
+            f'value {value:#x} size {size} name \'{region}\'')
+
+
+def run_report(trace, tree):
+    import io
+    import contextlib
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rows = kcload.report_mmio(trace, tree)
+    return rows, buf.getvalue()
+
+
+def test_mmio_report():
+    tree = mmio_tree()
+    windows = kcload.mmio_windows(appledt.DeviceTree(tree))
+    check((0x09000000, 0x1000, 'uart0', 0) in windows, f'the PL011 window is at 0x09000000: {windows}')
+    check((0x17ff0000, 0x10000, 'gic', 2) in windows, 'the third GIC window moves with arm-io ranges')
+    check((0x18050000, 0x1000, 'rtc', 0) in windows, 'a template offset moves with arm-io ranges')
+    trace = '\n'.join([
+        'PL011 data written to disabled UART',
+        trace_line('write', 0x09000000, 0x41, 4, 'pl011'),
+        trace_line('read', 0x18050000, (1 << 64) - 1, 4, 'gpex_mmio_window'),
+        '12345@1700000000.000001:' + trace_line('write', 0x18050010, 1, 4, 'gpex_mmio_window'),
+        trace_line('read', 0x08000004, 0x3, 4, 'gicv3_dist'),
+        trace_line('write', 0x004ffff8, 0x4aa8fb60, 4, 'virt.flash0'),
+        trace_line('read', 0x17ff0008, 0x12345678, 4, 'gpex_mmio_window'),
+        trace_line('read', 0x09000018, 0x90, 4, 'pl011'),
+    ])
+    rows, text = run_report(trace, tree)
+    labels = [r[0] for r in rows]
+    check(labels == ['uart0[0]', 'rtc[0]', 'gic[0]', '(no tree node) 0x004ff000', 'gic[2]'],
+          f'windows in first-touch order: {labels}')
+    by = {r[0]: r for r in rows}
+    check(by['uart0[0]'][5] and by['gic[0]'][5], 'the PL011 and GICD count as QEMU models')
+    check(by['uart0[0]'][1:3] == (1, 1), 'reads and writes are counted per window')
+    check(not by['rtc[0]'][5] and by['rtc[0]'][1:3] == (1, 1),
+          'a template device answered by the PCIe window is not modelled; the prefixed line counts')
+    check('rtc[0]' in text and 'every read all-ones' in text.split('rtc[0]')[1].splitlines()[0],
+          'an all-ones answer is called out')
+    check(not by['gic[2]'][5] and 'all-ones' not in text.split('gic[2]')[1].splitlines()[0],
+          'the third GIC window is not one of the moved ones, and a real value is not all-ones')
+    check(by['(no tree node) 0x004ff000'][4] == 0xff8 and not by['(no tree node) 0x004ff000'][5],
+          'an address outside every window is reported by page, with its offset')
+    check('5 windows touched, 3 not modelled' in text, f'totals line: {text!r}')
+
+    # Deliberately wrong pairings the report must not accept as modelled.
+    wrong = trace_line('read', 0x09000000, 0, 4, 'gpex_mmio_window')
+    rows, _ = run_report(wrong, tree)
+    check(rows[0][0] == 'uart0[0]' and not rows[0][5],
+          'the PL011 window answered by something other than the PL011 is not modelled')
+    rows, text = run_report('nothing traced here\n', tree)
+    check(rows is None and 'UNKNOWN' in text, 'a trace with no accesses is UNKNOWN, not "nothing touched"')
+    for bad in (mmio_tree(ranges=bytes(16)), mmio_tree(rtc_offset=0x50000000)):
+        try:
+            kcload.mmio_windows(appledt.DeviceTree(bad))
+            check(False, 'a malformed arm-io ranges or out-of-range reg is refused')
+        except SystemExit:
+            check(True, 'a malformed arm-io ranges or out-of-range reg is refused')
+
+
 def main():
     test_dt_completion()
     test_nvram()
@@ -256,6 +330,7 @@ def main():
     test_tidcp_decoder()
     test_tidcp_log_parse()
     test_tidcp_report_distinguishes_empty_from_unreadable()
+    test_mmio_report()
     print(f'PASS test-vmapple-smoke: {checks} checks')
 
 

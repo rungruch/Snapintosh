@@ -20,7 +20,9 @@ for Route B:
   python3 tools/vmapple-smoke/smoke.py boot --kernelcache PATH
       Load a locally obtained VirtualMac2,1 kernelcache (never committed) at
       EL1 under the stub, build boot_args and a device tree, and report how far
-      it gets before it prints, panics or faults.
+      it gets before it prints, panics or faults. With --mmio-trace, also
+      list every device window the guest touched and which QEMU region
+      answered it (build/vmapple-smoke/mmio.tsv).
 
 QEMU is found from --qemu, then SNAP_QEMU, then PATH; LLVM from --llvm, then
 SNAP_LLVM, then Homebrew's keg, then PATH.
@@ -136,9 +138,11 @@ def _monitor_ask(sock_path, commands, settle=0.4):
     return out.decode('utf-8', 'replace')
 
 
-def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, trace, timeout, cpu):
-    """Boot the stub at EL2 with one payload loaded at payload_pa. Returns
-    (serial_text, exit_code, timed_out, monitor_text)."""
+def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, trace, timeout, cpu,
+             extra=()):
+    """Boot the stub at EL2 with one payload loaded at payload_pa. `extra`
+    is appended to QEMU's arguments. Returns (serial_text, exit_code,
+    timed_out, monitor_text)."""
     import time
     import kcload                       # the vCPU count the device tree describes
     params = out / 'params.bin'
@@ -154,6 +158,7 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, trace, 
         '-device', f'loader,file={payload_bin},addr={payload_pa:#x},force-raw=on',
         '-device', f'loader,file={params},addr={PARAMS_PA:#x},force-raw=on',
         '-device', f'loader,addr={STUB_PA:#x},cpu-num=0',
+        *extra,
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     deadline = time.time() + timeout
@@ -225,9 +230,15 @@ def boot(args):
         print(f'SKIP: no kernelcache at {kc} (bring your own; never committed)')
         return 0
     payload, payload_pa, entry_pa, x0 = kcload.lay_out(kc, out)
+    mmio_log = out / 'mmio-trace.log'
+    extra = []
+    if args.mmio_trace:
+        mmio_log.unlink(missing_ok=True)
+        extra = ['-trace', 'memory_region_ops_read', '-trace', 'memory_region_ops_write',
+                 '-D', str(mmio_log)]
     text, code, timed_out, monitor_text = run_qemu(qemu, out, stub_bin, payload,
                                                    payload_pa, entry_pa, x0,
-                                                   args.trace, args.timeout, args.cpu)
+                                                   args.trace, args.timeout, args.cpu, extra)
     sys.stdout.write(text)
     print('--- smoke boot result ---')
     if timed_out:
@@ -239,6 +250,9 @@ def boot(args):
     if monitor_text:
         (out / 'monitor.txt').write_text(monitor_text)
     kcload.report_tidcp(text, monitor_text, out)
+    if args.mmio_trace:
+        kcload.report_mmio(mmio_log.read_text(errors='replace') if mmio_log.exists() else '',
+                           (out / 'devicetree.vma2smoke').read_bytes(), out)
     return kcload.report(text, out)
 
 
@@ -255,6 +269,9 @@ def main():
         s.add_argument('--timeout', type=int, default=60)
         if name == 'boot':
             s.add_argument('--kernelcache', required=True)
+            s.add_argument('--mmio-trace', action='store_true',
+                           help="trace QEMU's MMIO accesses and report which device windows "
+                                'the guest touched and what answered (gaokun3 Phase 3 P1)')
     a = ap.parse_args()
     return selftest(a) if a.cmd == 'selftest' else boot(a)
 

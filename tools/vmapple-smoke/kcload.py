@@ -18,9 +18,10 @@ stub drops into:
     to the vCPUs QEMU runs, the counter rate filled in, and the arm-io ranges,
     PL011 and GICv3 register windows moved from the VirtualMac platform map
     onto QEMU virt's (UART at 0x09000000, GICD at 0x08000000, GICR at
-    0x080A0000). The rest of the device map is left as the template has it;
-    the drivers for it are kext-stage and their probe results are part of
-    what the smoke test observes.
+    0x080A0000). The other devices keep their template offsets, so the new
+    ranges move them too, onto whatever QEMU virt has at the moved address.
+    That is not a model of them; `smoke.py boot --mmio-trace` reports which
+    of them the guest touched and what answered (report_mmio below).
   - a boot_args (revision 1, version 2, the 0x480-byte arm64 structure from
     pexpert/arm64/boot.h) above the kernel image, with the device tree, and
     topOfKernelData just past both, so XNU treats [kernel end .. top) as
@@ -33,6 +34,7 @@ gaokun3 port's Phase 0C smoke test, not a copy of any other loader.
 import json
 import os
 import pathlib
+import re
 import struct
 import sys
 
@@ -544,3 +546,120 @@ def report_tidcp(text, monitor_text, out=None):
     if out is not None:
         lines = [f'{n}\t{d}\t{c}\t{e:#x}' for n, d, c, e in rows]
         (out / 'tidcp.tsv').write_text('\n'.join(lines) + '\n')
+
+
+# ---- gaokun3 Phase 3 step P1: the device windows the guest touches -------
+#
+# _complete_dt_tree moves arm-io's ranges so the PL011 and the GICv3 land on
+# QEMU virt's own. Every other template window moves with them, onto
+# whatever QEMU has at the moved address. With QEMU 11.1.2 that is mostly
+# gpex's PCIe MMIO window, which answered every read with all-ones in the
+# 2026-10-27 trace, so a boot that gets past those devices has not shown
+# what they need. On the gaokun3 there is no such window: stage 2 is
+# default-deny, and a touch stops the run. This report turns QEMU's MMIO
+# trace into the list of windows touched, in first-touch order, with the
+# QEMU region that answered each.
+
+# The windows the smoke places on QEMU's model of the same device on
+# purpose, as (node, reg index) -> QEMU region-name prefix.
+MODELLED_BY_QEMU = {
+    ('uart0', 0): 'pl011',
+    ('gic', 0): 'gicv3_dist',
+    ('gic', 1): 'gicv3_redist',
+}
+
+# QEMU's log trace backend. The report needs the absolute physical address
+# in `addr`, which QEMU 11.1.2 prints: the PL011's data register traces as
+# addr 0x9000000. A QEMU that printed region offsets instead would show its
+# accesses as "no tree node" rather than hide them.
+_MMIO_TRACE_RE = re.compile(
+    r"memory_region_ops_(read|write) cpu \d+ mr 0x[0-9a-f]+ addr (0x[0-9a-f]+) "
+    r"value (0x[0-9a-f]+) size (\d+) name '([^']*)'")
+
+
+def parse_mmio_trace(text):
+    """[(direction, pa, value, size, region)] from QEMU's
+    memory_region_ops_read/write trace lines, in order. Other lines,
+    including QEMU's own log messages, are skipped."""
+    out = []
+    for line in text.splitlines():
+        m = _MMIO_TRACE_RE.search(line)
+        if m:
+            out.append((m[1], int(m[2], 16), int(m[3], 16), int(m[4]), m[5]))
+    return out
+
+
+def mmio_windows(dt):
+    """[(pa, size, node, index)] for each register window under /arm-io,
+    translated through arm-io's single ranges entry."""
+    armio = '/device-tree/arm-io'
+    ranges = dt.get(armio, 'ranges')
+    if ranges is None or len(ranges) != 24:
+        raise SystemExit('device tree: arm-io ranges is not one (child, parent, size) entry')
+    child, parent, span = struct.unpack('<QQQ', ranges)
+    out = []
+    for path in dt.children.get(armio, []):
+        reg = dt.get(path, 'reg') or b''
+        name = path.rsplit('/', 1)[1]
+        for i in range(len(reg) // 16):
+            off, size = struct.unpack_from('<QQ', reg, 16 * i)
+            if not child <= off < child + span:
+                raise SystemExit(f'device tree: {name} reg[{i}] {off:#x} is outside arm-io ranges')
+            out.append((parent + off - child, size, name, i))
+    return out
+
+
+def _all_ones(value, size):
+    # QEMU traces a 4-byte all-ones read as a 64-bit ~0.
+    return value in ((1 << (8 * size)) - 1, (1 << 64) - 1)
+
+
+def report_mmio(trace_text, dt_blob, out=None):
+    """Print each device window the guest touched, first touch first, and
+    whether QEMU's model of that device answered or something else did.
+    Accesses outside every tree window are grouped by 4 KiB page as "no
+    tree node": the guest found that address somewhere other than the tree.
+    Returns the rows, or None when the trace held no access at all."""
+    accesses = parse_mmio_trace(trace_text)
+    print('--- device windows the guest touched (QEMU MMIO trace, Phase 3 P1) ---')
+    if not accesses:
+        print('  UNKNOWN: no trace lines were read, so this run measured nothing')
+        return None
+    windows = mmio_windows(appledt.DeviceTree(dt_blob))
+    touched = {}
+    for n, (direction, pa, value, size, region) in enumerate(accesses):
+        hit = next((w for w in windows if w[0] <= pa < w[0] + w[1]), None)
+        if hit:
+            key, label, offset = (hit[2], hit[3]), f'{hit[2]}[{hit[3]}]', pa - hit[0]
+        else:
+            key, label, offset = ('', pa & ~0xfff), f'(no tree node) {pa & ~0xfff:#010x}', pa & 0xfff
+        row = touched.setdefault(key, {'label': label, 'first': n, 'first_offset': offset,
+                                       'first_direction': direction, 'reads': 0, 'writes': 0,
+                                       'regions': [], 'reads_all_ones': True})
+        row['reads' if direction == 'read' else 'writes'] += 1
+        if region not in row['regions']:
+            row['regions'].append(region)
+        if direction == 'read' and not _all_ones(value, size):
+            row['reads_all_ones'] = False
+    rows = sorted(touched.items(), key=lambda kv: kv[1]['first'])
+    report = []
+    for key, row in rows:
+        want = MODELLED_BY_QEMU.get(key)
+        modelled = want is not None and all(r.startswith(want) for r in row['regions'])
+        if modelled:
+            verdict = 'QEMU model'
+        else:
+            verdict = 'NOT MODELLED: answered by ' + ', '.join(row['regions'])
+            if row['reads'] and row['reads_all_ones']:
+                verdict += ', every read all-ones'
+        print(f"  {row['label']:<34} R{row['reads']:<6} W{row['writes']:<6} first "
+              f"{row['first_direction']} +{row['first_offset']:#x}  {verdict}")
+        report.append((row['label'], row['reads'], row['writes'], row['first_direction'],
+                       row['first_offset'], modelled, list(row['regions'])))
+    unmodelled = sum(1 for r in report if not r[5])
+    print(f'  {len(report)} windows touched, {unmodelled} not modelled by QEMU')
+    if out is not None:
+        lines = [f'{label}\t{reads}\t{writes}\t{d}\t{off:#x}\t{"model" if m else "NOT MODELLED"}\t'
+                 f'{",".join(regions)}' for label, reads, writes, d, off, m, regions in report]
+        (out / 'mmio.tsv').write_text('\n'.join(lines) + '\n')
+    return report
