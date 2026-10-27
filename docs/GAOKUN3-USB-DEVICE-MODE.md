@@ -991,7 +991,154 @@ with host evidence only.
 | Host: `python3 tools/test-el2qual.py` | PASS, 624633 checks (ASan+UBSan). Run 24's measured state gives exactly the word above, with only `TYPE` changed, `matches 1/212`, and 215 reads (`sGFSR`, `sCR0`, `S2CR(6)`, 212 `SMR`s), each allowed and none twice. Every refusal above, with nothing read for those decided from what the SMMU read already found. A second matching group, exact or by mask; an invalid or differently-addressed group that is not a match; a group past `NUMSMRG`; the matching group vanishing, widening its mask, or moving to another stream while a different group takes `0x820`; an SError raised by the plan's own reads. A fault injected on each read in turn. Unknown `S2CR` bits preserved; a different group index moving both address and name. 19 deliberately broken copies of `s2bypass.c` (each check above removed, including the `SMR(6)` re-check, which reproduces the first committed version; the other fields clobbered; fault planned instead of bypass; nothing to restore to; a hole before the last line) are each rejected |
 | Host: `python3 tools/test-el2qual-usb.py` | PASS, 25 tests: entries 8 to 13 unchanged, entry 14 `nopac nosmp exit-vhe usb-smmu-map usb-s2-bypass-plan`, and no entry carries a write option |
 | QEMU: all 27 configurations | PASS. `max-vhe-usb-s2bypass-plan` (entry 14's options): virt's SMMU reads all ones, so `SMMU BYPASS NOT MEASURED`, then `SMMU BYPASS PLAN ONLY, NOTHING WRITTEN`. The checker requires that last line always, and its self-test rejects a missing plan, a different outcome, the dropped last line, a line claiming a write, and an unasked plan |
-| gaokun3 | NOT RUN |
+| gaokun3 | run 25 (below): `PLANNED`, every precondition held, the exact word above; nothing written |
+
+#### Run 25, 2026-10-27: the plan holds on the machine
+
+From the `usb-read` stick: el2qual 12 `712af82c` from `9496bb9`, entry 14
+(`nopac nosmp exit-vhe usb-smmu-map usb-s2-bypass-plan`), with no SError.
+Everything through bank 126 is as runs 21 to 24; `GUSB3PIPECTL` read
+`0B0C1402`. Then:
+
+```
+SMMU BYPASS S2CR06 AT 15000C18 00000006 -> 00010006
+SMMU BYPASS MATCHES 1/212 MASK 0000 GFSR 00000000
+SMMU BYPASS PLAN ONLY, NOTHING WRITTEN
+```
+
+**Reading it.**
+- **Every precondition held on the gaokun3,** so the plan reached
+  `PLANNED`, and its word is the one the design names: `S2CR(6)` at
+  `0x15000C18`, `0x00000006` to `0x00010006`.
+  - The SMMU's `sCR0`, `S2CR(6)` and `SMR(6)` re-read unchanged.
+  - Exactly one of the 212 groups matches `0x820`, and it is group 6, with
+    mask 0.
+  - `sGFSR` is clear.
+  - No SError was pending before the check, and none after its 215 reads.
+- **The register's page is writable at EL2.** `AT S1E2W` of `0x15000000`
+  reported a Device identity translation with write permission. That is
+  the first evidence that a write could even be issued from where el2qual
+  runs. It is a statement about el2qual's own page tables only: whether
+  the SMMU accepts the write, or the security controller drops it, is not
+  shown, and only stage 2 of the plan can show it.
+- **Nothing was written.** The stage has no write path, and the last line
+  says so.
+
+**What it decides.** Stage 1 of the staged hardware plan is done: the
+plan's preconditions hold on the real machine, not only in the host
+model. Stage 2, writing the word and restoring it at once with no DMA in
+between, is the next step. It is the first SMMU write, and it needs its
+own design review and explicit go-ahead before any code for it exists.
+
+### Step 1i: stage 2, the first SMMU write (design and host model)
+
+Stage 2 asks one question, with the least change for the shortest time:
+**does the write to `S2CR(6)` take?** It writes the planned word, reads it
+back, writes the old word back at once, reads that back, and then
+invalidates the SMMU's TLBs as Linux's reset does. USB0 must be halted
+throughout, so no transaction of its stream can meet the bypass while it
+lasts.
+
+**Status: a host model only.** `probes/el2qual/s2bwrite.c` is not built
+into el2qual: `build.py` does not compile it and `el2qual.c` does not
+mention it. el2qual.efi is unchanged by it, `712af82c`, the binary run 25
+ran. It runs only in `tools/test-el2qual-s2bwrite.c`, against a fake SMMU.
+**Nothing has been written to the SMMU.**
+
+#### Before any write
+
+Each of these must hold, or nothing is written and the line says
+`REFUSED:` with the reason, then `NOTHING WRITTEN`:
+- a stage-1 result from this boot that is `PLANNED`, and consistent:
+  - it names the address of `S2CR(group)` in this SMMU's window;
+  - its old word translates (`TYPE` 0);
+  - its new word is the old one with only `TYPE` set to bypass;
+  - its restore word is the old one.
+
+  A result that was altered, or made for another SMMU, is not written
+  from;
+- no SError pending;
+- **USB0 halted:** xHCI `USBCMD.R/S` (bit 0) clear and `USBSTS.HCH` (bit 0)
+  set, at the operational registers (core + `CAPLENGTH`, `0x0A600020` on
+  the gaokun3). "No DMA" is the premise of the stage, and this is what
+  checks it. Offsets and bits are from Linux `drivers/usb/host/xhci.h`
+  (`struct xhci_op_regs`) and `xhci-ext-caps.h` (`XHCI_CMD_RUN`,
+  `XHCI_STS_HALT`), read as a reference. **These two registers have not
+  been read on the gaokun3 yet**: if UEFI left the controller running, the
+  stage refuses, and that is an answer too;
+- `S2CR(group)` still reads as the old word.
+
+#### The writes
+
+Every write the stage can make, in order, each at most once, each followed
+by a DSB before anything reads it back:
+
+| # | Register | Address | Value |
+| --- | --- | --- | --- |
+| 1 | `S2CR(6)` | `0x15000C18` | `0x00010006`, the bypass |
+| 2 | `S2CR(6)` | `0x15000C18` | `0x00000006`, the restore |
+| 3 | `TLBIALLH` | `0x1500006C` | `0xFFFFFFFF` |
+| 4 | `TLBIALLNSNH` | `0x15000068` | `0xFFFFFFFF` |
+| 5 | `sTLBGSYNC` | `0x15000070` | `0xFFFFFFFF`, then `sTLBGSTATUS` polled |
+
+Rows 3 to 5 and the dummy value are Linux's (`arm-smmu.c`'s reset and
+`__arm_smmu_tlb_sync`, `QCOM_DUMMY_VAL` −1). There is no invalidation
+between 1 and 2: USB0 is halted, so nothing uses the bypass, and the
+question is answered by the register's read-back, not by a transaction.
+The one invalidation at the end drops anything the SMMU cached while the
+bypass stood.
+
+The sync poll has two bounds: about a second of counter ticks, as Linux
+allows, and 2^20 polls in case the counter does not advance.
+
+#### Outcomes
+
+| Outcome | Writes | Meaning | Left on the machine |
+| --- | --- | --- | --- |
+| `DONE: TOOK AND UNDONE` | 5 | the write takes and is undone; the SMMU reported nothing | as before |
+| `DROPPED: NOT TAKEN` | 1 | read back as the old word: the security controller or the secure world owns `S2CR`, and silently ignored the write. Nothing else is written | as before |
+| `UNEXPECTED READ BACK, RESTORED` | 5 | read back as neither word | as before (restore read back) |
+| `FAULT ESR …, RESTORED` | 5 | the store or its read-back raised an exception; the restore still followed, since the bypass may have taken anyway | as before |
+| `RESTORE FAILED: POWER CYCLE` | 2 | the restore did not read back as the old word. No more writes: an unknown register state is not improved by guessing | **USB0's stream may stay bypassed until a power cycle**, which reloads the firmware's SMMU setup |
+| `RESTORED, SYNC INCOMPLETE` | 3 to 5 | restored, but the invalidation faulted or `sTLBGSTATUS` never cleared | as before, apart from TLB contents |
+| `RESTORED, GLOBAL FAULT` | 5 | restored and synced, but `sGFSR` is set | as before; the fault is recorded |
+| `RESTORED, SERROR PENDING` | 5 | restored and synced, but an SError is pending | as before |
+
+Even the worst case, a failed restore, changes only how USB0's stream is
+treated, while USB0 is halted. Nothing persists: the SMMU's registers are
+volatile.
+
+The lines:
+
+```
+SMMU WRITE S2CR06 00000006 -> 00010006 READ BACK <8 hex|FAULT|NOT DONE>
+SMMU WRITE RESTORE 00000006 READ BACK <8 hex|FAULT|NOT DONE>
+SMMU WRITE TLBI SYNC <OK|TIMEOUT|FAULT> POLLS <n> GFSR <8 hex>
+SMMU WRITE <outcome>, WRITES <n>
+```
+
+A line that does not apply to the outcome is left out, with no hole
+before the last. `NOT DONE` means the store before it faulted, so it was
+not read back.
+
+#### What a go-ahead would cover
+
+Two separate decisions, in order:
+1. **Wiring, code only.** Build `s2bwrite.c` into el2qual only under a
+   compile-time gate (`EL2Q_S2B_WRITE`, off by default, per AGENTS.md
+   rule 3), so the default build stays byte-identical to `712af82c`. Then
+   a load option runs stage 1 and stage 2 back to back in one boot, plus a
+   QEMU configuration for the gated build (virt's SMMU reads all ones, so
+   the plan is `NOT MEASURED` and nothing is written) and a stick entry 15
+   built only from the gated binary.
+2. **The hardware run**, supervised, on AC power, photographed: the first
+   write to the SMMU.
+
+| Check | Result, 2026-10-27 |
+| --- | --- |
+| Host: `python3 tools/test-el2qual.py` | PASS, 624908 checks (ASan+UBSan). Against a fake SMMU that logs every access: run 25's plan gives exactly the five writes above, in order, each followed by a barrier, and each `S2CR` store read back right after it. The register ends at its old value, and USB0's halt is read before the first store. A dropped write gives 1 write and no restore. A corrupted read-back is restored. A bypass store that faults, with or without taking effect, and a faulting read-back are each restored. A restore that is dropped, corrupted, faults on its store or faults on its read-back stops at 2 writes. The sync is bounded by the counter, and by the poll limit when the counter is frozen. Faulting invalidate stores and status reads, a global fault, an unreadable `sGFSR`, and an SError during the writes are each reported. Every refusal (no plan, plan not `PLANNED`, another address, another word, a non-translating old word, another restore, group 255, another SMMU, a missing callback, a pending SError, USB0 running, not halted or unreadable, `S2CR` moved or unreadable) makes no write. 19 deliberately broken copies of `s2bwrite.c` are each rejected; the mutation runner now treats a copy that hangs as caught, since one removes the poll bound |
+| el2qual.efi | Unchanged, `712af82c`: `s2bwrite.c` is neither built nor referenced, so there is nothing new for QEMU to run |
+| gaokun3 | NOT RUN; nothing written |
 
 ### Step 2: decided by step 1
 
@@ -1046,6 +1193,12 @@ with host evidence only.
   harm and in one level-2 table, the one run 22 read if the arena lands in
   the same GiB. A hang or reset there leaves its own progress line on the
   screen, `USB: STAGE-2 SURVEY, READ ONLY. A HANG OR RESET HERE IS IT`.
+- **Step 1i is not on any stick.** Its model is built only into the host
+  tests; el2qual.efi does not contain it. Its first hardware run would be
+  the first SMMU write, after two separate go-aheads (wiring behind a
+  compile-time gate, then the supervised run). Even its worst outcome, a
+  failed restore, leaves only USB0's stream bypassed while USB0 is halted,
+  until a power cycle.
 - **Step 1h writes nothing, and cannot.** `s2bypass.c` has no write
   callback. Its reads are the SMMU global registers earlier steps already
   read, plus `sGFSR` and the remaining `SMR`s, all in the same page. The

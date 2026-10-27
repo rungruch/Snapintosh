@@ -366,6 +366,7 @@ between.
 | 22 | 2026-10-27 | usb-read, entry 11 (`nopac nosmp exit-vhe usb-smmu-map usb-s2-walk`) | `1378959f` (`9214752`, el2qual 9) | PASS, read only (writes only el2qual's own page tables): as run 21 through bank 126, then the stage-2 walk of a 1 MiB arena at `0xEFD41000`: `READS 3`, `RW 0 LIMITED 0 MOVED 0 FAULTS 256`. The level-1 descriptor was a table, and both level-2 descriptors under it read 0 (invalid), so stage 2 does not map the arena; the tables read without a fault; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-22-2026-10-27-stage-2-does-not-map-the-arena)) |
 | 23 | 2026-10-27 | usb-read, entry 12 (`nopac nosmp exit-vhe usb-smmu-map usb-s2-survey`) | `76057a70` (`4c0f474`, el2qual 10) | PASS, read only (writes only el2qual's own page tables): as run 22 through the walk (arena `0xEFD41000` again, `FAULTS 256`), then the survey, 576 reads: level-1 tables for GiBs 0 to 3 and 16 to 31, nothing else; under GiB 3 (table `0xB76B1000`) 18 identity read-write 2 MiB blocks, `0xC6200000`–`0xC85FFFFF`, starting at the splash framebuffer, and every other entry invalid; `GUSB3PIPECTL 0B0C1402`; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-23-2026-10-27-identity-only-around-the-splash-framebuffer)) |
 | 24 | 2026-10-27 | usb-read, entry 13 (`nopac nosmp exit-vhe usb-smmu-map usb-s2-fixed`) | `45a95b3d` (`50fb2ad`, el2qual 11) | PASS, read only (writes only el2qual's own page tables): as run 23 through bank 126, then the walk of the fixed range `0xC8000000`–`0xC80FFFFF`: `READS 2`, `RW 256`, leaf `00000000C80004FD` (a 2 MiB identity block, Normal write-back, read and write, non-shareable); UEFI's memory map over `0xC6200000`–`0xC85FFFFF`: one descriptor, `RESERVED` `0xC6200000`–`0xC8600000`, attributes `100F`, exactly the stage-2 identity region; `GUSB3PIPECTL 0B081402`; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-24-2026-10-27-the-region-is-firmware-reserved)) |
+| 25 | 2026-10-27 | usb-read, entry 14 (`nopac nosmp exit-vhe usb-smmu-map usb-s2-bypass-plan`) | `712af82c` (`9496bb9`, el2qual 12) | PASS, read only (writes only el2qual's own page tables; nothing to the SMMU): as run 24 through bank 126, then the S2CR bypass plan: `S2CR06 AT 15000C18 00000006 -> 00010006`, `MATCHES 1/212 MASK 0000 GFSR 00000000`, `PLAN ONLY, NOTHING WRITTEN`. Every precondition held, including the register's page writable at EL2 (`AT S1E2W`); `GUSB3PIPECTL 0B0C1402`; no SError ([GAOKUN3-USB-DEVICE-MODE.md](GAOKUN3-USB-DEVICE-MODE.md#run-25-2026-10-27-the-plan-holds-on-the-machine)) |
 
 Runs 4 to 7 were matched to their entries by what the photographs show
 (CPU count, and whether PAuth ran); the order they were run in was not
@@ -378,7 +379,8 @@ run 16's arrangement. Run 21 was matched by its `SMMU MAP` line, which only
 entry 10 prints, and run 22 by its `SMMU WALK` lines, which only entry 11
 prints, and run 23 by its `SMMU SURVEY` lines, which only entry 12
 prints, and run 24 by its `(FIXED)` and `UEFI MAP` lines, which only
-entry 13 prints. Every one ended in a complete report: no hang, no reboot, no
+entry 13 prints, and run 25 by its `SMMU BYPASS` lines, which only entry
+14 prints. Every one ended in a complete report: no hang, no reboot, no
 unexpected exception.
 
 Full SHA-256 of run 3's `el2qual.efi`:

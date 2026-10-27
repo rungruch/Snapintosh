@@ -347,13 +347,23 @@ q1n1 has no transport to the Mac yet.
     reserves the whole region, `0xC6200000`–`0xC8600000`, as one
     `RESERVED` descriptor, exactly the span stage 2 maps
     ([run 24](GAOKUN3-USB-DEVICE-MODE.md#run-24-2026-10-27-the-region-is-firmware-reserved)).
-  - **Next:** the bypass for stream `0x820` is designed
+  - **The bypass for stream `0x820` is designed**
     ([step 1h](GAOKUN3-USB-DEVICE-MODE.md#step-1h-the-s2cr-bypass-design-el2qual-12-entry-14)):
     one field of `S2CR(6)` at `0x15000C18`, `0x00000006` to `0x00010006`,
-    which changes USB0's stream alone. el2qual 12's `usb-s2-bypass-plan`
-    (stick entry 14) checks every precondition on the machine and prints
-    the word; it writes nothing and cannot. The write itself is a separate
-    stage that does not exist yet and needs its own go-ahead.
+    which changes USB0's stream alone.
+  - **Run 25:** el2qual 12's `usb-s2-bypass-plan` (stick entry 14) found
+    every precondition holding on the machine and planned exactly that
+    word, including the register's page writable at EL2; it wrote nothing
+    ([run 25](GAOKUN3-USB-DEVICE-MODE.md#run-25-2026-10-27-the-plan-holds-on-the-machine)).
+  - **Stage 2 is designed, as a host model only**
+    ([step 1i](GAOKUN3-USB-DEVICE-MODE.md#step-1i-stage-2-the-first-smmu-write-design-and-host-model)).
+    It writes the word, reads it back and restores it at once, then
+    invalidates as Linux does, with USB0 confirmed halted. It is five
+    writes at most, and each outcome is defined, including a failed
+    restore (power cycle). It is not built into el2qual.
+  - **Next, to be decided:** wiring stage 2 into el2qual behind a
+    compile-time gate (code only), and then, separately, the supervised
+    hardware run that would be the first SMMU write.
 - **q1n1's foothold on the gaokun3: done** ([runs 14 and
   15](#runs-14-and-15-2026-10-26-q1n1s-first-boot)), with the device-tree
   framebuffer and the VHE exit. q1n1 `docs/GAOKUN3-DT-FRAMEBUFFER.md` has
