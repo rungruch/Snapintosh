@@ -120,6 +120,10 @@ class ClassicLayout:
     # Device-tree nodes the completed tree leaves out (Phase 3 decision 5,
     # option b): a VM without that device.
     drop_nodes: Tuple[str, ...] = ()
+    # Refuse guest memory inside a device window of the completed tree
+    # (classic_refuse_window_overlap). Only the Phase 0C smoke's layout
+    # opts out, to stay as it was committed.
+    check_device_windows: bool = True
 
     @property
     def gicr_size(self):
@@ -177,23 +181,31 @@ QEMU_CLASSIC_LAYOUT = ClassicLayout(
     panic_pa=0x61004000, panic_size=0x100000, panic_log_size=0x80000,
     timebase_hz=1_000_000_000, guest_cpus=1,
     armio_parent_base=0x08000000, uart_off=0x01000000, gicd_off=0x00000000,
-    gicr_off=0x000A0000, cmdline='-v serial=3 -noprogress').validate()
+    gicr_off=0x000A0000, cmdline='-v serial=3 -noprogress',
+    # Kept as the Phase 0C smoke ran it. Its RAM overlaps the moved PCIe
+    # ECAM window (0x38000000-0x47ffffff), which the window check would
+    # refuse; that boot reaches the root-mount wait regardless (OBSERVED),
+    # most likely because the overlap ends below the kernel's page tables.
+    check_device_windows=False).validate()
 
 
 # QEMU virt with the Route B monitor (Phase 3 P3): the tree keeps the
 # VirtualMac template's own physical map (arm-io parent 0x10000000), so the
 # guest's device IPAs are the template addresses and every one of them is a
 # monitor model behind stage 2, never a QEMU device. The paravirtual
-# devices with nodes are left out of the tree (decision 5, option b,
-# recommended; the decision itself is the owner's and still open): the
+# devices with nodes are left out of the tree (decision 5, option b): the
 # paravirtual GPU and IOSurface mapper, the AES engine, and the avp,*
 # platform devices other than the published-contract RTC and buttons,
-# which are modelled. The two fixed addresses have no node to drop; the
-# monitor stops on them by default (option c).
+# which are modelled. AppleVirtualPlatform's fixed addresses have no node;
+# monitor.c answers them as decision 5 has it. Guest RAM sits at
+# 0x81004000, above the template's device windows (the PCIe ECAM ends at
+# 0x50000000 and its memory window at 0x7fff0000 as the template writes
+# it); QEMU's vmapple machine likewise puts RAM above them, at 0x70000000.
+# RAM inside the ECAM window made the kernel panic in pmap_enter_pv.
 QEMU_MONITOR_LAYOUT = ClassicLayout(
-    name='qemu-virt-monitor', ram_base=0x45004000, mem_size=0x1C000000,
-    dt_pa=0x4A000000, boot_args_pa=0x4A040000, top_of_kernel_data=0x4A050000,
-    panic_pa=0x61004000, panic_size=0x100000, panic_log_size=0x80000,
+    name='qemu-virt-monitor', ram_base=0x81004000, mem_size=0x1C000000,
+    dt_pa=0x86000000, boot_args_pa=0x86040000, top_of_kernel_data=0x86050000,
+    panic_pa=0x9D004000, panic_size=0x100000, panic_log_size=0x80000,
     timebase_hz=1_000_000_000, guest_cpus=1,
     armio_parent_base=0x10000000, uart_off=0x10010000, gicd_off=0x00000000,
     gicr_off=0x00010000, cmdline='-v serial=3 -noprogress',
@@ -352,13 +364,62 @@ def classic_complete_dt(dt, layout, entropy):
            struct.pack('<QQQQ', layout.gicd_off, 0x10000, layout.gicr_off,
                        layout.gicr_size) + gic[32:])
     classic_drop_nodes(dt, layout.drop_nodes)
+    if layout.check_device_windows:
+        classic_refuse_window_overlap(dt, layout)
     return dt.serialize(), resolved
 
 
+def classic_device_windows(dt, armio_parent_base):
+    """The physical windows the completed tree gives devices, as
+    [(base, size, name)]: every arm-io child's reg, plus the PCIe node's
+    memory ranges. arm-io's #address-cells and #size-cells are 2, so a
+    child address is a little-endian u64 offset from armio_parent_base.
+    The PCIe ranges records are 28 bytes: a 3-cell PCI address, a 2-cell
+    arm-io address and a 2-cell size. The template's size, 0x2fff0000, is
+    taken as written; QEMU's vmapple machine uses 0x1fff0000, so this is
+    the larger reading."""
+    armio = '/device-tree/arm-io'
+    windows = []
+    for path in dt.children.get(armio, []):
+        reg = dt.get(path, 'reg')
+        name = path.rsplit('/', 1)[-1]
+        for i in range(0, len(reg or b'') // 16 * 16, 16):
+            child, size = struct.unpack_from('<QQ', reg, i)
+            windows.append((armio_parent_base + child, size, name))
+        if name == 'pcie':
+            ranges = dt.get(path, 'ranges') or b''
+            for i in range(0, len(ranges) // 28 * 28, 28):
+                parent, size = struct.unpack_from('<QQ', ranges, i + 12)
+                windows.append((armio_parent_base + parent, size, 'pcie ranges'))
+    return windows
+
+
+def classic_refuse_window_overlap(dt, layout):
+    """Refuse a layout whose guest memory lies inside a device window. The
+    kernel maps device windows as it finds them; one that covers RAM maps
+    pages the kernel also manages, and the VirtualMac kernel panicked in
+    pmap_enter_pv when the QEMU layout's RAM sat inside the PCIe ECAM
+    window (2026-10-28, OBSERVED)."""
+    memory = [(layout.ram_base, layout.mem_size, 'guest DRAM'),
+              (layout.panic_pa, layout.panic_size, 'panic region')]
+    if layout.video is not None:
+        vbase, _, vheight, vstride, _ = layout.video
+        memory.append((vbase, vheight * vstride, 'framebuffer'))
+    if layout.monitor_band is not None:
+        bbase, _, brows, bstride = layout.monitor_band
+        memory.append((bbase, brows * bstride, 'monitor band'))
+    for mbase, msize, mname in memory:
+        for wbase, wsize, wname in classic_device_windows(dt, layout.armio_parent_base):
+            if mbase < wbase + wsize and wbase < mbase + msize:
+                raise ValueError(f'classic layout: {mname} {mbase:#x}+{msize:#x} overlaps the '
+                                 f'{wname} window {wbase:#x}+{wsize:#x}')
+
+
 # The QEMU split console (Phase 3 P4): tools/vmapple-smoke/layout.h's
-# MON_FB_* constants must agree. 576 MiB of QEMU RAM ends at 0x64000000;
-# the framebuffer sits above the panic chunk, outside reported DRAM.
-QEMU_SPLIT_SCREEN = (0x62000000, 1024, 600, 4096)
+# MON_FB_* constants must agree. The monitor run's 1536 MiB of QEMU RAM
+# ends at 0xA0000000; the framebuffer sits above the panic chunk, outside
+# reported DRAM.
+QEMU_SPLIT_SCREEN = (0x9E000000, 1024, 600, 4096)
 QEMU_MONITOR_ROWS = 88
 
 

@@ -78,6 +78,21 @@ _start:
 	// default-deny, the virtual GICv3 interface, and physical IRQ routing
 	// to EL2. Without the flag this stub is exactly the Phase 0C smoke.
 	tbz	x22, #1, 1f
+	// The guest RAM stage 2 maps: 2 MiB aligned, non-empty, inside GiB 1
+	// and 2, the only ones monitor_setup has L2 tables for.
+	ldr	x0, [x19, #PARAM_S2_LO]
+	ldr	x1, [x19, #PARAM_S2_HI]
+	orr	x2, x0, x1
+	tst	x2, #0x1fffff
+	b.ne	param_bad
+	cmp	x0, x1
+	b.hs	param_bad
+	mov	x2, #0x40000000
+	cmp	x0, x2
+	b.lo	param_bad
+	mov	x2, #0xc0000000
+	cmp	x1, x2
+	b.hi	param_bad
 	ldr	x0, =pt_flag
 	str	x22, [x0]
 	bl	monitor_setup
@@ -577,7 +592,18 @@ smoke_exit:
  * That is default-deny: a device the monitor does not model is a named
  * stop, and QEMU's own devices are unreachable at their physical
  * addresses because the guest's IPAs are the VirtualMac template's. */
+/* The L2 table for IPA x1 in GiB 1 or 2 (x1 checked by _start); x0 out,
+ * x4 and x5 clobbered, x30 kept for the caller's own return. */
+s2_l2_for:
+	ldr	x0, =s2_l2
+	ldr	x5, =s2_l2b
+	mov	x4, #0x80000000
+	cmp	x1, x4
+	csel	x0, x5, x0, hs
+	ret
+
 monitor_setup:
+	mov	x8, x30				// s2_l2_for is a leaf; keep our return
 	ldr	x0, =s2_l0
 	ldr	x1, =s2_l1
 	orr	x1, x1, #3			// table descriptor
@@ -586,6 +612,9 @@ monitor_setup:
 	ldr	x1, =s2_l2
 	orr	x1, x1, #3
 	str	x1, [x0, #8]			// L1 entry 1: 0x40000000..0x7fffffff
+	ldr	x1, =s2_l2b
+	orr	x1, x1, #3
+	str	x1, [x0, #16]			// L1 entry 2: 0x80000000..0xbfffffff
 	// Debug passthrough (PARAM_FLAG_PASSTHRU in the setup word the caller
 	// leaves in x22, saved to pt_flag by _start): map QEMU's GIC and PL011
 	// blocks as device memory in GiB 0, at their physical addresses.
@@ -655,17 +684,21 @@ monitor_setup:
 	add	x6, x6, #1
 	subs	x4, x4, #1
 	b.ne	5b
-2:
-	ldr	x0, =s2_l2
-	mov	x1, #0x44000000
-1:	mov	x2, #0x7fd			// block, AF, SH, WB, S2AP RW
+	// Guest RAM, [PARAM_S2_LO, PARAM_S2_HI) as the harness computed it from
+	// the layout (the payload, the reported DRAM and the panic chunk),
+	// 2 MiB blocks in GiB 1 (s2_l2) or GiB 2 (s2_l2b). _start checked the
+	// range lies inside those two GiB.
+2:	ldr	x9, =PARAMS_PA
+	ldr	x1, [x9, #PARAM_S2_LO]
+	ldr	x10, [x9, #PARAM_S2_HI]
+1:	bl	s2_l2_for			// x0: the L2 table holding x1
+	mov	x2, #0x7fd			// block, AF, SH, WB, S2AP RW
 	orr	x2, x1, x2
 	lsr	x3, x1, #21
 	and	x3, x3, #0x1ff
 	str	x2, [x0, x3, lsl #3]
 	add	x1, x1, #0x200000
-	ldr	x2, =0x61200000
-	cmp	x1, x2
+	cmp	x1, x10
 	b.lo	1b
 	// The split console (PARAM_FLAG_FRAMEBUFFER): one 2 MiB block maps the
 	// guest's 512 framebuffer rows; the monitor's band below stays absent,
@@ -673,14 +706,15 @@ monitor_setup:
 	ldr	x0, =pt_flag
 	ldr	x0, [x0]
 	tbz	x0, #8, 6f
-	ldr	x0, =s2_l2
 	ldr	x1, =MON_FB_PA
+	bl	s2_l2_for
 	mov	x2, #0x7fd			// block, AF, SH, WB, S2AP RW
 	orr	x2, x1, x2
 	lsr	x3, x1, #21
 	and	x3, x3, #0x1ff
 	str	x2, [x0, x3, lsl #3]
-6:	dsb	sy
+6:	mov	x30, x8
+	dsb	sy
 	ldr	x0, =0x53490			// VTCR: 48-bit IPA/PA, L0 start, WB
 	msr	VTCR_EL2, x0
 	ldr	x0, =s2_l0
@@ -871,6 +905,8 @@ s2_l0:
 s2_l1:
 	.space 4096
 s2_l2:
+	.space 4096
+s2_l2b:
 	.space 4096
 s2_l2dev:
 	.space 4096

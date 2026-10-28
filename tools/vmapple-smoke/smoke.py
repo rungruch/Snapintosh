@@ -48,7 +48,7 @@ FAULT_PA = 0x43001000
 MINIKERNEL_PA = 0x45000000
 TIDCP_LOG_PA = 0x43002000
 TIDCP_MAX = 64
-SMOKE_PARAMS_MAGIC = 0x564D41504C450001
+SMOKE_PARAMS_MAGIC = 0x564D41504C450002
 SMOKE_FAULT_MAGIC = 0x5641554C54
 PARAM_FLAG_TRACE = 1
 PARAM_FLAG_MONITOR = 2
@@ -115,10 +115,21 @@ def build_image(llvm, out, src, linked, base):
     return elf, binf
 
 
-def params_blob(entry, x0, flags):
-    b = bytearray(0x20)
-    struct.pack_into('<QQQQ', b, 0, entry, x0, flags, SMOKE_PARAMS_MAGIC)
+def params_blob(entry, x0, flags, s2_range=(0, 0)):
+    """The stub's parameter page (layout.h smoke_params). s2_range is the
+    guest RAM the monitor's stage 2 maps; the stub refuses an empty or
+    misaligned one only when the monitor runs."""
+    b = bytearray(0x30)
+    struct.pack_into('<QQQQQQ', b, 0, entry, x0, flags, SMOKE_PARAMS_MAGIC, *s2_range)
     return bytes(b)
+
+
+def s2_range(layout):
+    """The 2 MiB-aligned span of guest RAM stage 2 must map: from the
+    block holding ram_base through the panic chunk."""
+    lo = layout.ram_base & ~0x1FFFFF
+    hi = (layout.panic_pa + layout.panic_size + 0x1FFFFF) & ~0x1FFFFF
+    return lo, hi
 
 
 def _monitor_ask(sock_path, commands, settle=0.4):
@@ -154,7 +165,7 @@ def _monitor_ask(sock_path, commands, settle=0.4):
 
 
 def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, timeout, cpu,
-             extra=(), probe_cmds=(), stop_cmds=()):
+             extra=(), probe_cmds=(), stop_cmds=(), memory='576M', s2=(0, 0)):
     """Boot the stub at EL2 with one payload loaded at payload_pa. `extra`
     is appended to QEMU's arguments. With `stop_cmds` [(command, (file,
     size))], the stub halts on a named stop instead of exiting (the split
@@ -165,12 +176,12 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, 
     import time
     import kcload                       # the vCPU count the device tree describes
     params = out / 'params.bin'
-    params.write_bytes(params_blob(entry_pa, x0, flags))
+    params.write_bytes(params_blob(entry_pa, x0, flags, s2))
     mon = out / 'qemu-monitor.sock'
     mon.unlink(missing_ok=True)
     cmd = [
         qemu, '-M', 'virt,virtualization=on,gic-version=3', '-cpu', cpu,
-        '-m', '576M', '-smp', str(kcload.GUEST_CPUS), '-display', 'none', '-serial', 'stdio', '-no-reboot',
+        '-m', memory, '-smp', str(kcload.GUEST_CPUS), '-display', 'none', '-serial', 'stdio', '-no-reboot',
         '-semihosting-config', 'enable=on,target=native',
         '-monitor', f'unix:{mon},server,nowait',
         '-device', f'loader,file={stub_bin},addr={STUB_PA:#x},force-raw=on',
@@ -321,7 +332,12 @@ def boot(args):
     text, code, timed_out, monitor_text = run_qemu(qemu, out, stub_bin, payload,
                                                    payload_pa, entry_pa, x0,
                                                    flags, args.timeout, args.cpu, extra,
-                                                   probe_cmds, stop_cmds)
+                                                   probe_cmds, stop_cmds,
+                                                   # The monitor layout's RAM and screen
+                                                   # reach 0x9e258000; QEMU RAM starts at
+                                                   # 0x40000000.
+                                                   memory='1536M' if args.monitor else '576M',
+                                                   s2=s2_range(layout) if args.monitor else (0, 0))
     sys.stdout.write(text)
     print('--- smoke boot result ---')
     if timed_out:

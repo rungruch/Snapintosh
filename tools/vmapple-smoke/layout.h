@@ -22,12 +22,16 @@
  *   +0x00 entry   guest-physical entry point
  *   +0x08 x0      value handed to the guest in x0 (boot_args PA, or 0)
  *   +0x10 flags   bit0: print EL2 hypercall breadcrumbs to the UART
- *   +0x18 magic   SMOKE_PARAMS_MAGIC, so the stub refuses a blank page */
-#define SMOKE_PARAMS_MAGIC 0x564d41504c450001ull  /* "VMAPLE" + version 1 */
+ *   +0x18 magic   SMOKE_PARAMS_MAGIC, so the stub refuses a blank page
+ *   +0x20 s2_lo, +0x28 s2_hi  the guest RAM the monitor's stage 2 maps,
+ *                 2 MiB aligned, inside 0x40000000..0xc0000000 */
+#define SMOKE_PARAMS_MAGIC 0x564d41504c450002ull  /* "VMAPLE" + version 2 */
 #define PARAM_ENTRY  0x00
 #define PARAM_X0     0x08
 #define PARAM_FLAGS  0x10
 #define PARAM_MAGIC  0x18
+#define PARAM_S2_LO  0x20
+#define PARAM_S2_HI  0x28
 #define PARAM_FLAG_TRACE 1
 /* bit1: run as the Route B monitor (Phase 3 P3): stage 2 default-deny,
  * virtual GICv3, device models in monitor.c. bit2 is unused: it was the
@@ -50,13 +54,13 @@
  * instead of exiting, so the harness can read the screen. */
 #define PARAM_FLAG_FRAMEBUFFER 256
 
-/* The QEMU framebuffer for the split console: guest RAM above the panic
- * chunk (0x61104000) and below QEMU's 576 MiB end (0x64000000), so it is
- * neither reported DRAM nor firmware-carved memory. A 1024-pixel row is
+/* The QEMU framebuffer for the split console: above the panic chunk
+ * (0x9d104000) and below the monitor run's 1536 MiB end (0xa0000000), so
+ * it is neither reported DRAM nor firmware-carved memory. A 1024-pixel row is
  * exactly one 4 KiB page, and the guest's 512 rows are one 2 MiB stage 2
  * block; the 88 rows below it are the monitor's. No suffix: stub.S uses
  * these too. probes/classicload.py's QEMU_SPLIT_SCREEN must agree. */
-#define MON_FB_PA         0x62000000
+#define MON_FB_PA         0x9e000000
 #define MON_FB_WIDTH      1024
 #define MON_FB_STRIDE     4096
 #define MON_FB_GUEST_ROWS 512

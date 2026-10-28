@@ -189,11 +189,19 @@ def test_gaokun3_layout():
                   monitor_rows=100), 'a split that does not fall on a page is refused')
     qemu = classicload.split_screen(classicload.QEMU_MONITOR_LAYOUT,
                                     classicload.QEMU_SPLIT_SCREEN, classicload.QEMU_MONITOR_ROWS)
-    check(qemu.video == (0x62000000, 1024, 512, 4096, 32)
-          and qemu.monitor_band == (0x62200000, 1024, 88, 4096),
+    check(qemu.video == (0x9E000000, 1024, 512, 4096, 32)
+          and qemu.monitor_band == (0x9E200000, 1024, 88, 4096),
           'the QEMU split matches tools/vmapple-smoke/layout.h (512 + 88 rows)')
     import re
     header = (ROOT / 'tools' / 'vmapple-smoke' / 'layout.h').read_text()
+    import smoke
+    c_side = {k: int(v.rstrip('ull'), 0) for k, v in
+              re.findall(r'#define (SMOKE_PARAMS_MAGIC|PARAM_FLAG_\w+|PARAMS_PA|FAULT_PA|STUB_PA)'
+                         r'\s+(0x[0-9a-fA-F]+(?:ull)?|\d+)', header)}
+    py_side = {k: getattr(smoke, k) for k in c_side if hasattr(smoke, k)}
+    check(c_side and py_side == {k: c_side[k] for k in py_side} and
+          set(k for k in c_side if k.startswith('PARAM_FLAG_')) <= set(py_side),
+          'smoke.py and layout.h agree on the parameter magic, every flag and the stub addresses')
     mon = {k: int(v, 0) for k, v in re.findall(r'#define (MON_FB_\w+)\s+(0x[0-9a-fA-F]+|\d+)', header)}
     base, width, height, stride = classicload.QEMU_SPLIT_SCREEN
     check(mon == {'MON_FB_PA': base, 'MON_FB_WIDTH': width, 'MON_FB_STRIDE': stride,
@@ -201,12 +209,60 @@ def test_gaokun3_layout():
                   'MON_FB_BAND_ROWS': classicload.QEMU_MONITOR_ROWS},
           'layout.h and classicload describe the same QEMU screen')
     check(refuses(classicload.split_screen, classicload.QEMU_MONITOR_LAYOUT,
-                  (0x60000000, 1024, 600, 4096), 88),
+                  (0x90000000, 1024, 600, 4096), 88),
           'a framebuffer inside guest DRAM is refused')
     check(refuses(classicload.derive_gaokun3_layout, [(0x80000000, 16 << 30)]),
           'a fully reserved DRAM is refused')
     check(refuses(classicload.derive_gaokun3_layout, GAOKUN3_RESERVED, 0x80000000 +
                   (16 << 30), 32 << 30), 'a guest larger than the DRAM is refused')
+
+
+def windowed_tree():
+    """The synthetic tree plus a PCIe node encoded as the template's:
+    ECAM at arm-io 0x30000000 (256 MiB), a 28-byte memory range at arm-io
+    0x40000000 of 0x2fff0000 bytes."""
+    f = _fixtures
+    uart = f.node('uart0', [f.prop('reg', struct.pack('<QQ', 0, 0x1000))])
+    gic = f.node('gic', [f.prop('reg', bytes(48))])
+    pcie = f.node('pcie', [f.prop('reg', struct.pack('<QQ', 0x30000000, 0x10000000)),
+                           f.prop('ranges', struct.pack('<III', 0x02000000, 0x50000000, 0)
+                                  + struct.pack('<QQ', 0x40000000, 0x2fff0000))])
+    armio = f.node('arm-io', [f.prop('ranges', bytes(24))], [uart, gic, pcie])
+    chosen = f.node('chosen', [f.prop('random-seed', bytes(256))])
+    cpus = f.node('cpus', [], [f.cpu(0)])
+    pram = f.node('pram', [f.prop('reg', bytes(16))])
+    return f.node('device-tree', [f.prop('clock-frequency', struct.pack('<I', 0))],
+                  [chosen, armio, cpus, pram])
+
+
+def test_device_windows():
+    from dataclasses import replace
+    dt = appledt.DeviceTree(windowed_tree())
+    windows = classicload.classic_device_windows(dt, 0x10000000)
+    check((0x40000000, 0x10000000, 'pcie') in windows, 'the PCIe ECAM window is at 0x40000000')
+    check((0x50000000, 0x2fff0000, 'pcie ranges') in windows,
+          'the PCIe memory window is read from the 28-byte ranges record')
+    layout = replace(classicload.QEMU_MONITOR_LAYOUT, drop_nodes=())
+    blob, _ = classicload.classic_complete_dt(appledt.DeviceTree(windowed_tree()), layout,
+                                              lambda n: b'\xa5' * n)
+    check(blob, 'the QEMU monitor layout, RAM at 0x81004000, clears every window')
+    old = replace(layout, ram_base=0x45004000, dt_pa=0x4A000000, boot_args_pa=0x4A040000,
+                  top_of_kernel_data=0x4A050000, panic_pa=0x61004000)
+    check(refuses(classicload.classic_complete_dt, appledt.DeviceTree(windowed_tree()), old,
+                  lambda n: b'\xa5' * n),
+          'RAM inside the ECAM window (the old QEMU layout) is refused')
+    low = replace(layout, ram_base=0x71004000, dt_pa=0x76000000, boot_args_pa=0x76040000,
+                  top_of_kernel_data=0x76050000, panic_pa=0x8D004000)
+    check(refuses(classicload.classic_complete_dt, appledt.DeviceTree(windowed_tree()), low,
+                  lambda n: b'\xa5' * n),
+          'RAM inside the memory window as the template writes it is refused')
+    screen = classicload.split_screen(layout, (0x7F000000, 1024, 600, 4096), 88)
+    check(refuses(classicload.classic_complete_dt, appledt.DeviceTree(windowed_tree()), screen,
+                  lambda n: b'\xa5' * n), 'a framebuffer inside a device window is refused')
+    legacy = classicload.QEMU_CLASSIC_LAYOUT
+    check(not legacy.check_device_windows and classicload.QEMU_MONITOR_LAYOUT.check_device_windows
+          and classicload.derive_gaokun3_layout(GAOKUN3_RESERVED).check_device_windows,
+          'only the Phase 0C layout opts out of the window check')
 
 
 def test_real_inputs(tmp):
@@ -242,6 +298,7 @@ def main():
         test_classic_image(tmp)
         test_monitor_layout(tmp)
         test_gaokun3_layout()
+        test_device_windows()
         test_real_inputs(tmp)
     print(f'PASS test-vmapple-classic: {checks} checks')
 
