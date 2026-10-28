@@ -58,6 +58,8 @@ PARAM_FLAG_UARTPT = 32
 PARAM_FLAG_BASELINE = 64
 PARAM_FLAG_HALT_ON_OFF = 128
 PARAM_FLAG_FRAMEBUFFER = 256
+PARAM_FLAG_NO_GUEST = 512
+PARAM_FLAG_GIC_HOLD = 1024
 
 
 def tool(name, explicit, env, *extra_dirs):
@@ -87,22 +89,25 @@ def llvm_dir(explicit):
 
 
 CFLAGS = ['--target=aarch64-none-elf', '-ffreestanding', '-nostdlib', '-mgeneral-regs-only',
-          '-march=armv8.5-a+pauth', '-Wall', '-Wextra', '-Werror', '-O1', '-c', f'-I{HERE}']
+          '-mstrict-align', '-march=armv8.5-a+pauth', '-Wall', '-Wextra', '-Werror', '-O1',
+          '-c', f'-I{HERE}']
 
 
-def build_image(llvm, out, src, linked, base):
+def build_image(llvm, out, src, linked, base, defines=()):
     """Assemble src and link it at `base` with stub.ld; write the ELF and a raw
     binary. The link address must equal the load address, or PC-relative
     literal pools point into the wrong image. Returns (elf_path, bin_path).
-    The EL2 stub is always linked with monitor.c, its device models."""
+    The EL2 stub is always linked with monitor.c, its device models.
+    `defines` are -D flags for both (the platform gate)."""
     out.mkdir(parents=True, exist_ok=True)
     clang = str(llvm / 'clang')
+    defs = [f'-D{d}' for d in defines]
     obj = out / (src.stem + '.o')
-    subprocess.run([clang, *CFLAGS, str(src), '-o', str(obj)], check=True)
+    subprocess.run([clang, *CFLAGS, *defs, str(src), '-o', str(obj)], check=True)
     objs = [str(obj)]
     if src.name == 'stub.S':
         mon = out / 'monitor.o'
-        subprocess.run([clang, *CFLAGS, '-std=c11', str(HERE / 'monitor.c'),
+        subprocess.run([clang, *CFLAGS, *defs, '-std=c11', str(HERE / 'monitor.c'),
                         '-o', str(mon)], check=True)
         objs.append(str(mon))
     elf = out / (linked + '.elf')
@@ -190,39 +195,64 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, 
         '-device', f'loader,addr={STUB_PA:#x},cpu-num=0',
         *extra,
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(ROOT))
-    deadline = time.time() + timeout
-    timed_out = False
-    monitor_text = ''
-    next_poll = time.time() + 2
-    while proc.poll() is None:
-        if stop_cmds and time.time() > next_poll:
-            next_poll = time.time() + 2
-            record = _monitor_ask(mon, [f'xp/1gx {FAULT_PA:#x}'], settle=0.2)
-            if f'{SMOKE_FAULT_MAGIC:016x}' in record.lower():
-                monitor_text = _monitor_ask(mon, [c for c, _ in stop_cmds], settle=1.0)
-                # QEMU writes a dump asynchronously to this exchange: wait
-                # for each file to reach its size before ending the run.
+    serial_out = out / 'serial.out'
+    serial_err = out / 'serial.err'
+    with open(serial_out, 'wb') as out_f, open(serial_err, 'wb') as err_f:
+        proc = subprocess.Popen(cmd, stdout=out_f, stderr=err_f, cwd=str(ROOT))
+        deadline = time.time() + timeout
+        timed_out = False
+        monitor_text = ''
+        next_poll = time.time() + 2
+        while proc.poll() is None:
+            if time.time() > next_poll:
+                next_poll = time.time() + 2
+                cur = serial_out.read_text(errors='replace') if serial_out.exists() else ''
+                if 'Waiting on' in cur and 'IOMedia' in cur:
+                    monitor_text = _monitor_ask(mon, [
+                        'info registers',
+                        'x/4i $pc',
+                        f'xp/4gx {TIDCP_LOG_PA:#x}',
+                        f'xp/{4 * TIDCP_MAX}gx {TIDCP_LOG_PA + 0x20:#x}',
+                        *probe_cmds,
+                    ], settle=1.0 if probe_cmds else 0.4)
+                    until = time.time() + 15
+                    while time.time() < until and not all(
+                            f.exists() and f.stat().st_size >= size for _, (f, size) in stop_cmds):
+                        time.sleep(0.2)
+                    proc.kill()
+                    break
+                if stop_cmds:
+                    record = _monitor_ask(mon, [f'xp/1gx {FAULT_PA:#x}'], settle=0.2)
+                    if f'{SMOKE_FAULT_MAGIC:016x}' in record.lower():
+                        monitor_text = _monitor_ask(mon, [c for c, _ in stop_cmds], settle=1.0)
+                        # QEMU writes a dump asynchronously to this exchange: wait
+                        # for each file to reach its size before ending the run.
+                        until = time.time() + 15
+                        while time.time() < until and not all(
+                                f.exists() and f.stat().st_size >= size for _, (f, size) in stop_cmds):
+                            time.sleep(0.2)
+                        proc.kill()
+                        break
+            if time.time() > deadline:
+                timed_out = True
+                # The guest is still running but silent: ask QEMU where it is.
+                monitor_text = _monitor_ask(mon, [
+                    'info registers',
+                    'x/4i $pc',
+                    f'xp/4gx {TIDCP_LOG_PA:#x}',
+                    f'xp/{4 * TIDCP_MAX}gx {TIDCP_LOG_PA + 0x20:#x}',
+                    *probe_cmds,
+                ], settle=1.0 if probe_cmds else 0.4)
                 until = time.time() + 15
                 while time.time() < until and not all(
                         f.exists() and f.stat().st_size >= size for _, (f, size) in stop_cmds):
                     time.sleep(0.2)
                 proc.kill()
                 break
-        if time.time() > deadline:
-            timed_out = True
-            # The guest is still running but silent: ask QEMU where it is.
-            monitor_text = _monitor_ask(mon, [
-                'info registers',
-                'x/4i $pc',
-                f'xp/4gx {TIDCP_LOG_PA:#x}',
-                f'xp/{4 * TIDCP_MAX}gx {TIDCP_LOG_PA + 0x20:#x}',
-                *probe_cmds,
-            ])
-            proc.kill()
-            break
-        time.sleep(0.1)
-    out_b, err_b = proc.communicate()
+            time.sleep(0.1)
+        proc.wait()
+    out_b = serial_out.read_bytes() if serial_out.exists() else b''
+    err_b = serial_err.read_bytes() if serial_err.exists() else b''
 
     def dec(b):
         return (b or b'').decode('utf-8', 'replace') if isinstance(b, (bytes, bytearray)) else (b or '')
@@ -415,7 +445,7 @@ def write_png(path, words, width, height):
     pathlib.Path(path).write_bytes(png)
 
 
-def check_screen(screen, stop_line, out, mailbox=False):
+def check_screen(screen, stop_line, out, mailbox=False, gic_line=None):
     """P4's verdict on the split console. Returns a list of problems."""
     base, width, height, stride = classicload.QEMU_SPLIT_SCREEN
     band_rows = classicload.QEMU_MONITOR_ROWS
@@ -433,9 +463,10 @@ def check_screen(screen, stop_line, out, mailbox=False):
           f'picture at {out / "screen.png"}')
     if lit_rows < 8:
         problems.append('the guest drew nothing in its framebuffer rows')
-    lines = [(BAND_BANNER, BAND_TEXT), (stop_line or '', BAND_STOP)]
-    if mailbox:
-        lines.append((BAND_MAILBOX, BAND_NOTE))
+    # Band lines by index: 0 banner, 1 stop, 2 mailbox, 3 the GIC as
+    # monitor_init read it (monitor.c monitor_gic_report).
+    lines = [(BAND_BANNER, BAND_TEXT), (stop_line or '', BAND_STOP),
+             (BAND_MAILBOX if mailbox else '', BAND_NOTE), (gic_line or '', BAND_TEXT)]
     want = expected_band(width, band_rows, lines)
     got = words[guest_rows * width:]
     wrong = sum(a != b for a, b in zip(got, want))
@@ -473,11 +504,16 @@ def report_monitor(text, mmio_log, out, screen=None):
         regions = {r[4] for r in accesses}
         allowed = {'pl011', 'gicv3_redist'}
         # The monitor enables QEMU's real distributor once at setup
-        # (monitor_init: GICD_CTLR = EnGrp0|EnGrp1), because the guest's own
-        # distributor writes go to the model. That one write is the only
-        # distributor access allowed; stage 2 never maps it for the guest.
+        # (monitor_init: read-modify-write GICD_CTLR for EnGrp0|EnGrp1),
+        # because the guest's own distributor writes go to the model.
+        # Only that GICD_CTLR setup sequence is allowed; stage 2 never
+        # maps the distributor for the guest.
         dist = [r for r in accesses if r[4] == 'gicv3_dist']
-        if dist == [('write', 0x08000000, 0x3, 4, 'gicv3_dist')]:
+        dist_writes = [r for r in dist if r[0] == 'write']
+        dist_reads = [r for r in dist if r[0] == 'read']
+        if (len(dist_writes) == 1 and dist_writes[0][:2] == ('write', 0x08000000)
+                and (dist_writes[0][2] & 0x3) == 0x3 and dist_writes[0][3] == 4
+                and all(r[:2] == ('read', 0x08000000) and r[3] == 4 for r in dist_reads)):
             allowed.add('gicv3_dist')
         stray = {r for r in regions if not any(r.startswith(a) for a in allowed)}
         print(f'QEMU devices touched (by the monitor at EL2 only): {sorted(regions)}')
@@ -501,7 +537,14 @@ def report_monitor(text, mmio_log, out, screen=None):
                 stop_line = f'STOP: NO FREE LIST REGISTER FOR SGI {int(line.split()[-1]):02d}'
                 break
         mailbox = 'EL2: mailbox:' in text
-        problems += check_screen(screen, stop_line, out, mailbox)
+        gic_line = None
+        for line in text.splitlines():
+            m = re.search(r'EL2: gic: ctlr 0x([0-9a-f]+) -> 0x([0-9a-f]+), redistributor frame (\d+)', line)
+            if m:
+                gic_line = (f'GIC CTLR {int(m[1], 16):08X} -> {int(m[2], 16):08X}  '
+                            f'RD FRAME {int(m[3]) % 10}')
+                break
+        problems += check_screen(screen, stop_line, out, mailbox, gic_line)
     if stopped:
         if banner and 'RESULT' not in text:
             for p in problems:
@@ -523,9 +566,28 @@ def report_monitor(text, mmio_log, out, screen=None):
     return 0
 
 
+def build(args):
+    """Build the monitor image only, for a stick bundle
+    (tools/vmapple-stick.py --monitor). --gaokun3 selects the gaokun3
+    platform gate (real GIC and panel addresses, no UART or semihosting);
+    the image is linked at --base, which must be its load address."""
+    llvm = llvm_dir(args.llvm)
+    out = pathlib.Path(args.out)
+    defines = ('VMAPPLE_GAOKUN3_MONITOR',) if args.gaokun3 else ()
+    _, binf = build_image(llvm, out, HERE / 'stub.S', 'monitor-image', args.base, defines)
+    print(f'monitor image: {binf} linked at {args.base:#x}'
+          f'{" (gaokun3)" if args.gaokun3 else ""}')
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
+    b = sub.add_parser('build')
+    b.add_argument('--llvm')
+    b.add_argument('--gaokun3', action='store_true')
+    b.add_argument('--base', type=lambda v: int(v, 0), required=True)
+    b.add_argument('--out', required=True)
     for name in ('selftest', 'boot'):
         s = sub.add_parser(name)
         s.add_argument('--llvm')
@@ -566,7 +628,7 @@ def main():
                            help='with --monitor: keep the paravirtual device nodes the '
                                 'monitor layout otherwise drops (bisection aid)')
     a = ap.parse_args()
-    return selftest(a) if a.cmd == 'selftest' else boot(a)
+    return {'selftest': selftest, 'boot': boot, 'build': build}[a.cmd](a)
 
 
 if __name__ == '__main__':

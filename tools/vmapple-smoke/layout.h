@@ -32,6 +32,16 @@
 #define PARAM_MAGIC  0x18
 #define PARAM_S2_LO  0x20
 #define PARAM_S2_HI  0x28
+/* Parameter-page extension (version 2 page, words past the 0x30-byte
+ * blob): the screen split, written by q1n1's q1n1_vmb_fill_params and
+ * read by the gaokun3 monitor build, whose framebuffer is the real
+ * panel and cannot be a compile-time constant of the QEMU build.
+ * Zero when no framebuffer is described. */
+#define PARAM_FB_PA         0x30
+#define PARAM_FB_WIDTH      0x38
+#define PARAM_FB_STRIDE     0x40
+#define PARAM_FB_GUEST_ROWS 0x48
+#define PARAM_FB_BAND_ROWS  0x50
 #define PARAM_FLAG_TRACE 1
 /* bit1: run as the Route B monitor (Phase 3 P3): stage 2 default-deny,
  * virtual GICv3, device models in monitor.c. bit2 is unused: it was the
@@ -53,6 +63,12 @@
  * where a guest store is a stage 2 fault. On a named stop the stub halts
  * instead of exiting, so the harness can read the screen. */
 #define PARAM_FLAG_FRAMEBUFFER 256
+/* bit9: the monitor halts in its band before the guest is entered
+ * (Phase 3 step H2 proper). Without it the stub enters the guest. */
+#define PARAM_FLAG_NO_GUEST 512
+/* bit10: diagnostic hold: the monitor halts after setup, before any
+ * GIC access (runs 30/31 restarted in that window). */
+#define PARAM_FLAG_GIC_HOLD 1024
 
 /* The QEMU framebuffer for the split console: above the panic chunk
  * (0x9d104000) and below the monitor run's 1536 MiB end (0xa0000000), so
@@ -140,9 +156,18 @@
 #define MON_CFG_IPA      0x00400000ull   /* configuration region, 64 KiB */
 #define MON_MAILBOX_IPA  0x004ff000ull   /* page of the 0x004ffff8 mailbox */
 
-/* Physical (EL2) addresses of QEMU's own devices the monitor drives. The
- * guest never sees these IPAs: stage 2 does not map them. */
+/* Physical (EL2) addresses of the real devices the monitor drives. The
+ * guest never sees these IPAs: stage 2 does not map them. The gaokun3
+ * values are OBSERVED in the machine's EL2 device tree (arm,gic-v3;
+ * docs/GAOKUN3-PHASE3.md): distributor 64 KiB at 0x17a00000,
+ * redistributors 1 MiB at 0x17a60000 with a 0x20000 stride. */
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+#define PHYS_GICD_BASE   0x17a00000ull
+#define PHYS_GICR_BASE   0x17a60000ull
+#else
+#define PHYS_GICD_BASE   0x08000000ull   /* QEMU virt distributor */
 #define PHYS_GICR_BASE   0x080a0000ull   /* QEMU virt redistributor 0 */
+#endif
 #define MON_INTID_VTIMER 27
 #define MON_INTID_MAINT  25
 

@@ -36,7 +36,10 @@ Q1N1_EFI = ROOT.parent / 'q1n1' / 'build' / 'uefi-vmb-enter' / 'q1n1.efi'
 FIRMWARE = pathlib.Path('/opt/homebrew/share/qemu/edk2-aarch64-code.fd')
 DEFAULT_KC = ROOT / 'downloads' / 'extracted' / 'vma2macosap' / 'kernelcache.release.vma2'
 MONITOR_PA = 0x40200000
-PARAMS_PA = 0x43000000
+# Distinct from layout.h's PARAMS_PA (0x43000000), so the rehearsal proves
+# q1n1 passes the parameter page's address in x0 instead of relying on the
+# stub's fallback constant.
+PARAMS_PA = 0x43200000
 
 
 def load(name, path):

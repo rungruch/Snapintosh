@@ -27,6 +27,16 @@
 .section .text.start, "ax"
 .global _start
 _start:
+	mov	x23, x0			// candidate parameter page (q1n1's hand-off)
+	// llvm-objcopy -O binary omits NOBITS (.bss); zero it before any
+	// state, stage-2 table, or stack slot is touched.
+	ldr	x0, =__bss_start
+	ldr	x1, =__bss_end
+0:	cmp	x0, x1
+	b.hs	0f
+	stp	xzr, xzr, [x0], #16
+	b	0b
+0:
 	// EL2 stack: top of the 16 KiB region just below PARAMS_PA scratch.
 	ldr	x0, =stack_top
 	mov	sp, x0
@@ -47,7 +57,14 @@ _start:
 	// kernel initialises SMCR_EL1 before serial. This is a QEMU positive
 	// control only: the gaokun3 reports both absent, so its profile must
 	// make that kernel path unreachable or reject it explicitly.
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	// Non-VHE CPTR_EL2 on Cortex-A78C (HCR_EL2.E2H is 0 after q1n1's
+	// VHE exit): RES1 bits [13:12, 9:0], TFP (bit 10) clear so FP/SIMD
+	// does not trap. Verified on the gaokun3 in runs 11 to 15.
+	ldr	x0, =0x33ff
+#else
 	ldr	x0, =0x03330000
+#endif
 	msr	CPTR_EL2, x0
 	msr	MDCR_EL2, xzr
 
@@ -64,8 +81,30 @@ _start:
 
 	// EL1 starts with the MMU off; leave SCTLR_EL1 at its reset M=0.
 
+	// The parameter page: x0 from q1n1's hand-off when it carries the
+	// magic, else the harness's fixed page in QEMU. On the gaokun3 there
+	// is no fixed page at 0x43000000, so a missing hand-off halts cleanly
+	// instead of reading unmapped memory.
+	ldr	x0, =params_base
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	mov	x1, xzr
+#else
+	ldr	x1, =PARAMS_PA
+#endif
+	str	x1, [x0]
+	cbz	x23, 9f
+	tst	x23, #0xfff
+	b.ne	9f
+	ldr	x1, [x23, #PARAM_MAGIC]
+	ldr	x2, =SMOKE_PARAMS_MAGIC
+	cmp	x1, x2
+	b.ne	9f
+	str	x23, [x0]
+9:
 	// Read the parameters the harness placed for us.
-	ldr	x19, =PARAMS_PA
+	ldr	x19, =params_base
+	ldr	x19, [x19]
+	cbz	x19, param_bad
 	ldr	x0, [x19, #PARAM_MAGIC]
 	ldr	x1, =SMOKE_PARAMS_MAGIC
 	cmp	x0, x1
@@ -90,12 +129,45 @@ _start:
 	mov	x2, #0x40000000
 	cmp	x0, x2
 	b.lo	param_bad
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	mov	x2, #0x180000000	// the gaokun3 guest sits in GiB 4 to 5
+#else
 	mov	x2, #0xc0000000
+#endif
 	cmp	x1, x2
 	b.hi	param_bad
 	ldr	x0, =pt_flag
 	str	x22, [x0]
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	// Draw the band before anything risky: after runs 30/31 restarted
+	// in this window, the band is the only evidence channel, and which
+	// step line it shows names where execution reached.
+	mov	x0, x22
+	lsr	x0, x0, #8
+	and	x0, x0, #1
+	ldr	x1, [x19, #PARAM_FB_PA]
+	ldr	x2, [x19, #PARAM_FB_WIDTH]
+	ldr	x3, [x19, #PARAM_FB_STRIDE]
+	ldr	x4, [x19, #PARAM_FB_GUEST_ROWS]
+	ldr	x5, [x19, #PARAM_FB_BAND_ROWS]
+	bl	monitor_set_band
+#endif
 	bl	monitor_setup
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	ldr	x0, =msg_setup_done
+	bl	monitor_note
+	ldr	x0, =pt_flag
+	ldr	x0, [x0]
+	tbz	x0, #10, 8f
+	// Diagnostic hold, interrupts masked: monitor_setup has enabled
+	// the EL2 interrupt interface, and an unmasked halt could take a
+	// firmware timer interrupt into the IRQ path (and its GIC writes)
+	// that this build exists to exclude (run 32).
+	msr	daifset, #0xf
+7:	wfi
+	b	7b
+8:
+#endif
 	and	x0, x22, #1		// tracing
 	bl	monitor_init
 	mov	x0, x21			// boot_args, for the config region's RAM size
@@ -104,14 +176,30 @@ _start:
 	lsr	x0, x0, #6		// baseline-answers debug flag
 	and	x0, x0, #1
 	bl	monitor_set_baseline_answers
+#ifndef VMAPPLE_GAOKUN3_MONITOR
 	mov	x0, x22
 	lsr	x0, x0, #8		// split console
 	and	x0, x0, #1
+	ldr	x1, =MON_FB_PA
+	mov	x2, #MON_FB_WIDTH
+	mov	x3, #MON_FB_STRIDE
+	mov	x4, #MON_FB_GUEST_ROWS
+	mov	x5, #MON_FB_BAND_ROWS
 	bl	monitor_set_band
-1:
+#endif
+	// The GIC line, or monitor_init's named stop, now that the band is
+	// drawn. A stop halts here: nothing of the guest has run.
+	bl	monitor_gic_report
+	cbnz	w0, 1f
+	b	halt
+1:	ldr	x0, =pt_flag
+	ldr	x0, [x0]
+	tbnz	x0, #9, halt		// H2: monitor up, guest not entered
 
 	// Start the TIDCP log empty, so a stale page cannot look like data.
-	ldr	x0, =TIDCP_LOG_PA
+	ldr	x0, =params_base
+	ldr	x0, [x0]
+	add	x0, x0, #0x2000			// the TIDCP log page
 	ldr	x1, =TIDCP_LOG_MAGIC
 	str	x1, [x0, #TIDCP_MAGIC]
 	str	xzr, [x0, #TIDCP_USED]
@@ -145,6 +233,9 @@ param_bad:
 
 /* ---- UART (PL011 data register; TCG accepts a bare store) --------------- */
 uart_puts:
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	ret				// no PL011: the monitor's band is the console
+#endif
 	ldr	x1, =PL011_BASE
 1:	ldrb	w2, [x0], #1
 	cbz	w2, 2f
@@ -154,6 +245,9 @@ uart_puts:
 
 // x0 = 64-bit value to print as 16 hex digits.
 uart_hex:
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	ret
+#endif
 	ldr	x1, =PL011_BASE
 	mov	x3, #60
 1:	lsr	x2, x0, x3
@@ -336,7 +430,8 @@ do_hvc:
 	ldr	x0, [x29, #0]
 	mov	w26, w0			// low 32 bits = function id
 
-	ldr	x1, =PARAMS_PA
+	ldr	x1, =params_base
+	ldr	x1, [x1]
 	ldr	x1, [x1, #PARAM_FLAGS]
 	tbz	x1, #0, 1f
 	ldr	x0, =msg_hvc
@@ -515,7 +610,9 @@ tidcp_record:
 	mov	x0, #TIDCP_RT_MASK
 	bic	x19, x19, x0			// key: the register and direction
 
-	ldr	x20, =TIDCP_LOG_PA
+	ldr	x20, =params_base
+	ldr	x20, [x20]
+	add	x20, x20, #0x2000		// the TIDCP log page
 	ldr	x0, [x20, #TIDCP_TOTAL]
 	add	x0, x0, #1
 	str	x0, [x20, #TIDCP_TOTAL]
@@ -542,7 +639,8 @@ tidcp_record:
 	add	x21, x21, #1
 	str	x21, [x20, #TIDCP_USED]
 
-	ldr	x0, =PARAMS_PA
+	ldr	x0, =params_base
+	ldr	x0, [x0]
 	ldr	x0, [x0, #PARAM_FLAGS]
 	tbz	x0, #0, 3f
 	ldr	x0, =msg_tidcp
@@ -578,6 +676,9 @@ psci_off:
 /* Angel semihosting SYS_EXIT (ApplicationExit). x1 from the guest is the
  * exit code; QEMU with -semihosting stops cleanly. */
 smoke_exit:
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	b	halt			// no semihosting on the machine
+#endif
 	ldr	x1, [x29, #8]
 	mov	x0, #0x18		// SYS_EXIT
 	mov	x2, x1
@@ -595,12 +696,22 @@ smoke_exit:
 /* The L2 table for IPA x1 in GiB 1 or 2 (x1 checked by _start); x0 out,
  * x4 and x5 clobbered, x30 kept for the caller's own return. */
 s2_l2_for:
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	// The L2 tables are contiguous in .bss, one per GiB from GiB 1.
+	lsr	x0, x1, #30
+	sub	x0, x0, #1
+	lsl	x0, x0, #12
+	ldr	x4, =s2_l2
+	add	x0, x0, x4
+	ret
+#else
 	ldr	x0, =s2_l2
 	ldr	x5, =s2_l2b
 	mov	x4, #0x80000000
 	cmp	x1, x4
 	csel	x0, x5, x0, hs
 	ret
+#endif
 
 monitor_setup:
 	mov	x8, x30				// s2_l2_for is a leaf; keep our return
@@ -615,6 +726,17 @@ monitor_setup:
 	ldr	x1, =s2_l2b
 	orr	x1, x1, #3
 	str	x1, [x0, #16]			// L1 entry 2: 0x80000000..0xbfffffff
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	ldr	x1, =s2_l2fb
+	orr	x1, x1, #3
+	str	x1, [x0, #24]			// L1 entry 3: the framebuffer's GiB
+	ldr	x1, =s2_l2c
+	orr	x1, x1, #3
+	str	x1, [x0, #32]			// L1 entry 4: guest RAM, GiB 4
+	ldr	x1, =s2_l2d
+	orr	x1, x1, #3
+	str	x1, [x0, #40]			// L1 entry 5: guest RAM, GiB 5
+#endif
 	// Debug passthrough (PARAM_FLAG_PASSTHRU in the setup word the caller
 	// leaves in x22, saved to pt_flag by _start): map QEMU's GIC and PL011
 	// blocks as device memory in GiB 0, at their physical addresses.
@@ -688,7 +810,8 @@ monitor_setup:
 	// the layout (the payload, the reported DRAM and the panic chunk),
 	// 2 MiB blocks in GiB 1 (s2_l2) or GiB 2 (s2_l2b). _start checked the
 	// range lies inside those two GiB.
-2:	ldr	x9, =PARAMS_PA
+2:	ldr	x9, =params_base
+	ldr	x9, [x9]
 	ldr	x1, [x9, #PARAM_S2_LO]
 	ldr	x10, [x9, #PARAM_S2_HI]
 1:	bl	s2_l2_for			// x0: the L2 table holding x1
@@ -706,19 +829,93 @@ monitor_setup:
 	ldr	x0, =pt_flag
 	ldr	x0, [x0]
 	tbz	x0, #8, 6f
-	ldr	x1, =MON_FB_PA
-	bl	s2_l2_for
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	// The real panel: 6400-byte rows, so the guest's last row ends inside
+	// a 2 MiB block. Map whole blocks where they fit and finish the last
+	// one with 4 KiB pages from the L3 pool; the band stays absent. The
+	// memory type is the RAM block's (write-back): whether the panel's
+	// path wants that is an open H2 question, recorded in PHASE3.
+	ldr	x9, =params_base
+	ldr	x9, [x9]
+	ldr	x1, [x9, #PARAM_FB_PA]
+	cbz	x1, 6f
+	ldr	x4, =s2_l3_next
+	ldr	x5, =s2_l3pool
+	str	x5, [x4]
+	ldr	x10, [x9, #PARAM_FB_STRIDE]
+	ldr	x11, [x9, #PARAM_FB_GUEST_ROWS]
+	mul	x10, x10, x11
+	add	x10, x10, x1			// guest framebuffer end (page aligned)
+7:	bl	s2_l2_for			// x0: the L2 table holding x1
+	mov	x4, x1
+	add	x4, x4, #0x200000
+	cmp	x4, x10
+	b.hi	8f				// partial block: pages below
 	mov	x2, #0x7fd			// block, AF, SH, WB, S2AP RW
 	orr	x2, x1, x2
 	lsr	x3, x1, #21
 	and	x3, x3, #0x1ff
 	str	x2, [x0, x3, lsl #3]
-6:	mov	x30, x8
+	mov	x1, x4
+	cmp	x1, x10
+	b.lo	7b
+	b	6f
+8:	ldr	x4, =s2_l3_next			// a fresh L3 table from the pool
+	ldr	x5, [x4]
+	mov	x6, x5
+	add	x6, x6, #4096
+	str	x6, [x4]
+	orr	x5, x5, #3			// table descriptor
+	lsr	x3, x1, #21
+	and	x3, x3, #0x1ff
+	str	x5, [x0, x3, lsl #3]
+	sub	x5, x5, #3
+9:	mov	x2, #0x7ff			// page, AF, SH, WB, S2AP RW
+	orr	x2, x1, x2
+	lsr	x3, x1, #12
+	and	x3, x3, #0x1ff
+	str	x2, [x5, x3, lsl #3]
+	add	x1, x1, #0x1000
+	cmp	x1, x10
+	b.lo	9b
+	b	6f
+#else
+	ldr	x1, =MON_FB_PA
+	bl	s2_l2_for
+#endif
+	mov	x2, #0x7fd			// block, AF, SH, WB, S2AP RW
+	orr	x2, x1, x2
+	lsr	x3, x1, #21
+	and	x3, x3, #0x1ff
+	str	x2, [x0, x3, lsl #3]
+6:
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	// Clean the stage-2 tables to the point of coherency before
+	// enabling stage 2, and use a 39-bit IPA / 40-bit PA VTCR_EL2
+	// starting at s2_l1 (Cortex-A78C PARange is 40 bits; T0SZ=16 / PS=5
+	// exceeds PARange).
+	ldr	x0, =s2_l0
+	ldr	x1, =s2_l3_next
+	sub	x1, x1, x0
+	bl	mon_clean_range
+	mov	x30, x8
+	dsb	sy
+	ldr	x0, =0x80023559			// VTCR: RES1, 40b PA, 4K, WB, SL0=1 (L1), T0SZ=25 (39b IPA)
+	msr	VTCR_EL2, x0
+	ldr	x0, =s2_l1
+	msr	VTTBR_EL2, x0
+	isb
+	tlbi	vmalls12e1is
+	dsb	sy
+	isb
+#else
+	mov	x30, x8
 	dsb	sy
 	ldr	x0, =0x53490			// VTCR: 48-bit IPA/PA, L0 start, WB
 	msr	VTCR_EL2, x0
 	ldr	x0, =s2_l0
 	msr	VTTBR_EL2, x0
+#endif
 	mov	x0, #1				// ICH_HCR: En only. UIE would assert the
 	msr	ICH_HCR_EL2, x0			// maintenance PPI permanently (no valid LRs)
 	// The architected event stream: the guest's lock and idle loops wait
@@ -729,12 +926,16 @@ monitor_setup:
 	orr	x0, x0, x1
 	msr	CNTHCTL_EL2, x0
 	// The physical CPU interface at EL2: let every priority through and
-	// enable Group 1, or no physical PPI ever signals this EL.
+	// enable Group 1, or no physical PPI ever signals this EL. With two
+	// security states (the gaokun3, GICD_CTLR.DS == 0), Group 0 belongs
+	// to EL3 and writing ICC_IGRPEN0_EL1 at Non-secure EL2 traps to EL3.
 	mov	x0, #0xff
 	msr	ICC_PMR_EL1, x0
 	mov	x0, #1
 	msr	ICC_IGRPEN1_EL1, x0
+#ifndef VMAPPLE_GAOKUN3_MONITOR
 	msr	ICC_IGRPEN0_EL1, x0
+#endif
 	isb
 	mrs	x0, HCR_EL2
 	mov	x1, #0x19			// VM | FMO | IMO
@@ -807,10 +1008,38 @@ mon_misr_read:
 mon_redist_write:
 	str	w1, [x0]
 	ret
+// Reads of the platform GIC: monitor_init reads before it writes.
+.global mon_mmio_read32
+mon_mmio_read32:
+	ldr	w0, [x0]
+	ret
+.global mon_mmio_read64
+mon_mmio_read64:
+	ldr	x0, [x0]
+	ret
+.global mon_mpidr
+mon_mpidr:
+	mrs	x0, MPIDR_EL1
+	ret
 .global mon_uart_putc
 mon_uart_putc:
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	ret				// guest PL011 output has no UART to go to
+#else
 	ldr	x1, =PL011_BASE
 	str	w0, [x1]
+#endif
+	ret
+.global mon_clean_range
+mon_clean_range:
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	add	x1, x0, x1		// the panel reads memory, not caches
+1:	dc	cvac, x0
+	add	x0, x0, #64
+	cmp	x0, x1
+	b.lo	1b
+	dsb	sy
+#endif
 	ret
 .global mon_cntpct
 mon_cntpct:
@@ -833,6 +1062,26 @@ mon_translate_va:
 	mrs	x0, PAR_EL1
 	ret
 
+/* Freestanding C ABI helpers for -mstrict-align (EL2 runs with M=0 in
+ * the QEMU smoke, so aggregate initialisers must copy byte by byte). */
+.global memcpy
+memcpy:
+	mov	x3, x0
+1:	cbz	x2, 2f
+	ldrb	w4, [x1], #1
+	strb	w4, [x3], #1
+	sub	x2, x2, #1
+	b	1b
+2:	ret
+.global memset
+memset:
+	mov	x3, x0
+1:	cbz	x2, 2f
+	strb	w1, [x3], #1
+	sub	x2, x2, #1
+	b	1b
+2:	ret
+
 /* ---- Fault records ------------------------------------------------------ */
 fault_cur_sp0:
 	SAVE_FRAME
@@ -854,13 +1103,28 @@ fault_lower32:
 // x0 = vector offset. Writes a fault record at FAULT_PA and halts.
 record_and_halt:
 	mov	x28, x0
+	// Guard against a recursive fault if params_base or UART is unmapped.
+	ldr	x0, =in_fault
+	ldr	x1, [x0]
+	cbnz	x1, halt
+	mov	x1, #1
+	str	x1, [x0]
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	mov	x0, x28
+	mrs	x1, ESR_EL2
+	mrs	x2, ELR_EL2
+	bl	monitor_fault
+#endif
 	ldr	x0, =msg_fault
 	bl	uart_puts
 	mrs	x0, ESR_EL2
 	bl	uart_hex
 	mrs	x0, ELR_EL2
 	bl	uart_hex
-	ldr	x19, =FAULT_PA
+	ldr	x19, =params_base
+	ldr	x19, [x19]
+	cbz	x19, halt
+	add	x19, x19, #0x1000		// the fault record page
 	ldr	x0, =SMOKE_FAULT_MAGIC
 	str	x0, [x19, #FAULT_MAGIC]
 	mrs	x0, ESR_EL2
@@ -879,6 +1143,9 @@ record_and_halt:
 	ldr	x0, [x0]
 	tbnz	x0, #8, halt
 	// Stop QEMU so the harness does not wait out its timeout.
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	b	halt
+#endif
 	mov	x0, #0x18
 	ldr	x1, =0x20023		// ADP_Stopped_RunTimeError
 	hlt	#0xf000
@@ -887,6 +1154,7 @@ halt:
 	b	halt
 
 .section .rodata
+msg_setup_done:	.asciz "SETUP DONE: STAGE 2 READY, GIC NOT TOUCHED"
 msg_enter:	.asciz "EL2: entering guest at EL1\n"
 msg_cntfrq:	.asciz "EL2: cntfrq "
 msg_noparam:	.asciz "EL2: bad params magic\n"
@@ -899,6 +1167,10 @@ msg_fault:	.asciz "EL2: unexpected exception esr/elr\n"
 .align 4
 monitor_enabled:
 	.space 8
+params_base:
+	.space 8
+in_fault:
+	.space 8
 .align 12
 s2_l0:
 	.space 4096
@@ -908,6 +1180,19 @@ s2_l2:
 	.space 4096
 s2_l2b:
 	.space 4096
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+s2_l2fb:
+	.space 4096
+s2_l2c:
+	.space 4096
+s2_l2d:
+	.space 4096
+s2_l3pool:
+	.space 8 * 4096
+s2_l3_next:
+	.space 8
+.align 12
+#endif
 s2_l2dev:
 	.space 4096
 s2_l3gic:

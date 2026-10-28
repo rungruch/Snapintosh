@@ -418,13 +418,24 @@ static int decode_access(uint64_t elr, uint64_t *frame, unsigned *srt,
 #define MON_BAND_TEXT  0x00ffffffu
 #define MON_BAND_STOP  0x00ff5050u
 static int band_on;
+static uint64_t band_fb_pa;
+static unsigned band_width, band_stride, band_guest_rows, band_rows;
 
 static void band_pixel(unsigned x, unsigned y, uint32_t color)
 {
-    if (x >= MON_FB_WIDTH || y >= MON_FB_BAND_ROWS) return;
+    if (x >= band_width || y >= band_rows) return;
     volatile uint32_t *row = (volatile uint32_t *)(uintptr_t)
-        (MON_FB_PA + (uint64_t)(MON_FB_GUEST_ROWS + y) * MON_FB_STRIDE);
+        (band_fb_pa + (uint64_t)(band_guest_rows + y) * band_stride);
     row[x] = color;
+}
+
+/* The panel reads memory, not the CPU's caches: what the band drew must
+ * be cleaned to the point of coherency before it can be seen. */
+static void band_clean(void)
+{
+    if (band_on)
+        mon_clean_range(band_fb_pa + (uint64_t)band_guest_rows * band_stride,
+                        (uint64_t)band_rows * band_stride);
 }
 
 static void band_text(unsigned line, const char *s, uint32_t color)
@@ -440,18 +451,27 @@ static void band_text(unsigned line, const char *s, uint32_t color)
     }
 }
 
-void monitor_set_band(int on)
+void monitor_set_band(int on, uint64_t fb_pa, unsigned width, unsigned stride,
+                      unsigned guest_rows, unsigned rows)
 {
     band_on = on;
+    band_fb_pa = fb_pa;
+    band_width = width;
+    band_stride = stride;
+    band_guest_rows = guest_rows;
+    band_rows = rows;
     if (!on) return;
-    for (unsigned y = 0; y < MON_FB_BAND_ROWS; y++)
-        for (unsigned x = 0; x < MON_FB_WIDTH; x++) band_pixel(x, y, MON_BAND_BG);
+    for (unsigned y = 0; y < band_rows; y++)
+        for (unsigned x = 0; x < band_width; x++) band_pixel(x, y, MON_BAND_BG);
     band_text(0, "SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY", MON_BAND_TEXT);
+    band_clean();
 }
 
 static void band_note(unsigned line, const char *s, uint32_t color)
 {
-    if (band_on) band_text(line, s, color);
+    if (!band_on) return;
+    band_text(line, s, color);
+    band_clean();
 }
 
 static void band_stop(uint64_t ipa, int write)
@@ -464,6 +484,7 @@ static void band_stop(uint64_t ipa, int write)
     for (unsigned i = 0; what[i]; i++) line[n++] = what[i];
     line[n] = 0;
     band_text(1, line, MON_BAND_STOP);
+    band_clean();
 }
 
 int monitor_data_abort(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *frame)
@@ -532,10 +553,35 @@ stop:
  * maintenance interrupt (PPI 25). While LR0 is occupied the physical timer
  * PPI is disabled at the redistributor, or it would re-fire at EL2 before
  * the guest can run. */
-#define GICR_IGROUPR0    (PHYS_GICR_BASE + 0x10000 + 0x0080)
-#define GICR_ISENABLER0  (PHYS_GICR_BASE + 0x10000 + 0x0100)
-#define GICR_ICENABLER0  (PHYS_GICR_BASE + 0x10000 + 0x0180)
-#define GICR_WAKER       (PHYS_GICR_BASE + 0x0014)
+/* The boot CPU's redistributor RD_base, found by monitor_init. */
+static uint64_t phys_gicr_rd = PHYS_GICR_BASE;
+#define GICR_WAKER       (phys_gicr_rd + 0x0014)
+#define GICR_IGROUPR0    (phys_gicr_rd + 0x10000 + 0x0080)
+#define GICR_ISENABLER0  (phys_gicr_rd + 0x10000 + 0x0100)
+#define GICR_ICENABLER0  (phys_gicr_rd + 0x10000 + 0x0180)
+/* The only physical PPIs the monitor needs: the GIC maintenance interrupt
+ * and the guest's virtual timer. Nothing else is enabled on the real GIC
+ * (Phase 3 decision 4's write list, docs/GAOKUN3-PHASE3.md). */
+#define GUEST_TIMER_PPIS (1u << MON_INTID_VTIMER)
+#define MONITOR_PPIS     ((1u << MON_INTID_MAINT) | GUEST_TIMER_PPIS)
+/* GICv3 (IHI 0069) GICD_CTLR, as EL2 sees it: DS (bit 6) reads one only
+ * with a single security state, as QEMU's GIC has; there bit 0 enables
+ * Group 0 and bit 1 Group 1. With two security states the Non-secure view
+ * has ARE_NS at bit 4 (set by the firmware; clearing it is UNPREDICTABLE)
+ * and EnableGrp1A at bit 1. RWP (bit 31) is read-only: write pending. */
+#define GICD_CTLR_DS     (1u << 6)
+#define GICD_CTLR_ARE_NS (1u << 4)
+#define GICD_CTLR_RWP    (1u << 31)
+#define GICR_LAST        (1ull << 4)        /* GICR_TYPER: last frame */
+#define GICR_FRAME       0x20000ull
+#define GICR_MAX_FRAMES  8                  /* the gaokun3's region: 1 MiB */
+static struct {
+    int stopped;                            /* monitor_init stopped by name */
+    const char *why;
+    uint32_t ctlr_before, ctlr_after;
+    unsigned frame;
+    int ds;
+} gic_state;
 /* Group 0: on this platform the timer reaches the guest as an FIQ (the
  * Phase 0C boot took FIQs at EL1, not IRQs), so the virtual timer is
  * delivered in group 0 and the guest acknowledges it at ICC_IAR0_EL1. */
@@ -549,25 +595,148 @@ void monitor_set_policy(int trace)
 
 void monitor_set_baseline_answers(int on) { baseline_answers = on; }
 
-void monitor_init(int trace)
+static int gic_stop(const char *why)
+{
+    gic_state.stopped = 1;
+    gic_state.why = why;
+    puts_("EL2: stop: ");
+    puts_(why);
+    puts_("\n");
+    return 0;
+}
+
+/* Bounded wait for a register bit to clear (RWP, ChildrenAsleep). */
+static int gic_wait_clear(uint64_t addr, uint32_t bit)
+{
+    for (unsigned i = 0; i < 1000000; i++)
+        if (!(mon_mmio_read32(addr) & bit)) return 1;
+    return 0;
+}
+
+/* Every write here is read-modify-write or write-1-to-set, and nothing is
+ * written until the boot CPU's redistributor is found and the distributor
+ * is in the state the firmware should have left it in. Returns 0 for a
+ * named stop; monitor_gic_report shows the outcome in the band. */
+int monitor_init(int trace)
 {
     monitor_set_policy(trace);
-    mon_redist_write(GICR_WAKER, 0);                     /* wake redistributor 0 */
+    gic_state.stopped = 0;
 
-    /* QEMU's PPIs reset to Group 0; move the timer and maintenance PPIs
-     * to Group 1 or the physical interface never signals EL2 with them. */
-    /* The guest's distributor writes go to the model, so QEMU's real
-     * distributor would stay at its reset value and forward nothing:
-     * enable both groups on it here. PPIs are configured per-CPU at the
-     * redistributor below; this only opens the distributor's gate. */
-    mon_redist_write(0x08000000, 0x3);                 /* GICD_CTLR: EnGrp0|EnGrp1 */
-    mon_redist_write(GICR_IGROUPR0, (1u << MON_INTID_MAINT) | (1u << 26));
-    mon_redist_write(GICR_ISENABLER0, (1u << MON_INTID_VTIMER) | (1u << 29) | (1u << 30)
-                     | (1u << 26) | (1u << MON_INTID_MAINT));
+    /* The boot CPU's redistributor: the frame whose GICR_TYPER affinity
+     * matches MPIDR_EL1 (both read only), not an assumed first frame. */
+    uint64_t mpidr = mon_mpidr();
+    uint64_t aff = (mpidr & 0xffffffull) | ((mpidr >> 32 & 0xff) << 24);
+    unsigned frame = 0;
+    for (;; frame++) {
+        if (frame == GICR_MAX_FRAMES) return gic_stop("no redistributor matches the boot CPU");
+        uint64_t typer = mon_mmio_read64(PHYS_GICR_BASE + frame * GICR_FRAME + 0x8);
+        if ((typer >> 32) == aff) break;
+        if (typer & GICR_LAST) return gic_stop("no redistributor matches the boot CPU");
+    }
+    phys_gicr_rd = PHYS_GICR_BASE + frame * GICR_FRAME;
+    gic_state.frame = frame;
+
+    /* The distributor: keep every bit the firmware set, ARE_NS above all,
+     * and add only the group enable this side of it controls. The guest's
+     * own distributor writes go to the model, so without this a QEMU GIC
+     * at reset forwards nothing. */
+    uint32_t ctlr = mon_mmio_read32(PHYS_GICD_BASE);
+    gic_state.ctlr_before = ctlr;
+    gic_state.ds = (ctlr & GICD_CTLR_DS) != 0;
+    uint32_t want;
+    if (gic_state.ds) {
+        want = ctlr | 0x3;                           /* EnableGrp0 | EnableGrp1 */
+    } else {
+        if (!(ctlr & GICD_CTLR_ARE_NS)) return gic_stop("GICD_CTLR ARE_NS is clear");
+        want = ctlr | (1u << 1);                     /* EnableGrp1A */
+    }
+    want &= ~GICD_CTLR_RWP;
+    if (want != (ctlr & ~GICD_CTLR_RWP)) {
+        mon_redist_write(PHYS_GICD_BASE, want);
+        if (!gic_wait_clear(PHYS_GICD_BASE, GICD_CTLR_RWP))
+            return gic_stop("GICD_CTLR write still pending");
+    }
+    gic_state.ctlr_after = mon_mmio_read32(PHYS_GICD_BASE);
+
+    /* Wake the redistributor only if it sleeps (ProcessorSleep, bit 1),
+     * and wait for ChildrenAsleep (bit 2) to clear. With two security
+     * states the Non-secure view reads zero and nothing is written. */
+    uint32_t waker = mon_mmio_read32(GICR_WAKER);
+    if (waker & 2u) {
+        mon_redist_write(GICR_WAKER, waker & ~2u);
+        if (!gic_wait_clear(GICR_WAKER, 4u)) return gic_stop("redistributor did not wake");
+    }
+
+    /* QEMU's PPIs reset to Group 0 and its GIC has one security state:
+     * move the maintenance PPI to Group 1, or the physical interface never
+     * signals EL2 with it. With two security states the groups are the
+     * secure firmware's, not EL2's, and this register is not touched. */
+    if (gic_state.ds) {
+        uint32_t groups = mon_mmio_read32(GICR_IGROUPR0);
+        if (!(groups & (1u << MON_INTID_MAINT)))
+            mon_redist_write(GICR_IGROUPR0, groups | (1u << MON_INTID_MAINT));
+    }
+    mon_redist_write(GICR_ISENABLER0, MONITOR_PPIS);  /* write-1-to-set */
     /* No self-tick: the guest's own CNTV deadline fires the physical
-     * timer PPI, and monitor_fiq injects it. A free-running EL2 tick
+     * timer PPI, and the handler injects it. A free-running EL2 tick
      * delivered before the guest arms its timer only disrupts it. */
+    puts_("EL2: gic: ctlr ");
+    puthex(gic_state.ctlr_before);
+    puts_(" -> ");
+    puthex(gic_state.ctlr_after);
+    puts_(", redistributor frame ");
+    putdec(frame);
+    puts_("\n");
     puts_("EL2: monitor: stage 2 default-deny, virtual GICv3, PL011 model\n");
+    return 1;
+}
+
+/* After the band is drawn: show what monitor_init read of the real GIC,
+ * or why it stopped. Returns 0 when monitor_init stopped (the caller
+ * halts there). Line 3: "GIC CTLR XXXXXXXX -> XXXXXXXX  RD FRAME n". */
+void monitor_note(const char *s)
+{
+    band_note(2, s, 0x00ffff40u);
+}
+
+void monitor_fault(uint64_t vec, uint64_t esr, uint64_t elr)
+{
+    if (!band_on || monitor_stop_count) return;
+    char line[64] = "FAULT ";
+    unsigned k = 6;
+    for (int i = 2; i >= 0; i--) line[k++] = "0123456789ABCDEF"[(vec >> (4 * i)) & 15];
+    const char *s1 = " ESR ";
+    for (unsigned i = 0; s1[i]; i++) line[k++] = s1[i];
+    for (int i = 7; i >= 0; i--) line[k++] = "0123456789ABCDEF"[(esr >> (4 * i)) & 15];
+    const char *s2 = " ELR ";
+    for (unsigned i = 0; s2[i]; i++) line[k++] = s2[i];
+    for (int i = 15; i >= 0; i--) line[k++] = "0123456789ABCDEF"[(elr >> (4 * i)) & 15];
+    line[k] = 0;
+    band_note(1, line, MON_BAND_STOP);
+}
+
+int monitor_gic_report(void)
+{
+    if (gic_state.stopped) {
+        char line[64] = "STOP: ";
+        unsigned k = 6;
+        for (unsigned i = 0; gic_state.why[i] && k < 63; i++) line[k++] = gic_state.why[i];
+        line[k] = 0;
+        band_note(1, line, 0x00ff5050u);
+        return 0;
+    }
+    char line[48] = "GIC CTLR ";
+    unsigned k = 9;
+    for (int i = 7; i >= 0; i--) line[k++] = "0123456789ABCDEF"[(gic_state.ctlr_before >> (4 * i)) & 15];
+    const char *arrow = " -> ";
+    for (unsigned i = 0; arrow[i]; i++) line[k++] = arrow[i];
+    for (int i = 7; i >= 0; i--) line[k++] = "0123456789ABCDEF"[(gic_state.ctlr_after >> (4 * i)) & 15];
+    const char *rd = "  RD FRAME ";
+    for (unsigned i = 0; rd[i]; i++) line[k++] = rd[i];
+    line[k++] = (char)('0' + gic_state.frame % 10);
+    line[k] = 0;
+    band_note(3, line, 0x00ffffffu);
+    return 1;
 }
 
 static void handle_physical(uint64_t iar, int group0)
@@ -580,7 +749,7 @@ static void handle_physical(uint64_t iar, int group0)
             /* Re-arm a timer PPI masked while LR0 was busy (the
              * maintenance interrupt is not used for this; UIE would
              * assert it permanently whenever no LR is valid). */
-            mon_redist_write(GICR_ISENABLER0, (1u << MON_INTID_VTIMER) | (1u << 29) | (1u << 30));
+            mon_redist_write(GICR_ISENABLER0, GUEST_TIMER_PPIS);
         }
         mon_eoir1_write(iar);
         return;
@@ -595,8 +764,8 @@ static void handle_physical(uint64_t iar, int group0)
          * LR0 is the guest's and is left alone. */
         if ((mon_lr0_read() >> 62) == 0)
             mon_lr0_write(0);
-        mon_redist_write(GICR_ISENABLER0, (1u << MON_INTID_VTIMER) | (1u << 30) | (1u << 29));
-    } else if (intid == MON_INTID_VTIMER || intid == 29 || intid == 30) {
+        mon_redist_write(GICR_ISENABLER0, GUEST_TIMER_PPIS);
+    } else if (intid == MON_INTID_VTIMER) {
         if ((mon_lr0_read() >> 62) == 0) {           /* LR0 free: inject */
             mon_lr0_write(LR_PENDING_EOI(intid));
             mon_redist_write(GICR_ICENABLER0, 1u << intid);

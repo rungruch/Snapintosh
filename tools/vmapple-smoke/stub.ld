@@ -10,6 +10,8 @@ SECTIONS
 	.rodata : { *(.rodata*) }
 	.data : { *(.data*) }
 	. = ALIGN(16);
-	.bss : { *(.bss*) *(COMMON) }
+	__bss_start = .;
+	.bss : { *(.bss*) *(COMMON) . = ALIGN(16); }
+	__bss_end = .;
 	/DISCARD/ : { *(.note*) *(.comment) *(.ARM.attributes) }
 }

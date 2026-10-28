@@ -33,14 +33,32 @@ uint64_t mon_lr_read(unsigned n);    /* ICH_LR<n>_EL2, n 1 to 3 */
 void mon_lr_write(unsigned n, uint64_t value);
 uint64_t mon_misr_read(void);        /* ICH_MISR_EL2 */
 void mon_uart_putc(char c);          /* the monitor's own PL011 at EL2 */
-void mon_redist_write(uint64_t addr, uint32_t value); /* physical GICR store */
+/* Clean [pa, pa+size) to the point of coherency (the real panel reads
+ * memory, not caches); a no-op where the console is a UART. */
+void mon_clean_range(uint64_t pa, uint64_t size);
+void mon_redist_write(uint64_t addr, uint32_t value); /* physical GIC store */
+uint32_t mon_mmio_read32(uint64_t addr);  /* physical GIC load */
+uint64_t mon_mmio_read64(uint64_t addr);
+uint64_t mon_mpidr(void);                 /* MPIDR_EL1 */
 uint64_t mon_cntpct(void);           /* CNTPCT_EL0 */
 uint64_t mon_cntfrq(void);           /* CNTFRQ_EL0 */
 uint64_t mon_translate_va(uint64_t va); /* PAR_EL1 after AT S1E1R, bit0 set on fault */
 void mon_cnthp_rearm(uint32_t ticks);   /* CNTHP_TVAL_EL2: next EL2 timer tick */
 
-/* Called once from stub.S when the monitor flag is set. */
-void monitor_init(int trace);
+/* Called once from stub.S when the monitor flag is set: finds the boot
+ * CPU's redistributor and enables the monitor's two PPIs on the platform
+ * GIC, read-modify-write. Returns 0 for a named stop. */
+int monitor_init(int trace);
+/* After monitor_set_band: draw monitor_init's GIC line, or its stop, in
+ * the band. Returns 0 when monitor_init stopped; the stub then halts. */
+int monitor_gic_report(void);
+/* Draw a line in the band's second row and clean it to the panel
+ * (diagnostic staging: the last step drawn before a halt or a reset
+ * names where execution reached). */
+void monitor_note(const char *s);
+/* Draw an unexpected EL2 fault (vector offset, ESR_EL2, ELR_EL2) in the
+ * band's stop row when no named stop has already claimed it. */
+void monitor_fault(uint64_t vec, uint64_t esr, uint64_t elr);
 /* Policy only, without the physical GIC writes (the host test's entry). */
 void monitor_set_policy(int trace);
 /* The guest's boot_args physical address, read once for its memSize (the
@@ -51,8 +69,10 @@ void monitor_set_guest(uint64_t boot_args_pa);
 void monitor_set_baseline_answers(int on);
 /* The split console (PARAM_FLAG_FRAMEBUFFER): clear the monitor's band
  * under the guest's framebuffer rows and draw its banner; a named stop then
- * draws its line there too. */
-void monitor_set_band(int on);
+ * draws its line there too. The geometry is the caller's: QEMU's RAM
+ * framebuffer constants, or the real panel's from the parameter page. */
+void monitor_set_band(int on, uint64_t fb_pa, unsigned width, unsigned stride,
+                      unsigned guest_rows, unsigned band_rows);
 
 /* A data abort from the guest. esr is ESR_EL2, ipa the faulting IPA from
  * HPFAR_EL2, elr the guest VA of the faulting instruction, frame the
