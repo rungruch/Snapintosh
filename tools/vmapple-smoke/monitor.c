@@ -8,9 +8,10 @@ uint64_t monitor_stop_ipa;
 int monitor_stop_write;
 uint64_t monitor_stop_count;
 
-static int absent_fixed;
 static int tracing;
 static int baseline_answers;
+static uint64_t guest_ram_size;      /* boot_args.memSize, for the config table */
+static uint64_t mailbox_requests;    /* stores absorbed at 0x004FFFF8 */
 static uint32_t count_pcie, count_uart, count_gic, count_rtc, count_other;
 
 /* ---- small output helpers (monitor console) --------------------------- */
@@ -204,9 +205,124 @@ static int pcie_access(unsigned size, int write, uint64_t *value)
     return 1;
 }
 
+/* ---- AppleVirtualPlatform's fixed addresses (Phase 3 decision 5) --------
+ * The owner's decision of 2026-10-28: answer the three as Apple's virtual
+ * machine does where that is known, and never invent a value beyond it.
+ * The facts, not the code, come from QEMU v11.1.2's vmapple machine
+ * (hw/vmapple/bdif.c, cfg.c; GPL-2.0-or-later), which implements
+ * Virtualization.framework's device model for macOS 12 guests: OBSERVED
+ * there, INFERRED for 26A428. No identifier of the real machine is ever
+ * used. */
+
+/* The backdoor interface at 0x30000000: a block-device mailbox, one page
+ * per device selected by bits 31:16 of the offset (ROOT 0, AUX 0x10000).
+ * Reads are QEMU's: STATUS (+0) 1, CFG (+4) 2, +8 0x420, BUSY (+0x10) 1,
+ * +0x400 1, NEXT_DEVICE (+0x420) 0x8000000 for ROOT and 0x10000 for AUX,
+ * +0x434 0, anything else all-ones. The 26A428 kernel reads the AUX
+ * page's +0 and compares it with 1 (local study of the kernelcache,
+ * OBSERVED), which is QEMU's answer: present. A command (+0x408) asks for
+ * a disk transfer; Phase 3 has no disk behind it, so it is a named stop.
+ * Other writes are ignored, as QEMU ignores them. */
+static int bdif_access(uint64_t off, unsigned size, int write, uint64_t *value)
+{
+    uint64_t devid = off & 0xffff0000u, reg = off & 0xffffu;
+    count_other++;
+    if (write) return reg != 0x408;
+    switch (reg) {
+    case 0x000: *value = 1; break;
+    case 0x004: *value = 2; break;
+    case 0x008: *value = 0x420; break;
+    case 0x010: *value = 1; break;
+    case 0x400: *value = 1; break;
+    case 0x434: *value = 0; break;
+    case 0x420:
+        if (devid == 0) { *value = 0x8000000; break; }
+        if (devid == 0x10000) { *value = 0x10000; break; }
+        /* fall through: any other device reads all-ones */
+    default: *value = (size == 8) ? ~0ull : ((1ull << (8 * size)) - 1); break;
+    }
+    return 1;
+}
+
+/* The configuration region at 0x400000: a 64 KiB table the host fills.
+ * Field offsets are QEMU's struct as compiled (its comments are stale past
+ * 0x100): version 2 (+0), CPU count (+4), +8 1, +0xc 1, +0x10 0x20, ECID
+ * (+0x18) zero as QEMU's default, RAM size (+0x20), +0x2c 1, +0x30 1, the
+ * MAC addresses (+0x40..) zero as QEMU's default, CPU IDs (+0x100) 0 for
+ * the one CPU, serial (+0x500) "1234", +0x520 "D/A", model (+0x540)
+ * "VM0001", +0x580 1, SoC name (+0x584) "Apple M1 (Virtual)"; QEMU's
+ * non-identifying defaults, zero elsewhere. QEMU fills rnd (+0x38) from
+ * the host's random source, so a read of it is a named stop until a real
+ * source feeds it: a fixed value would be fabricated entropy. Writes are
+ * a named stop; their meaning is unknown. */
+static const struct { uint32_t off; const char *text; } cfg_strings[] = {
+    { 0x500, "1234" }, { 0x520, "D/A" }, { 0x540, "VM0001" }, { 0x584, "Apple M1 (Virtual)" },
+};
+
+static uint8_t cfg_byte(uint64_t off)
+{
+    /* Exact fields: offset, size in bytes, value. */
+    const struct { uint32_t off, size; uint64_t value; } fields[] = {
+        { 0x000, 4, 2 }, { 0x004, 4, 1 }, { 0x008, 4, 1 }, { 0x00c, 4, 1 },
+        { 0x010, 4, 0x20 }, { 0x020, 8, guest_ram_size }, { 0x02c, 4, 1 },
+        { 0x030, 4, 1 }, { 0x580, 4, 1 },
+    };
+    for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); i++)
+        if (off >= fields[i].off && off < fields[i].off + fields[i].size)
+            return (uint8_t)(fields[i].value >> (8 * (off - fields[i].off)));
+    for (unsigned i = 0; i < sizeof(cfg_strings) / sizeof(cfg_strings[0]); i++) {
+        uint64_t base = cfg_strings[i].off;
+        const char *s = cfg_strings[i].text;
+        unsigned n = 0;
+        while (s[n]) n++;
+        if (off >= base && off < base + n) return (uint8_t)s[off - base];
+    }
+    return 0;
+}
+
+static int cfg_access(uint64_t off, unsigned size, int write, uint64_t *value)
+{
+    count_other++;
+    if (write) return 0;
+    if (off < 0x3c && off + size > 0x38) return 0;            /* rnd */
+    uint64_t v = 0;
+    for (unsigned i = 0; i < size; i++) v |= (uint64_t)cfg_byte(off + i) << (8 * i);
+    *value = v;
+    return 1;
+}
+
+/* The mailbox at 0x004FFFF8: the 26A428 kernel builds a 24-byte request
+ * on its stack, stores the request's physical address here, and reads its
+ * first halfword back, expecting the host to have answered during the
+ * trapped store (local study, INFERRED). Nothing public describes it, so
+ * no answer is made: the store is absorbed, logged and shown in the
+ * monitor's band, and the guest reads back its own request unchanged, as
+ * the Phase 0C smoke's QEMU flash did. Any other access is a named stop. */
+static void band_note(unsigned line, const char *s, uint32_t color);
+static int mailbox_access(uint64_t off, unsigned size, int write, uint64_t value)
+{
+    count_other++;
+    if (!write || !((off == 0xff8 && (size == 8 || size == 4)) || (off == 0xffc && size == 4)))
+        return 0;
+    if (off == 0xff8 && mailbox_requests++ == 0) {
+        puts_("EL2: mailbox: request at ");
+        puthex(value);
+        puts_(" absorbed, no host to answer it\n");
+        band_note(2, "MAILBOX 4FFFF8: REQUEST ABSORBED, NO HOST", 0x00ffff40u);
+    }
+    return 1;
+}
+
+void monitor_set_guest(uint64_t boot_args_pa)
+{
+    /* boot_args.memSize (+0x18), pexpert/arm64/boot.h. Guest RAM is mapped
+     * IPA = PA, and EL2 reads it with its MMU off. */
+    guest_ram_size = boot_args_pa ? *(volatile uint64_t *)(uintptr_t)(boot_args_pa + 0x18) : 0;
+}
+
 struct window { uint64_t base, size; int kind; };
 enum { K_GICD, K_GICR, K_MSI, K_UART, K_PL031, K_PL061, K_PVPANIC, K_PCIE,
-       K_FIXED_ID, K_FIXED_REQ };
+       K_BDIF, K_CFG, K_MAILBOX };
 static const struct window windows[] = {
     { MON_GICD_IPA,    0x10000,    K_GICD },
     { MON_GICR_IPA,    0x400000,   K_GICR },
@@ -216,12 +332,9 @@ static const struct window windows[] = {
     { MON_PL061_IPA,   0x1000,     K_PL061 },
     { MON_PVPANIC_IPA, 0x10000,    K_PVPANIC },
     { MON_PCIE_IPA,    MON_PCIE_SIZE, K_PCIE },
-    { MON_FIXED_ID_IPA,  0x1000,   K_FIXED_ID },
-    { MON_FIXED_REQ_IPA, 0x1000,   K_FIXED_REQ },
-    /* A third fixed address P3 found: a computed-pointer read at
-     * 0x4006cc during IOKit start, answered by QEMU's flash in the old
-     * smoke. Contract UNKNOWN; same policy as the other two. */
-    { 0x400000,          0x1000,   K_FIXED_REQ },
+    { MON_BDIF_IPA,    0x200000,   K_BDIF },
+    { MON_CFG_IPA,     0x10000,    K_CFG },
+    { MON_MAILBOX_IPA, 0x1000,     K_MAILBOX },
 };
 
 /* Decode the faulting load/store when the syndrome carries no access
@@ -308,6 +421,11 @@ void monitor_set_band(int on)
     band_text(0, "SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY", MON_BAND_TEXT);
 }
 
+static void band_note(unsigned line, const char *s, uint32_t color)
+{
+    if (band_on) band_text(line, s, color);
+}
+
 static void band_stop(uint64_t ipa, int write)
 {
     if (!band_on) return;
@@ -347,14 +465,9 @@ int monitor_data_abort(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *frame
         case K_PL061: handled = store_access(pl061_regs, off, size, write, &value); break;
         case K_PVPANIC: handled = store_access(pvpanic_regs, off, size, write, &value); break;
         case K_PCIE: handled = pcie_access(size, write, &value); break;
-        case K_FIXED_ID:
-            if (!absent_fixed) goto stop;
-            if (!write) value = (size == 8) ? ~0ull : ((1ull << (8 * size)) - 1);
-            handled = 1; break;
-        case K_FIXED_REQ:
-            if (!absent_fixed) goto stop;
-            if (!write) value = 0;
-            handled = 1; break;
+        case K_BDIF: handled = bdif_access(off, size, write, &value); break;
+        case K_CFG: handled = cfg_access(off, size, write, &value); break;
+        case K_MAILBOX: handled = mailbox_access(off, size, write, value); break;
         default: handled = 0; break;
         }
         if (!handled) goto stop;
@@ -401,17 +514,16 @@ stop:
 #define LR_PENDING_EOI(vintid) \
     ((1ull << 62) | (0xa0ull << 48) | (1ull << 41) | (uint64_t)(vintid))
 
-void monitor_set_policy(int absent, int trace)
+void monitor_set_policy(int trace)
 {
-    absent_fixed = absent;
     tracing = trace;
 }
 
 void monitor_set_baseline_answers(int on) { baseline_answers = on; }
 
-void monitor_init(int absent, int trace)
+void monitor_init(int trace)
 {
-    monitor_set_policy(absent, trace);
+    monitor_set_policy(trace);
     mon_redist_write(GICR_WAKER, 0);                     /* wake redistributor 0 */
 
     /* QEMU's PPIs reset to Group 0; move the timer and maintenance PPIs

@@ -4,13 +4,14 @@
  * monitor.c is freestanding EL2 code called from stub.S; it is also built
  * on the host by tools/test-vmapple-monitor.c, which supplies the mon_*
  * helpers below as fakes. The models are the P3 answers to the windows P1
- * measured, under Phase 3 decision 5's recommended split (the decision is
- * the owner's and still open): published-contract models for the PL011,
- * PL031, PL061, the GICv3 distributor and redistributors, the MSI frame
- * and PCIe configuration space with no functions; the paravirtual devices
- * are absent from the tree (the loader drops their nodes); the two fixed
- * addresses stop the run by default and are answered as absent devices
- * only under the opt-in diagnostic flag.
+ * measured, under Phase 3 decision 5 (the owner's, 2026-10-28):
+ * published-contract models for the PL011, PL031, PL061, the GICv3
+ * distributor and redistributors, the MSI frame and PCIe configuration
+ * space with no functions; the paravirtual devices are absent from the
+ * tree (the loader drops their nodes); AppleVirtualPlatform's fixed
+ * addresses answered as Apple's virtual machine does where that is known
+ * (the backdoor interface and the configuration region), and the mailbox
+ * store absorbed with no answer.
  *
  * Everything the guest sees is one of these models. Stage 2 maps only
  * guest RAM, so any other IPA faults here, and an IPA with no model is a
@@ -36,11 +37,13 @@ uint64_t mon_cntfrq(void);           /* CNTFRQ_EL0 */
 uint64_t mon_translate_va(uint64_t va); /* PAR_EL1 after AT S1E1R, bit0 set on fault */
 void mon_cnthp_rearm(uint32_t ticks);   /* CNTHP_TVAL_EL2: next EL2 timer tick */
 
-/* Called once from stub.S when the monitor flag is set. absent_fixed is
- * the diagnostic gate for the two fixed addresses. */
-void monitor_init(int absent_fixed, int trace);
+/* Called once from stub.S when the monitor flag is set. */
+void monitor_init(int trace);
 /* Policy only, without the physical GIC writes (the host test's entry). */
-void monitor_set_policy(int absent_fixed, int trace);
+void monitor_set_policy(int trace);
+/* The guest's boot_args physical address, read once for its memSize (the
+ * configuration region's RAM size). */
+void monitor_set_guest(uint64_t boot_args_pa);
 /* Debug only: answer the secondary windows as the Phase 0C smoke's QEMU
  * window did (all-ones reads, sunk writes), to bisect model fidelity. */
 void monitor_set_baseline_answers(int on);

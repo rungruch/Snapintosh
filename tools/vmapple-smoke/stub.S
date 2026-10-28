@@ -81,11 +81,10 @@ _start:
 	ldr	x0, =pt_flag
 	str	x22, [x0]
 	bl	monitor_setup
-	mov	x0, x22
-	lsr	x0, x0, #2		// absent-fixed diagnostic flag
-	and	x0, x0, #1
-	and	x1, x22, #1		// tracing
+	and	x0, x22, #1		// tracing
 	bl	monitor_init
+	mov	x0, x21			// boot_args, for the config region's RAM size
+	bl	monitor_set_guest
 	mov	x0, x22
 	lsr	x0, x0, #6		// baseline-answers debug flag
 	and	x0, x0, #1

@@ -30,11 +30,9 @@
 #define PARAM_MAGIC  0x18
 #define PARAM_FLAG_TRACE 1
 /* bit1: run as the Route B monitor (Phase 3 P3): stage 2 default-deny,
- * virtual GICv3, device models in monitor.c. bit2: diagnostic only --
- * answer the two fixed addresses as absent devices instead of stopping
- * (Phase 3 decision 5 option d; never the default). */
+ * virtual GICv3, device models in monitor.c. bit2 is unused: it was the
+ * absent-fixed diagnostic, superseded by Phase 3 decision 5. */
 #define PARAM_FLAG_MONITOR 2
-#define PARAM_FLAG_ABSENT_FIXED 4
 /* bit3: debug only -- stage 2 also maps QEMU's GIC and PL011 at the
  * classic layout's IPAs, bypassing the models (bisection aid). */
 #define PARAM_FLAG_PASSTHRU 8
@@ -132,8 +130,11 @@
 #define MON_PVPANIC_IPA  0x20070000ull   /* pvpanic model */
 #define MON_PCIE_IPA     0x40000000ull   /* PCIe config, absent functions */
 #define MON_PCIE_SIZE    0x10000000ull
-#define MON_FIXED_ID_IPA 0x30010000ull   /* no tree node: stop (or absent) */
-#define MON_FIXED_REQ_IPA 0x004ff000ull  /* page of 0x004ffff8: stop (or sink) */
+/* AppleVirtualPlatform's fixed addresses, which have no tree node; their
+ * answers are Phase 3 decision 5's (monitor.c). */
+#define MON_BDIF_IPA     0x30000000ull   /* backdoor interface, 2 MiB */
+#define MON_CFG_IPA      0x00400000ull   /* configuration region, 64 KiB */
+#define MON_MAILBOX_IPA  0x004ff000ull   /* page of the 0x004ffff8 mailbox */
 
 /* Physical (EL2) addresses of QEMU's own devices the monitor drives. The
  * guest never sees these IPAs: stage 2 does not map them. */

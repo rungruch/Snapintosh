@@ -66,7 +66,7 @@ static int access(uint64_t ipa, unsigned size_log2, unsigned rt, int write, uint
 
 int main(void)
 {
-    monitor_set_policy(0, 0);
+    monitor_set_policy(0);
 
     /* PL011: FR reports both FIFOs empty; a byte written to DR reaches
      * the monitor UART. */
@@ -103,19 +103,52 @@ int main(void)
     CHECK(access(MON_GICR_IPA + 0x14, 2, 6, 0, 0) == 1 && !(frame[6] & (1u << 2)),
           "GICR WAKER never reports ChildrenAsleep");
 
-    /* Default-deny: an unmodelled IPA and both fixed addresses stop. */
+    /* Default-deny: an unmodelled IPA stops by name. */
     CHECK(access(0x20000000, 2, 5, 0, 0) == 0 && monitor_stop_ipa == 0x20000000,
           "an unmodelled IPA stops by name");
-    CHECK(access(MON_FIXED_ID_IPA, 2, 5, 0, 0) == 0 && monitor_stop_ipa == MON_FIXED_ID_IPA,
-          "the 0x30010000 fixed address stops by default");
-    CHECK(access(0x004ffff8, 3, 5, 1, 0x1000) == 0 && monitor_stop_ipa == 0x004ffff8,
-          "the 0x004ffff8 fixed address stops by default");
 
-    /* The diagnostic gate answers them as absent devices, nothing more. */
-    monitor_set_policy(1, 0);
-    CHECK(access(MON_FIXED_ID_IPA, 2, 5, 0, 0) == 1 && frame[5] == 0xffffffffull,
-          "absent-fixed: the ID read is all-ones");
-    CHECK(access(0x004ffff8, 3, 5, 1, 0x1000) == 1, "absent-fixed: the request store is sunk");
+    /* Decision 5: the backdoor interface answers as QEMU's vmapple does. */
+    CHECK(access(MON_BDIF_IPA + 0x10000, 2, 5, 0, 0) == 1 && frame[5] == 1,
+          "backdoor: the AUX STATUS reads 1, the value the kernel checks for");
+    CHECK(access(MON_BDIF_IPA + 0x420, 2, 5, 0, 0) == 1 && frame[5] == 0x8000000,
+          "backdoor: ROOT NEXT_DEVICE");
+    CHECK(access(MON_BDIF_IPA + 0x10420, 2, 5, 0, 0) == 1 && frame[5] == 0x10000,
+          "backdoor: AUX NEXT_DEVICE");
+    CHECK(access(MON_BDIF_IPA + 0x10024, 2, 5, 0, 0) == 1 && frame[5] == 0xffffffffull,
+          "backdoor: an undocumented register reads all-ones, as QEMU's");
+    CHECK(access(MON_BDIF_IPA + 0x10408, 3, 5, 1, 0x1000) == 0
+          && monitor_stop_ipa == MON_BDIF_IPA + 0x10408,
+          "backdoor: a disk command is a named stop (no disk)");
+    CHECK(access(MON_BDIF_IPA + 0x10004, 2, 5, 1, 7) == 1, "backdoor: other writes are ignored");
+
+    /* The configuration region: QEMU's table, non-identifying defaults. */
+    static uint64_t boot_args[4] = {0, 0, 0, 0x1C000000};
+    monitor_set_guest((uint64_t)(uintptr_t)boot_args);
+    CHECK(access(MON_CFG_IPA, 3, 5, 0, 0) == 1 && frame[5] == (2ull | (1ull << 32)),
+          "config: version 2, one CPU");
+    CHECK(access(MON_CFG_IPA + 0x20, 3, 5, 0, 0) == 1 && frame[5] == 0x1C000000,
+          "config: the RAM size is boot_args.memSize");
+    CHECK(access(MON_CFG_IPA + 0x500, 2, 5, 0, 0) == 1 && frame[5] == 0x34333231,
+          "config: the serial is QEMU's placeholder \"1234\"");
+    CHECK(access(MON_CFG_IPA + 0x584, 0, 5, 0, 0) == 1 && frame[5] == 'A',
+          "config: the SoC name");
+    CHECK(access(MON_CFG_IPA + 0x18, 3, 5, 0, 0) == 1 && frame[5] == 0,
+          "config: the ECID is zero, QEMU's default, never the machine's");
+    CHECK(access(MON_CFG_IPA + 0x6cc, 2, 5, 0, 0) == 1 && frame[5] == 0,
+          "config: past the known fields reads zero, as QEMU's");
+    CHECK(access(MON_CFG_IPA + 0x38, 2, 5, 0, 0) == 0,
+          "config: rnd is a named stop, not a fabricated random number");
+    CHECK(access(MON_CFG_IPA + 0x34, 3, 5, 0, 0) == 0, "config: a read overlapping rnd stops");
+    CHECK(access(MON_CFG_IPA + 0x100, 2, 5, 1, 1) == 0, "config: a write is a named stop");
+
+    /* The mailbox: the request store is absorbed and logged, nothing else. */
+    uart_len = 0;
+    CHECK(access(MON_MAILBOX_IPA + 0xff8, 3, 5, 1, 0x4aa8fb60) == 1,
+          "mailbox: the request store is absorbed");
+    uart_capture[uart_len] = 0;
+    CHECK(strstr(uart_capture, "mailbox: request at") != NULL, "mailbox: the request is logged");
+    CHECK(access(MON_MAILBOX_IPA + 0xff8, 3, 5, 0, 0) == 0, "mailbox: a read is a named stop");
+    CHECK(access(MON_MAILBOX_IPA + 0x10, 2, 5, 1, 0) == 0, "mailbox: another store is a named stop");
 
     /* No syndrome (ISV 0): the instruction is decoded. LDR x5, [x6] and
      * STRB w7, [x6] against the PL011 flags and data registers. */

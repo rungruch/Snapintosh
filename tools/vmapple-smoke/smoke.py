@@ -52,7 +52,6 @@ SMOKE_PARAMS_MAGIC = 0x564D41504C450001
 SMOKE_FAULT_MAGIC = 0x5641554C54
 PARAM_FLAG_TRACE = 1
 PARAM_FLAG_MONITOR = 2
-PARAM_FLAG_ABSENT_FIXED = 4
 PARAM_FLAG_PASSTHRU = 8
 PARAM_FLAG_GICPT = 16
 PARAM_FLAG_UARTPT = 32
@@ -279,8 +278,6 @@ def boot(args):
         return 2
     if args.monitor:
         flags |= PARAM_FLAG_MONITOR
-        if args.absent_fixed:
-            flags |= PARAM_FLAG_ABSENT_FIXED
         layout = kcload.MONITOR_LAYOUT
         if args.gic_passthrough:
             flags |= PARAM_FLAG_GICPT
@@ -350,6 +347,8 @@ def boot(args):
 # 6 + 20n. Colours are the 0x00RRGGBB words monitor.c stores.
 BAND_BG, BAND_TEXT, BAND_STOP = 0x00202020, 0x00FFFFFF, 0x00FF5050
 BAND_BANNER = 'SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY'
+BAND_NOTE = 0x00FFFF40
+BAND_MAILBOX = 'MAILBOX 4FFFF8: REQUEST ABSORBED, NO HOST'
 
 
 def font5x7():
@@ -400,7 +399,7 @@ def write_png(path, words, width, height):
     pathlib.Path(path).write_bytes(png)
 
 
-def check_screen(screen, stop_line, out):
+def check_screen(screen, stop_line, out, mailbox=False):
     """P4's verdict on the split console. Returns a list of problems."""
     base, width, height, stride = classicload.QEMU_SPLIT_SCREEN
     band_rows = classicload.QEMU_MONITOR_ROWS
@@ -418,9 +417,9 @@ def check_screen(screen, stop_line, out):
           f'picture at {out / "screen.png"}')
     if lit_rows < 8:
         problems.append('the guest drew nothing in its framebuffer rows')
-    lines = [(BAND_BANNER, BAND_TEXT)]
-    if stop_line:
-        lines.append((stop_line, BAND_STOP))
+    lines = [(BAND_BANNER, BAND_TEXT), (stop_line or '', BAND_STOP)]
+    if mailbox:
+        lines.append((BAND_MAILBOX, BAND_NOTE))
     want = expected_band(width, band_rows, lines)
     got = words[guest_rows * width:]
     wrong = sum(a != b for a, b in zip(got, want))
@@ -433,12 +432,13 @@ def check_screen(screen, stop_line, out):
 
 def report_monitor(text, mmio_log, out, screen=None):
     """The Phase 3 P3 verdict: with no QEMU device visible to the guest,
-    the boot reaches the root-mount wait (diagnostic absent-fixed gate) or
-    stops by name at a fixed address (the default), and QEMU's MMIO trace
-    shows only the monitor's own devices."""
+    the boot reaches the root-mount wait, or the kernel's console and then a
+    named stop at the first contract the monitor does not model (Phase 3's
+    acceptance), and QEMU's MMIO trace shows only the monitor's own
+    devices."""
     import kcload
     problems = []
-    stopped = 'EL2: stop: unmodelled IPA' in text
+    stopped = 'EL2: stop:' in text
     if 'EL2: monitor:' not in text:
         problems.append('the monitor did not start')
     if 'EL2: unexpected exception' in text and not stopped:
@@ -448,6 +448,10 @@ def report_monitor(text, mmio_log, out, screen=None):
     banner = 'Darwin Kernel Version' in text
     if not banner:
         problems.append('the kernel banner did not print')
+    if 'panic(' in text:
+        line = next(l for l in text.splitlines() if 'panic(' in l)
+        print('guest panic line:', line[:160])
+        problems.append('the guest panicked')
     if mmio_log is not None and mmio_log.exists():
         regions = {r[4] for r in kcload.parse_mmio_trace(mmio_log.read_text(errors='replace'))}
         allowed = {'pl011', 'gicv3_redist'}
@@ -455,8 +459,8 @@ def report_monitor(text, mmio_log, out, screen=None):
         print(f'QEMU devices touched (by the monitor at EL2 only): {sorted(regions)}')
         if stray:
             problems.append(f'a QEMU device answered outside the monitor: {sorted(stray)}')
-    if 'EL2: stop: unmodelled IPA' in text:
-        line = next(l for l in text.splitlines() if 'unmodelled IPA' in l)
+    if stopped:
+        line = next(l for l in text.splitlines() if 'EL2: stop:' in l)
         print(line.strip())
     if screen is not None:
         stop_line = None
@@ -465,16 +469,16 @@ def report_monitor(text, mmio_log, out, screen=None):
                 ipa, kind = line.split('unmodelled IPA ')[1].split()[:2]
                 stop_line = f'STOP: UNMODELLED IPA {int(ipa, 16):016X} {kind.upper()}'
                 break
-        problems += check_screen(screen, stop_line, out)
+        mailbox = 'EL2: mailbox:' in text
+        problems += check_screen(screen, stop_line, out, mailbox)
     if stopped:
-        fixed = ('0x0000000030010000' in text or '0x00000000004ff' in text)
-        if banner and fixed and 'RESULT' not in text:
+        if banner and 'RESULT' not in text:
             for p in problems:
                 print(f'FAIL: {p}')
             print('RESULT: ' + ('PASS' if not problems else 'FAIL') +
-                  ' (monitor: banner reached, then the named default-deny stop at a fixed address)')
+                  ' (monitor: banner reached, then a named stop)')
             return 0 if not problems else 1
-        problems.append('the run stopped at an unexpected IPA')
+        problems.append('the run stopped before the kernel banner')
     elif 'Waiting on' in text and 'IOMedia' in text:
         pass                                    # the harness timeout ends it here
     else:
@@ -530,10 +534,6 @@ def main():
             s.add_argument('--keep-nodes', action='store_true',
                            help='with --monitor: keep the paravirtual device nodes the '
                                 'monitor layout otherwise drops (bisection aid)')
-            s.add_argument('--absent-fixed', action='store_true',
-                           help='diagnostic only, with --monitor: answer the two fixed '
-                                'addresses as absent devices instead of stopping '
-                                '(Phase 3 decision 5 option d)')
     a = ap.parse_args()
     return selftest(a) if a.cmd == 'selftest' else boot(a)
 
