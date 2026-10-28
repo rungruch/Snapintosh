@@ -1,9 +1,10 @@
 # gaokun3 Phase 3: the VirtualMac kernel to a console (design)
 
-**Status, 2026-10-28: P1 to P4 and P7 done; P5 and P6 built; all host and
-QEMU only. In QEMU the stock kernel reaches the root-mount wait with every
-device a monitor model (P3's bar). Decisions 1, 2, 3 and 5 and the CPU
-count are made; decision 4 is open. Nothing run on hardware.** It does Phase 3 before Phase 2's USB
+**Status, 2026-10-28: P1 to P4 and P7 done; P5 and P6 built. In QEMU
+the stock kernel reaches the root-mount wait with every device a
+monitor model (P3's bar). Decisions 1 to 5 are made. On hardware, H1
+passed (run 28) and H2 has been attempted twice without passing
+(runs 29 and 30).** It does Phase 3 before Phase 2's USB
 host link, with the guest loaded from the USB stick. That
 changes the order [Phase 0C](GAOKUN3-PHASE0C.md#decision) set, and
 AGENTS.md calls standalone execution "a direction, not an already
@@ -1018,7 +1019,7 @@ stick path that read belongs to the loader before ExitBootServices (P5).
 | Step | What runs | Writes beyond RAM | Answers |
 | --- | --- | --- | --- |
 | H1 | q1n1 preloads the image, checks every hash, and allocates each chunk at its address against the live memory map. The monitor is not entered. **PASSED, run 28** ([below](#run-28-2026-10-28-h1-passes)) | none | the transport and the layout |
-| H2 | the monitor is up, with stage 2 and the virtual interface ready, and the guest **not** entered | EL2 registers; the GIC timer interrupt | the interrupt path |
+| H2 | the monitor is up, with stage 2 and the virtual interface ready, and the guest **not** entered. **PASSED, runs 33 and 34** ([below](#run-34-2026-10-28-h2-passes-with-real-gic-setup)) | EL2 registers; the GIC timer interrupt | the interrupt path |
 | H3 | the guest is entered, and the PL011 console shows the banner | as H2 | acceptance part 1; first QARMA5 evidence for condition 2 |
 | H4 | the boot runs to its first unmodelled contract | as H2 | acceptance part 2; the run that can reopen Route B |
 
@@ -1118,6 +1119,381 @@ gaokun3 build of it (H2 piece 2) does not exist, and with it the exact
 write list for decision 4, which stays the owner's. The monitor is
 entered under q1n1's inherited EL2 translation regime, which the QEMU
 rehearsal exercised but the gaokun3 build must re-examine.
+
+### H2 piece 2: the gaokun3 build of the monitor, 2026-10-28 (host and QEMU only)
+
+Built behind `-DVMAPPLE_GAOKUN3_MONITOR` (`tools/vmapple-smoke/smoke.py
+build --gaokun3 --base <pa>`); the QEMU build is unchanged in behaviour.
+
+- **Platform addresses**: GICD `0x17a00000`, GICR `0x17a60000` (OBSERVED
+  in the gaokun3 EL2 device tree); the physical distributor write in
+  `monitor_init` uses the platform base in both builds.
+- **Console**: no UART writes and no semihosting exits; a named stop
+  halts and shows its line in the monitor's band. Guest PL011 output
+  has nowhere to go in this build yet (H3's question, not H2's).
+- **Parameter page**: taken from x0 when q1n1's hand-off supplies it
+  (magic-checked, the fixed QEMU page otherwise); the fault record and
+  TIDCP log sit one and two pages above it. The screen split arrives
+  in its extension words (q1n1's `q1n1_vmb_fill_params`).
+- **Stage 2**: guest RAM in GiB 4 to 5 as 2 MiB blocks; the
+  framebuffer's guest rows are finished with 4 KiB pages from an L3
+  pool, because 2400 rows of 6400 bytes do not end on a 2 MiB
+  boundary. The band stays absent. The framebuffer stage-2 memory
+  type is the RAM block's write-back attributes: EXPERIMENTAL, an
+  open question for the real panel. Band writes are cleaned to the
+  point of coherency (`mon_clean_range`).
+- **Validation**: `tools/test-vmapple-monitor.py` PASS, 55 checks in
+  each of the QEMU and gaokun3 builds, including `monitor_init`'s
+  writes landing on the platform's distributor and redistributor;
+  the QEMU monitor boot still reaches the root-mount wait with no
+  QEMU device visible (`smoke.py boot --monitor --mmio-trace`, exit
+  0); the hand-off rehearsal still passes; a gaokun3 monitor bundle
+  builds and checks on the host (`tools/vmapple-stick.py`).
+
+What it does not show: anything on the gaokun3. QEMU has no GIC at
+`0x17a00000` and no panel at `0xc6200000`, so the gaokun3 build itself
+cannot boot there; it is compiled and host-tested only. Entering it on
+the machine is H2, whose first write to the real GIC is decision 4.
+The write list, from `monitor_init` at the gaokun3 addresses:
+
+| Write | Value | Why | Undo |
+| --- | --- | --- | --- |
+| `GICR_WAKER` `0x17a60014` | 0 | wake redistributor 0 | none needed (power cycle restores) |
+| `GICD_CTLR` `0x17a00000` | `0x3` | enable both groups on the real distributor (the guest's distributor is a model) | write 0 |
+| `GICR_IGROUPR0` `0x17a70080` | bits 25, 26 | maintenance and EL2-timer PPIs in Group 1 | write 0 |
+| `GICR_ISENABLER0` `0x17a70100` | bits 25, 26, 27, 29, 30 | enable the maintenance, EL2, virtual and generic timer PPIs | `GICR_ICENABLER0` with the same bits |
+
+Runtime writes after that are the same registers' enable/clear pair as
+PPIs are masked and re-armed, plus EL2 system registers (`ICC_PMR`,
+`ICC_IGRPEN0/1`, `ICH_HCR`, `HCR`) that are not GIC memory. Nothing
+here touches a clock, power, the SMMU or any device DMA.
+
+### H2 stick prepared, 2026-10-28 (not run)
+
+`tools/el2qual-usb.py vmapple-h2` builds the stick tree under
+`build/el2qual-usb/vmapple-h2/` (systemd-boot, slbounce, tcblaunch,
+the device tree, q1n1's gaokun3 `--vmapple-enter` build, and a version
+2 bundle whose guest chunks are H1's exactly, plus the gaokun3
+monitor at `0x162004000` and its parameter page at `0x162104000`;
+qualification `be3f9e42…41cb1`). The builder refuses a version 1
+bundle, a q1n1 without the entering mode, and any missing Secure
+Launch input (`tools/test-el2qual-usb.py` PASS). The checklist sits
+beside the tree at `build/el2qual-usb/vmapple-h2-checklist.md`.
+
+**This is prepared, not authorized and not run.** Booting it performs
+the decision 4 writes above; it needs the owner's explicit yes on the
+day, and the run is the owner's.
+
+#### Run 29 (2026-10-28): H2 stops at the monitor jump
+
+The H2 stick, one boot, photographed, OBSERVED on the machine:
+
+```
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3  BYTES 85263711  ENTRY 0000000103EB4480
+QUALIFICATION BE3F9E4232C8B571
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000  PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+ENTERING MONITOR AT EL2 (PHASE 3 STEP H2)
+Q1N1 SYNCHRONOUS EXCEPTION
+ESR 0x000000008600000E
+ELR 0x0000000162004000
+FAR 0x0000000162004000
+```
+
+What this shows:
+
+- **The stick chain works through ExitBootServices.** The bundle was
+  placed at its exact addresses, hashed in place and seeded from
+  `RAW` on the gaokun3, exactly as H1, now with the monitor chunk
+  kept. slbounce took q1n1 to EL2 (the exception report is q1n1's EL2
+  handler).
+- **The monitor was never entered.** ESR `0x8600000E` is an instruction
+  abort from the current EL, a translation fault at level 2, at the
+  monitor's first instruction. q1n1 after slbounce runs on EL2 page
+  tables that map what the firmware and q1n1 use; the monitor's
+  address, `0x162004000`, is not in them. In QEMU, EDK2 identity-maps
+  all of RAM, which is why the rehearsal could not see this.
+- **Decision 4's writes did not happen.** `monitor_init` never ran;
+  the real GIC was not touched. H2 remains unpassed.
+
+The fix (host first): before jumping, q1n1 builds its own EL2 identity
+map — its own image, the bundle's chunks, the parameter page, the
+framebuffer and the GIC — switches `TTBR0_EL2` to it, and only then
+enters the monitor. The table builder is host-tested, and the QEMU
+rehearsal exercises the same switch (EDK2's tables are replaced, not
+relied on).
+
+What it does not show: anything of the monitor running on the machine.
+
+#### Run 30 (2026-10-28): the monitor is entered, then the machine restarts
+
+The H2 stick with q1n1's own EL2 identity map, one boot, photographed
+and reported by the owner, OBSERVED on the machine:
+
+- As run 29 through `ENTERING MONITOR AT EL2 (PHASE 3 STEP H2)`, with
+  **no q1n1 exception**: the identity-map fix worked, and the monitor
+  started.
+- The monitor's band did not appear in the photograph, and the machine
+  then **restarted** (the owner's report). The monitor at that time
+  proceeded to enter the guest after setup, so the reset is
+  ambiguous: the real-GIC writes (next section), the early guest, and
+  EL3 are all candidates. Which one is UNKNOWN.
+
+So H2 is not passed. A reviewing agent then read `monitor_init`
+against the GICv3 architecture and found its blind `GICD_CTLR = 0x3`
+write unsafe with two security states (below); that write is also a
+candidate for this run's reset (INFERRED, unmeasured).
+
+**The review's fixes (built, host and QEMU only):**
+
+- `GICD_CTLR` is read-modify-write: every firmware bit is kept
+  (`ARE_NS` above all), only this side's group enable is added, the
+  `RWP` wait is bounded, and a clear `ARE_NS` in a two-security-state
+  view is a named stop. The band records `GIC CTLR <before> -> <after>`
+  and the redistributor frame.
+- The only PPIs enabled are 25 (maintenance) and 27 (virtual timer);
+  the firmware's physical timers (29, 30) are left alone.
+- The boot CPU's redistributor is found by matching `GICR_TYPER`'s
+  affinity against `MPIDR_EL1`, not assumed to be frame 0; no match is
+  a named stop before any write.
+- q1n1's Device mapping in its EL2 identity map is execute-never at
+  both levels (PXN and UXN).
+- The stick entry gains `--hold-at-monitor`: after setup the monitor
+  halts in its band and the guest is not entered, so the next H2 run
+  separates the monitor and its GIC writes from everything after.
+
+**Decision 4 is decided.** The owner approved the write list in
+session on 2026-10-28, before run 29; the approval was acted on for
+runs 29 and 30 but not recorded until now — a record gap, corrected
+here. The list as now built (superseding the H2-piece-2 table):
+
+| Write | Value | Why | Undo |
+| --- | --- | --- | --- |
+| `GICR_WAKER` (the boot CPU's frame) | clear ProcessorSleep only if set | wake the redistributor | power cycle |
+| `GICD_CTLR` `0x17a00000` | read, then set bit 1 only (two security states) or bits 0–1 (one) | enable this side's group; keep `ARE_NS` and every firmware bit | restore the value read |
+| `GICR_IGROUPR0` | add maintenance bit, one security state only | QEMU's PPIs reset to Group 0 | restore the value read |
+| `GICR_ISENABLER0` | bits 25 and 27 | maintenance and virtual timer only | `GICR_ICENABLER0` with the same bits |
+
+Nothing here touches a clock, power, the SMMU or any device DMA. The
+next H2 run needs nothing new from decision 4, but it is a new run
+and the owner's on the day.
+
+#### Runs 31 and 32 (2026-10-28): `--hold-at-monitor` and `--gic-hold` still restart; root cause found and fixed
+
+Two bisect runs on the machine (OBSERVED, owner's reports and
+photographs; [QUALIFICATION runs 31–32](GAOKUN3-QUALIFICATION.md#runs-so-far)):
+
+- **Run 31** (`--vmapple-enter --exit-vhe --hold-at-monitor`, q1n1
+  `daca77a3`, qualification `c636d8be…21b3`): printed `ENTERING MONITOR
+  AT EL2` and restarted within seconds, before any monitor band appeared.
+- **Run 32** (`--gic-hold`, q1n1 `5b0a3388`, qualification
+  `74ecc724…942f71c`, halting after `monitor_setup` before any GIC
+  access): printed `ENTERING MONITOR AT EL2` and restarted again.
+
+**Root cause of runs 30, 31 and 32 (VERIFIED by disassembly of
+`q1n1.efi` `5b0a3388` and `monitor-image.bin`):**
+
+1. **q1n1 never passed `manifest.params_pa` in `x0`.** In
+   `platform/uefi/vmapple-stick.c`, `q1n1_vmb_enter_kept` jumped to the
+   monitor with `((void (*)(void))(uintptr_t)manifest.monitor_entry_pa)()`.
+   In the compiled `q1n1.efi`, `x0` at `blr x8` still held the return
+   value of `build_el2_tables` (`el2_tables`, where `[x0, #0x18]` is zero,
+   not `SMOKE_PARAMS_MAGIC`). The QEMU hand-off rehearsal missed this
+   because `test-vmapple-handoff-qemu.py` placed `params_pa` at
+   `0x43000000`, the exact address `layout.h` used as its `params_base`
+   fallback when `x0` did not match `SMOKE_PARAMS_MAGIC`.
+2. **Unmapped fallback `0x43000000` and recursive fault loop.** On the
+   gaokun3, `0x43000000` is unmapped in `el2_tables`. At `_start + 0x80`
+   (`0x162004080`), before `monitor_set_band` (`0x162004108`) was ever
+   reached, `ldr x0, [x19, #0x18]` faulted at `0x43000018`. The EL2
+   sync vector jumped to `record_and_halt`, which tried to store the
+   fault record to `[params_base + 0x1000]` (`0x43001000`), faulting
+   recursively on every vector entry and pushing 16 bytes onto `sp` each
+   time until `sp` walked down through `.text` and overwrote `el2_vectors`
+   at `0x162004800`, resetting the machine.
+3. **Additional monitor and hand-off defects found and fixed at the same
+   time:**
+   - `llvm-objcopy -O binary` omits `NOBITS` `.bss`, so `.bss` (`s2_l0..s2_l3`,
+     `monitor_stop_count`, `in_fault`) contained whatever stale bytes were in
+     RAM at `0x16200a000..0x162052100`, and `q1n1_vmb_enter_kept`'s
+     `build_el2_tables` only guaranteed mapping `chunk2.bin`'s 21,984 file
+     bytes, not the 300 KiB `.bss` and stack above it. `_start` now zeroes
+     `[__bss_start, __bss_end)`, and q1n1 adds `{ manifest.monitor_entry_pa,
+     0x80000, 0 }` to `el2_tables` and allocates/zeroes all 3 parameter/fault/log
+     pages (`r->params_pa + 0..0x2fff`).
+   - `q1n1_vmb_enter_kept` switched `MAIR_EL2` and `TTBR0_EL2` while
+     `SCTLR_EL2.M` was live, and never cleaned the parameter pages or its own
+     stack to PoC before toggling the MMU. It now turns `SCTLR_EL2.M` off
+     before switching `MAIR_EL2` and `TTBR0_EL2` (matching `vhe-exit.S`),
+     cleans the parameter pages and stack to PoC, re-enables `SCTLR_EL2.M`,
+     and branches to `manifest.monitor_entry_pa` with `x0 = manifest.params_pa`.
+   - Under `VMAPPLE_GAOKUN3_MONITOR`: `params_base` has no `0x43000000`
+     fallback (`cbz x19, param_bad` halts cleanly on a bad `x0`); non-VHE
+     `CPTR_EL2` uses `0x33ff` (Cortex-A78C layout verified in runs 11–15);
+     `monitor_setup` cleans `[s2_l0, s2_l3_next)` to PoC before enabling
+     stage 2, sets `VTCR_EL2 = 0x80023559` (RES1 bit 31, `PS=2` 40-bit PA,
+     `SL0=1` Level 1 root `s2_l1`, `T0SZ=25` 39-bit IPA) matching Cortex-A78C's
+     40-bit `PARange` (where 4-level stage-2 `SL0=2` with 40-bit PA is
+     reserved in ARMv8.2-A), and skips `ICC_IGRPEN0_EL1` at NS-EL2 (Secure
+     Group 0 traps to EL3 on a two-security-state GICv3); and `record_and_halt`
+     guards against recursive faults (`in_fault`) and draws unexpected EL2
+     faults (`FAULT <vec> ESR <esr> ELR <elr>`) in red on the monitor band.
+   - `smoke.py` now compiles the monitor with `-mstrict-align` (with
+     freestanding byte-wise `memcpy`/`memset` in `stub.S`), fixing an
+     alignment fault (`ESR_EL2 = 0x96000021`) when Clang emitted unaligned
+     8-byte loads on `.rodata` string literals while `SCTLR_EL2.M == 0`.
+
+**Validation (host and QEMU only):**
+
+- `test-vmapple-handoff-qemu.py` now uses `PARAMS_PA = 0x43200000`
+  (distinct from `0x43000000`) so the QEMU rehearsal genuinely tests
+  passing `params_pa` in `x0`: **PASS** (kernel reaches the root-mount wait).
+- `test-vmapple-monitor.py` (66 checks × 2 builds), `test-vmapple-smoke.py`
+  (82), `test-vmapple-classic.py` (75), `test-vmapple-stick.py` (23),
+  `test-el2qual-usb.py` (30), q1n1 `test-q1n1-vmapple-stick.py` (94 checks +
+  12 broken copies rejected), q1n1 `test-q1n1-vmapple-stick-qemu.py` (6
+  cases + hold), and `smoke.py boot --monitor --mmio-trace` and
+  `--framebuffer`: all **PASS**.
+- Rebuilt H2 stick (`build/el2qual-usb/vmapple-h2/`, `q1n1.efi`
+  `94a071e2…cfbd2b401a`, bundle qualification `0fe61b3b…5034e7deb` /
+  `0FE61B3B9BD2FCB5`), with two systemd-boot entries:
+  `q1n1-vmapple-h2.conf` (default, `--gic-hold`: stage 2 only, GIC not
+  touched) and `q1n1-vmapple-h2-gic.conf` (with GIC setup, halting at
+  `--hold-at-monitor`).
+
+#### Run 33 (2026-10-28): the monitor runs at EL2, sets up stage 2, and draws its band
+
+Entry 1 (`q1n1-vmapple-h2.conf`, `--vmapple-enter --exit-vhe
+--hold-at-monitor --gic-hold`) on the rebuilt H2 stick (`q1n1.efi`
+`94a071e2…cfbd2b401a`, bundle qualification `0fe61b3b…5034e7deb`), one
+boot, photographed in three pictures, VERIFIED on the machine
+([QUALIFICATION run 33](GAOKUN3-QUALIFICATION.md#runs-so-far)):
+
+Before `ExitBootServices`:
+```
+q1n1 AArch64 UEFI entry.
+DT framebuffer: OK
+Entry EL: 1
+GOP framebuffer captured.
+ACPI SPCR UART found.
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3  BYTES 85267376  ENTRY 0000000103EB4480
+QUALIFICATION 0FE61B3B9BD2FCB5
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000  PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+```
+
+After `ExitBootServices`, at the top of the portrait panel:
+```
+ENTERING MONITOR AT EL2 (PHASE 3 STEP H2)
+```
+
+In the monitor's bottom band (`0xC70A6000`, 160 rows):
+```
+SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY
+SETUP DONE: STAGE 2 READY, GIC NOT TOUCHED
+```
+
+What this shows (VERIFIED on the machine):
+
+- **The root cause of runs 30–32 is confirmed.** Passing
+  `manifest.params_pa` (`0x162104000`) in `x0` and zeroing `.bss` cured
+  the restart completely.
+- **The q1n1-to-monitor EL2 hand-off works on the gaokun3.** q1n1 left
+  VHE, switched to its EL2 2 MiB identity page tables with `SCTLR_EL2.M`
+  off, and entered the Snapintosh monitor at `0x162004000`.
+- **The monitor's bottom band draws legibly on the native 1600×2560
+  panel.** Reading the screen-split geometry from `smoke_params`
+  (`0xC6200000`, stride 6400, guest 2400 rows, monitor band 160 rows at
+  `0xC70A6000`) and cleaning band writes to PoC (`mon_clean_range`)
+  produces crisp, properly aligned text in the bottom band.
+- **`monitor_setup` completed at EL2 on Cortex-A78C.** Building the
+  stage-2 tables for guest RAM (`0x101004000`–`0x161104000`) and the
+  2400-row framebuffer split (2 MiB blocks + 4 KiB L3 tail pages),
+  cleaning `[s2_l0, s2_l3_next)` to PoC, and programming `VTCR_EL2 =
+  0x80023559` (40-bit PA, `SL0=1` Level 1 root `s2_l1`, `T0SZ=25`),
+  `VTTBR_EL2 = s2_l1`, `tlbi vmalls12e1is`, `HCR_EL2 = 0x80080019`, and
+  `CPTR_EL2 = 0x33ff` all succeeded without trapping to EL3 or faulting.
+
+What it does not show:
+
+- **The real-GIC setup (`monitor_init`).** Entry 1 passes `--gic-hold`,
+  so it halted immediately after `monitor_setup` without touching GICD
+  (`0x17A00000`) or GICR (`0x17A60000`). Booting Entry 2
+  (`q1n1-vmapple-h2-gic.conf`, already on the same stick) is the next
+  step (Run 34) to complete H2.
+- **Entering the guest (H3).** Both entries on this stick pass
+  `--hold-at-monitor`.
+
+#### Run 34 (2026-10-28): H2 passes with real-GIC setup
+
+Entry 2 (`q1n1-vmapple-h2-gic.conf`, `--vmapple-enter --exit-vhe
+--hold-at-monitor`) on the same H2 stick (`q1n1.efi` `94a071e2…cfbd2b401a`,
+bundle qualification `0fe61b3b…5034e7deb`), one cold boot, photographed in
+three pictures, VERIFIED on the machine
+([QUALIFICATION run 34](GAOKUN3-QUALIFICATION.md#runs-so-far)):
+
+Before `ExitBootServices`:
+```
+q1n1 AArch64 UEFI entry.
+DT framebuffer: OK
+Entry EL: 1
+GOP framebuffer captured.
+ACPI SPCR UART found.
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3  BYTES 85267376  ENTRY 0000000103EB4480
+QUALIFICATION 0FE61B3B9BD2FCB5
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000  PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+```
+
+After `ExitBootServices`, at the top of the portrait panel:
+```
+ENTERING MONITOR AT EL2 (PHASE 3 STEP H2)
+```
+
+In the monitor's bottom band (`0xC70A6000`, 160 rows):
+```
+SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY
+SETUP DONE: STAGE 2 READY, GIC NOT TOUCHED
+GIC CTLR 00000010 -> 00000012  RD FRAME 0
+```
+
+What this shows (VERIFIED on the machine):
+
+- **Phase 3 step H2 is PASSED.** Both `monitor_setup` (stage 2) and
+  `monitor_init` (the real GIC and virtual CPU interface) completed at EL2
+  on the gaokun3 and halted cleanly before guest entry with no exception,
+  no interrupt storm, and no restart.
+- **`GICD_CTLR` at `0x17A00000` read `0x00000010` before `monitor_init`:**
+  - `DS` (bit 6) is `0`: the gaokun3 GICv3 runs with two security states,
+    and EL2 sees the Non-secure view.
+  - `ARE_NS` (bit 4) is `1`: Non-secure affinity routing was left enabled
+    by the firmware (and would have been cleared if a blind `0x3` had been
+    written).
+  - `EnableGrp1NS` (bit 1) was `0`: `ExitBootServices` disabled Non-secure
+    Group 1 on the distributor. `monitor_init`'s read-modify-write kept
+    `ARE_NS` and set bit 1 (`0x00000010 -> 0x00000012`), and `RWP` cleared.
+- **Redistributor discovery (`RD FRAME 0`):** matching `GICR_TYPER` bits
+  63:32 against `MPIDR_EL1` (`0x81000000`, affinity `0.1.0.0`) matched
+  frame 0 at `0x17A60000`. Waking `GICR_WAKER` (if needed) and writing
+  `GICR_ISENABLER0` (`0x17A70100`) to enable PPIs 25 (maintenance) and 27
+  (virtual timer) succeeded without fault.
+- **Virtual CPU interface and EL2 interrupt unmasking:** setting
+  `ICH_HCR_EL2 = 1`, `ICC_PMR_EL1 = 0xFF`, and `ICC_IGRPEN1_EL1 = 1` (while
+  skipping Secure Group 0 `ICC_IGRPEN0_EL1` at NS-EL2) and unmasking IRQs/FIQs
+  at EL2 held cleanly with no spurious interrupt storm.
+
+What it does not show:
+
+- **Entering the guest (H3)** and whether the guest's early banner appears
+  (via PL011 model or framebuffer) and `CNTV` timer ticks fire and inject
+  into the running guest. Entry 2 passes `--hold-at-monitor`, so it halted
+  at `after_gic` before `eret` to EL1.
 
 ## Decisions for the owner
 

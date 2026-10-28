@@ -11,10 +11,13 @@ For a coding agent picking up the gaokun3 port cold. It covers:
 and the phase documents are the record. Where this page and the tree
 disagree, the tree wins (AGENTS.md, "Start Here").
 
-**As of 2026-10-28**, after run 28. H2's first piece, the
-q1n1-to-monitor hand-off, is since built and rehearsed in QEMU
-(bundle version 2; Snapintosh `c9d9ee4`, q1n1 `59b8e7e`); the next
-task below is updated to match.
+**As of 2026-10-28**, after run 34. **Phase 3 step H2 is PASSED on the
+gaokun3** (runs 33 and 34): the Snapintosh monitor runs at EL2, builds
+and programs stage 2, sets up the real GIC (`GIC CTLR 00000010 ->
+00000012  RD FRAME 0`) and virtual CPU interface, draws its bottom band
+cleanly on the native 1600×2560 panel, and halts before guest entry.
+The next step is **H3**: entering the stock 26A428 VirtualMac2,1 kernel
+at EL1 for the early banner.
 
 ## Read first, in this order
 
@@ -23,9 +26,9 @@ task below is updated to match.
    the decisions, where things live.
 3. [GAOKUN3-PHASE3.md](GAOKUN3-PHASE3.md): the current phase. Read its
    Architecture section, the P3 results from "Interrupt delivery" to "The
-   MSI frame", the H1 sections, and the decisions.
+   MSI frame", the H1 and H2 sections, and the decisions.
 4. [GAOKUN3-QUALIFICATION.md](GAOKUN3-QUALIFICATION.md): how hardware
-   runs are done and recorded (runs 1–28).
+   runs are done and recorded (runs 1–34).
 5. q1n1's own `AGENTS.md` and `docs/GAOKUN3-VMAPPLE-STICK.md`, in the
    sibling checkout `../q1n1`.
 
@@ -85,24 +88,25 @@ AGENTS.md. Keep applying them unless the owner changes one.
 | --- | --- |
 | Route | B: the stock 26A428 VirtualMac2,1 kernel at EL1 under Snapintosh's monitor (Phase 0C) |
 | Phase 3 in QEMU | **P3's bar met.** The stock kernel reaches the root-mount wait (`Waiting on … IOMedia … Apple_HFS`), every device a monitor model, and QEMU's MMIO trace shows no QEMU device answering the guest. The split console works, pixel-checked |
-| Phase 3 on the gaokun3 | **H1 passed** (run 28): q1n1 placed the bundle at its exact addresses, verified every hash in place, and took the seed from `RAW`. Nothing was entered |
-| Decisions | 1 (Phase 3 first, from the stick), 2 (q1n1 is the loader), 3 (split screen), the CPU count (one) and 5 (the fixed addresses) are made. **Decision 4, the first write to the real GIC, is open** |
-| Snapintosh | 22 commits ahead of `origin/main` at `c55e7ea`; working tree clean apart from this page's change and the owner's untracked plan |
-| q1n1 | 14 commits ahead of its upstream at `2391681`; working tree clean |
+| Phase 3 on the gaokun3 | **H1 passed** (run 28). **H2 passed** (runs 33 and 34, qualification `0FE61B3B9BD2FCB5`): in run 33 (`--gic-hold`), the monitor ran at EL2, built and programmed stage 2 (`VTCR_EL2 = 0x80023559`, `VTTBR_EL2 = s2_l1`), and drew `SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY` and `SETUP DONE: STAGE 2 READY, GIC NOT TOUCHED` cleanly in the bottom band; in run 34 (`--hold-at-monitor`), `monitor_init` ran on the real GIC (`0x17A00000` / `0x17A60000`), preserved `ARE_NS`, enabled Non-secure Group 1 (`GIC CTLR 00000010 -> 00000012  RD FRAME 0`), matched redistributor frame 0, enabled PPIs 25 and 27 and the virtual CPU interface, and halted cleanly before guest entry. Next: **H3** (enter the guest for the early banner) |
+| Decisions | 1 (Phase 3 first, from the stick), 2 (q1n1 is the loader), 3 (split screen), the CPU count (one) and 5 (the fixed addresses) are made. **Decision 4 is decided** (owner approved the write list in session, 2026-10-28; recorded in PHASE3 run 30) |
+| Snapintosh | 27 commits ahead of `origin/main` (at `c55e7ea`); working tree clean apart from the owner's untracked plan |
+| q1n1 | 18 commits ahead of its upstream at `d4f939b`; working tree clean |
 
 Recent Snapintosh commits, newest first:
 
+- `00ba686` tools: add the `vmapple-h2` stick stage for Phase 3 step H2
+- `5989c98` tools: add gaokun3 VirtualMac monitor build and H2 fixes
+- `fb6f2dd` docs: record the H2 hand-off rehearsal in QEMU
+- `c9d9ee4` tools: add version 2 VirtualMac bundle and hand-off rehearsal
 - `c55e7ea` docs: run 28
 - `d788188` tools: the `vmapple-h1` stick stage
 - `fa5d16d` docs: P3's bar
 - `2000b1b` tools: the MSI frame's type register
-- `d58d30c` docs: decision 5 and the RAM move
-- `6e93012` tools: QEMU guest RAM above the device windows
-- `23d0805` tools: self-interrupt delivery
-- `33907ff` tools: decision 5's fixed-address answers
 
-q1n1: `5bd443d` (`--hold`), `2391681` (doc), `dc04017`
-(`--vmapple-place`), `308cddf` (doc).
+q1n1: `d4f939b` (doc), `af6d2dd` (EL2 identity map and `x0 = params_pa`),
+`29086bf` (doc), `59b8e7e` (`--vmapple-enter`), `5bd443d` (`--hold`),
+`2391681` (doc), `dc04017` (`--vmapple-place`).
 
 ### Tests and their current counts
 
@@ -110,16 +114,16 @@ All PASS, host and QEMU:
 
 | Command | Result |
 | --- | --- |
-| `python3 tools/test-vmapple-monitor.py` | 52 checks |
+| `python3 tools/test-vmapple-monitor.py` | 66 checks, each of the QEMU and gaokun3 builds |
 | `python3 tools/test-vmapple-smoke.py` | 82 checks |
 | `python3 tools/test-vmapple-classic.py` | 75 checks; 2 SKIP on Python 3.9 (guestprofile needs 3.10) |
 | `python3 tools/test-vmapple-stick.py` | 23 checks |
-| `python3 tools/test-vmapple-handoff-qemu.py` | PASS: q1n1 keeps the v2 bundle, enters the monitor, kernel to the root-mount wait (QEMU only) |
-| `python3 tools/test-el2qual-usb.py` | 28 tests |
+| `python3 tools/test-vmapple-handoff-qemu.py` | PASS: q1n1 keeps the v2 bundle (`PARAMS_PA = 0x43200000`), enters the monitor with `x0 = params_pa`, kernel to the root-mount wait (QEMU only) |
+| `python3 tools/test-el2qual-usb.py` | 30 tests |
 | `python3 tools/test-el2qual.py` | 625,209 checks, mutation checks; 1 SKIP (SMBIOS 2.1 fixture) |
 | `python3 tools/qemu-el2qual.py` | 32 configurations and a self-test |
 | `python3 tools/vmapple-smoke/smoke.py selftest` | PASS |
-| q1n1 `python3 tools/test-q1n1-vmapple-stick.py` | 84 checks; 11 broken copies rejected |
+| q1n1 `python3 tools/test-q1n1-vmapple-stick.py` | 94 checks; 12 broken copies rejected |
 | q1n1 `python3 tools/test-q1n1-vmapple-stick-qemu.py` | 6 cases and the hold |
 
 The QEMU boots need a locally extracted kernelcache, never committed:
