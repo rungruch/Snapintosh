@@ -35,6 +35,12 @@ import importlib
 kc_load = importlib.import_module('kc-load')
 sys.path.insert(0, str(ROOT / 'probes'))
 from appledt import DeviceTree
+import classicload
+from classicload import (ClassicImage, ClassicLayout, QEMU_CLASSIC_LAYOUT,
+                         QEMU_MONITOR_LAYOUT, build_classic_image,
+                         classic_complete_dt, classic_nvram_image,
+                         classic_segments, classic_trim_cpus,
+                         derive_gaokun3_layout, write_classic_image)
 from devicemodel import (mcc_models, mcc_ptd_models, aic_models, watchdog_models,
                         gpio_models, aes_key_models, spmi_models, dock_models,
                         dock_fifo_models, mcc_error_models, socni_error_models,
@@ -1970,34 +1976,22 @@ BOOT_CMDLINE = '-v debug=0x8 serial=3 cluster_power=0 wdt=-1'
 
 
 def boot_args(virt_base, phys_base, mem_size, top_of_kernel_data,
-              devicetree_va, dt_len, cmdline=None):
-    b = bytearray(BOOT_ARGS_SIZE)
-    struct.pack_into('<HH', b, 0, BOOT_ARGS_REVISION, BOOT_ARGS_VERSION)
-    struct.pack_into('<QQQQ', b, 8, virt_base, phys_base, mem_size,
-                     top_of_kernel_data)
+              devicetree_va, dt_len, cmdline=None, video=None):
     # Boot_Video: v_baseAddr, v_display, v_rowBytes, v_width, v_height, v_depth.
     # A physical address -- XNU maps it itself -- so the aperture has to cover it
     # too, which is why build() publishes the panel as a second region.
-    if FRAMEBUFFER:
-        base, width, height, stride, depth = FRAMEBUFFER
-        # v_display 0, not 1: text mode. PE_create_console passes
-        # (v_display == 0) ? kPETextMode : kPEGraphicsMode, and only the text
-        # arm paints glyphs with the CPU. Graphics mode paints nothing at
-        # acquire and arms a progress spinner on a timer instead, which would
-        # put the first pixel behind interrupt delivery and a thread switch --
-        # the work this milestone deliberately cut.
-        struct.pack_into('<6Q', b, 0x28, base, VIDEO_DISPLAY_MODE, stride,
-                         width, height, depth)
-    struct.pack_into('<I', b, 0x58, 0)                  # machineType
-    struct.pack_into('<Q', b, 0x60, devicetree_va)
-    struct.pack_into('<I', b, 0x68, dt_len)
-    cmdline = BOOT_CMDLINE if cmdline is None else cmdline
-    line = cmdline.encode()
-    if len(line) >= BOOT_LINE_LENGTH or b'\0' in line:
-        raise ValueError('boot command line is too long or contains a NUL')
-    b[0x6c:0x6c + len(line)] = line
-    struct.pack_into('<Q', b, 0x478, mem_size)          # memSizeActual
-    return b
+    # v_display 0, not 1: text mode. PE_create_console passes
+    # (v_display == 0) ? kPETextMode : kPEGraphicsMode, and only the text
+    # arm paints glyphs with the CPU. Graphics mode paints nothing at
+    # acquire and arms a progress spinner on a timer instead, which would
+    # put the first pixel behind interrupt delivery and a thread switch --
+    # the work this milestone deliberately cut.
+    if video is None and FRAMEBUFFER:
+        video = FRAMEBUFFER
+    return classicload.boot_args(virt_base, phys_base, mem_size,
+                                 top_of_kernel_data, devicetree_va, dt_len,
+                                 BOOT_CMDLINE if cmdline is None else cmdline,
+                                 video=video)
 
 
 def uniform_cpu_clusters(dt):

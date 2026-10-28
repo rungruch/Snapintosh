@@ -52,10 +52,11 @@ def synthetic_tree(seed=bytes(256), cpus=None):
     gic = node('gic', [prop('reg', bytes(48))])
     armio = node('arm-io', [prop('ranges', bytes(24))], [uart, gic])
     chosen = node('chosen', [] if seed is None else [prop('random-seed', seed)])
+    pram = node('pram', [prop('reg', bytes(16))])
     return node('device-tree', [
         prop('clock-frequency', struct.pack('<I', 0)),
         prop('machine-identity', b'recipe', placeholder=True),
-    ], [chosen, armio, cpus])
+    ], [chosen, armio, cpus, pram])
 
 
 def refuses(tree, entropy=lambda n: b'\xa5' * n):
@@ -111,6 +112,10 @@ def test_dt_completion():
     expected_gic = struct.pack('<QQQQ', kcload.QEMU_GICD_OFF, 0x10000,
                                kcload.QEMU_GICR_OFF, kcload.QEMU_GICR_SIZE) + bytes(16)
     check(out.get('/device-tree/arm-io/gic', 'reg') == expected_gic, 'GIC ranges rewritten')
+    check(out.get('/device-tree/pram', 'reg') == struct.pack('<QQ', kcload.PANIC_PA, kcload.PANIC_SIZE),
+          'pram reg points at the panic region (published XNU check_for_panic_log)')
+    check(out.get('/device-tree/chosen', 'embedded-panic-log-size')
+          == struct.pack('<I', kcload.PANIC_LOG_SIZE), 'panic log size published in /chosen')
 
 
 def chrp_accepts(image, bank_size):

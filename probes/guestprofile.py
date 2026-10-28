@@ -786,7 +786,38 @@ J700_26A428_XARS_UNIFORM_AUXKC_INSTALLED_ADRENO_METAL_DISPLAY_SKS_QUIET_INPUT_TO
     i2c_input=I2CInputSpec(keyboard=True, touchpad=True),
 )
 
-PROFILES = {p.name: p for p in (J700_26A428, J700_26A428_NO_CLPC,
+# Route B (docs/GAOKUN3-PHASE0C.md): Apple's VirtualMac2,1 kernel from the
+# same 26A428 IPSW, run at EL1 under the classic entry (B8). It has no SPTM,
+# TXM, SEP or exclaves (B1, B2), so the SPTM/TXM fields above do not apply:
+# they are zero or None here, and the classic loader in probes/xnuboot.py
+# (build_classic_image) is the only path that may consume this profile.
+# xnuboot.configure_guest refuses it, because that path implements the SPTM
+# ABI only. The hashes are of the locally extracted bundle under
+# downloads/extracted/vma2macosap, which is never committed.
+VMA2_26A428 = GuestProfile(
+    name='vma2macosap-26A428', target='VirtualMac2,1 / VMAPPLE (chip 0xFE00)',
+    build='macOS 27 build 26A428', abi='classic-vmapple-v1',
+    firmware_subdir='vma2macosap',
+    kernelcache='kernelcache.release.vma2', devicetree='DeviceTree.vma2macosap',
+    monitors=(),
+    firmware=(
+        ('kernelcache.release.vma2', '95f42a48e8890bd46a2ede6aeaeaa545c903b041329feec7e77ddddad2887417'),
+        ('DeviceTree.vma2macosap', '4378f4c47ce162be245cd352a3f590f95a58965c5a1d49648264586b4031eb4e'),
+    ),
+    vbar=0, mair=0, kernel_hcr=0,
+    boot_cpu='cpu0', boot_mpidr=0x80000000, console_node='uart0', uat_node='',
+    critical_addresses=(), early_heap_va=0,
+    queue_pointer_base=0, queue_pointer_bits=0, queue_pointer_shift=0,
+    frame_type_info_va=0, monitor_stack_count=0, cpu_copy_windows=(0, 0),
+    txm_policy_pointer_offset=0, txm_csm_disabled_offset=0, panic_trap_pc=0,
+    # The classic kernel builds its own tables and reads the counter rate
+    # from the completed tree; the loader's layout carries the rate for the
+    # host it runs on (QEMU 1 GHz, the gaokun3 19,200,000), so no single
+    # guest rate is pinned here.
+    virtual_counter_hz=0,
+)
+
+PROFILES = {p.name: p for p in (VMA2_26A428, J700_26A428, J700_26A428_NO_CLPC,
                                J700_26A428_SEP_PRELOAD, J700_26A428_BOOTFB,
                                J700_26A428_BOOTFB_NUB, J700_26A428_BOOTFB_NO_USB,
                                J700_26A428_BOOTFB_RTC, J700_26A428_BOOTFB_XARS,

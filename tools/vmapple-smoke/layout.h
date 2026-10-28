@@ -29,6 +29,24 @@
 #define PARAM_FLAGS  0x10
 #define PARAM_MAGIC  0x18
 #define PARAM_FLAG_TRACE 1
+/* bit1: run as the Route B monitor (Phase 3 P3): stage 2 default-deny,
+ * virtual GICv3, device models in monitor.c. bit2: diagnostic only --
+ * answer the two fixed addresses as absent devices instead of stopping
+ * (Phase 3 decision 5 option d; never the default). */
+#define PARAM_FLAG_MONITOR 2
+#define PARAM_FLAG_ABSENT_FIXED 4
+/* bit3: debug only -- stage 2 also maps QEMU's GIC and PL011 at the
+ * classic layout's IPAs, bypassing the models (bisection aid). */
+#define PARAM_FLAG_PASSTHRU 8
+/* bit4: debug only -- stage 2 translates the template GIC IPAs to QEMU's
+ * real GIC, bypassing the GIC models (bisection aid). */
+#define PARAM_FLAG_GICPT 16
+/* bit5: debug only -- stage 2 maps QEMU's PL011 at the template UART IPA,
+ * bypassing the PL011 model (bisection aid). */
+#define PARAM_FLAG_UARTPT 32
+#define PARAM_FLAG_BASELINE 64 /* debug: secondary windows as in Phase 0C */
+#define PARAM_FLAG_HALT_ON_OFF 128 /* debug: halt instead of exiting at PSCI off */
+
 
 /* smoke_fault: the stub records an unexpected EL2 exception here and halts,
  * so the harness can report where the guest died rather than just time out.
@@ -85,5 +103,26 @@
 #define TIDCP_MAX        64
 #define TIDCP_ISS_MASK   0x3fffff                /* ESR ISS for EC 0x18 */
 #define TIDCP_RT_MASK    0x3e0                   /* ISS bits 9:5, the Rt field */
+
+/* The monitor's guest IPA map (Phase 3 P3): the VirtualMac template's own
+ * physical addresses (arm-io parent 0x10000000 + the child's reg offset).
+ * Stage 2 maps only guest RAM; every address below faults to monitor.c. */
+#define MON_GICD_IPA     0x10000000ull   /* 64 KiB distributor model */
+#define MON_GICR_IPA     0x10010000ull   /* redistributors (0x20000 per CPU) */
+#define MON_GIC_MSI_IPA  0x1fff0000ull   /* the gic node's third window */
+#define MON_UART_IPA     0x20010000ull   /* PL011 model */
+#define MON_PL031_IPA    0x20050000ull   /* PL031 RTC model */
+#define MON_PL061_IPA    0x20060000ull   /* PL061 GPIO model */
+#define MON_PVPANIC_IPA  0x20070000ull   /* pvpanic model */
+#define MON_PCIE_IPA     0x40000000ull   /* PCIe config, absent functions */
+#define MON_PCIE_SIZE    0x10000000ull
+#define MON_FIXED_ID_IPA 0x30010000ull   /* no tree node: stop (or absent) */
+#define MON_FIXED_REQ_IPA 0x004ff000ull  /* page of 0x004ffff8: stop (or sink) */
+
+/* Physical (EL2) addresses of QEMU's own devices the monitor drives. The
+ * guest never sees these IPAs: stage 2 does not map them. */
+#define PHYS_GICR_BASE   0x080a0000ull   /* QEMU virt redistributor 0 */
+#define MON_INTID_VTIMER 27
+#define MON_INTID_MAINT  25
 
 #endif

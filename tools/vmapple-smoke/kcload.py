@@ -1,35 +1,17 @@
 # SPDX-License-Identifier: MIT
-"""Lay out a VirtualMac2,1 guest for the Route B QEMU smoke test.
+"""Smoke-harness view of the classic VirtualMac loader.
 
-Builds, from a locally obtained kernelcache (never committed) and the
-vma2macosap device tree template (also never committed), the image the EL2
-stub drops into:
-
-  - the kernelcache's segments, laid out linearly at PA = vmaddr - mhVA +
-    GUEST_RAM_BASE, where mhVA is the lowest segment address. XNU's classic
-    entry (osfmk/arm64/start.s) locates the mach header with a PC-relative
-    adrp, which with the MMU off yields the physical load address, so this
-    linear placement is the contract; boot_args.virtBase is the VA twin of
-    physBase, and KVA = PA - physBase + virtBase.
-  - the template device tree, completed the way the VM boot firmware would:
-    placeholders resolved, /chosen/dram-base and dram-size added (arm_init
-    panics without them), /chosen/random-seed filled with entropy, an
-    empty NVRAM bank handed over as /chosen/nvram-proxy-data, /cpus trimmed
-    to the vCPUs QEMU runs, the counter rate filled in, and the arm-io ranges,
-    PL011 and GICv3 register windows moved from the VirtualMac platform map
-    onto QEMU virt's (UART at 0x09000000, GICD at 0x08000000, GICR at
-    0x080A0000). The other devices keep their template offsets, so the new
-    ranges move them too, onto whatever QEMU virt has at the moved address.
-    That is not a model of them; `smoke.py boot --mmio-trace` reports which
-    of them the guest touched and what answered (report_mmio below).
-  - a boot_args (revision 1, version 2, the 0x480-byte arm64 structure from
-    pexpert/arm64/boot.h) above the kernel image, with the device tree, and
-    topOfKernelData just past both, so XNU treats [kernel end .. top) as
-    loader data and everything above it as available memory.
+The loader itself lives in probes/xnuboot.py (build_classic_image and its
+ClassicLayout; docs/GAOKUN3-PHASE3.md P2): there is one classic loader, and
+this module is the QEMU smoke's adapter over it. It re-exports the QEMU
+layout's constants and the loader entry points under the names the smoke
+and its host test have always used (raising SystemExit, as a command-line
+loader should), and keeps the smoke-only run analysis below: milestones,
+the TIDCP record and the MMIO-trace report.
 
 Only facts from the published structure layouts and from XNU's documented
 entry contract are used; this is an independent implementation for the
-gaokun3 port's Phase 0C smoke test, not a copy of any other loader.
+gaokun3 port, not a copy of any other loader.
 """
 import json
 import os
@@ -41,202 +23,87 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'probes'))
 import appledt                                                  # noqa: E402
+import classicload                                              # noqa: E402
+
+_LAYOUT = classicload.QEMU_CLASSIC_LAYOUT
 
 # The Mach header VA's 32 MiB block offset is 0x1004000. start.s initially
-# maps in 32 MiB blocks, so physBase needs the same full offset, not merely the
-# 16 KiB page offset, or a KVA points into __LINKEDIT rather than __TEXT_EXEC.
-GUEST_RAM_BASE = 0x45004000
-GUEST_MEM_SIZE = 0x1C000000             # 448 MiB; QEMU gets 576 MiB
-DT_PA = 0x4A000000                      # up to 256 KiB: the NVRAM bank alone is 64 KiB
-BOOT_ARGS_PA = 0x4A040000
-TOP_OF_KERNEL_DATA = 0x4A050000         # 16 KiB aligned, above all loader data
+# maps in 32 MiB blocks, so physBase needs the same full offset, not merely
+# the 16 KiB page offset, or a KVA points into __LINKEDIT rather than
+# __TEXT_EXEC.
+GUEST_RAM_BASE = _LAYOUT.ram_base
+GUEST_MEM_SIZE = _LAYOUT.mem_size              # 448 MiB; QEMU gets 576 MiB
+DT_PA = _LAYOUT.dt_pa                          # the NVRAM bank alone is 64 KiB
+BOOT_ARGS_PA = _LAYOUT.boot_args_pa
+TOP_OF_KERNEL_DATA = _LAYOUT.top_of_kernel_data
+PANIC_PA = _LAYOUT.panic_pa
+PANIC_SIZE = _LAYOUT.panic_size
+PANIC_LOG_SIZE = _LAYOUT.panic_log_size
 
 # QEMU virt's device map, as offsets under arm-io with an identity range
 # whose parent base is 0x08000000 (the GIC distributor base).
-ARMIO_PARENT_BASE = 0x08000000
-QEMU_UART_OFF = 0x01000000              # PL011 at 0x09000000
-QEMU_GICD_OFF = 0x00000000              # GICD at 0x08000000
-QEMU_GICR_OFF = 0x000A0000              # GICR at 0x080A0000
+ARMIO_PARENT_BASE = _LAYOUT.armio_parent_base
+QEMU_UART_OFF = _LAYOUT.uart_off               # PL011 at 0x09000000
+QEMU_GICD_OFF = _LAYOUT.gicd_off               # GICD at 0x08000000
+QEMU_GICR_OFF = _LAYOUT.gicr_off               # GICR at 0x080A0000
 
 # The vCPUs QEMU runs (smoke.py passes this as -smp). The VMAPPLE template
-# lists 32 CPU nodes, cpu0 "running" and the rest "waiting", with reg and
-# cpu-id 0..31; the VM firmware evidently keeps only the VM's own. Left at
-# 32, AppleARMGICv3 panics "CPU count (32) is larger than redistributor
-# count (1)": QEMU's GICv3 has one redistributor frame per vCPU, the last
-# one marked by GICR_TYPER.Last.
-GUEST_CPUS = 1
+# lists 32 CPU nodes, cpu0 "running" and the rest "waiting"; left at 32,
+# AppleARMGICv3 panics on the redistributor count.
+GUEST_CPUS = _LAYOUT.guest_cpus
 GICR_FRAME_SIZE = 0x20000               # RD_base + SGI_base, 64 KiB each (GICv3)
-QEMU_GICR_SIZE = GUEST_CPUS * GICR_FRAME_SIZE
+QEMU_GICR_SIZE = _LAYOUT.gicr_size
 
 # The counter rate of QEMU TCG's -cpu max on the host this harness was
-# validated on. The stub prints CNTFRQ_EL0 before entering the guest and the
-# harness warns if it differs; an inaccurate timebase scales delays but does
-# not stop early boot.
-TIMEBASE_HZ = 1_000_000_000
+# validated on. The stub prints CNTFRQ_EL0 before entering the guest and
+# the harness warns if it differs.
+TIMEBASE_HZ = _LAYOUT.timebase_hz
 
-# `-v` keeps ordinary boot messages visible; serial=3 selects the PL011 output
-# console. `debug=0x8` is not needed for this check.
-# `-noprogress`: the smoke boot_args describe no framebuffer, and with a zero
-# display size PE_init_iokit's progress-image centring loop
-# (pexpert/arm/pe_init.c, "*delta -= 50 * scale" until the image fits half
-# the display) never ends on a release kernel. The real loader passes the
-# simple-framebuffer instead.
-CMDLINE = '-v serial=3 -noprogress'
-BOOT_ARGS_SIZE = 0x480
+CMDLINE = _LAYOUT.cmdline
+BOOT_ARGS_SIZE = classicload.BOOT_ARGS_SIZE
+RANDOM_SEED_BYTES = classicload.CLASSIC_RANDOM_SEED_BYTES
+NVRAM_BANK_SIZE = _LAYOUT.nvram_bank_size
+NVRAM_SYSTEM_SIZE = _LAYOUT.nvram_system_size
+NVRAM_HEADER_SIG = classicload.CLASSIC_NVRAM_HEADER_SIG
+NVRAM_PARTITION_SIG = classicload.CLASSIC_NVRAM_PARTITION_SIG
+CHRP_BLOCK = classicload.CLASSIC_CHRP_BLOCK
 
-# XNU's early PRNG asks the loader for 4 * SHA-512 = 256 bytes on arm64
-# (osfmk/prng/prng_random.c, BOOTLOADER_ENTROPY_REQUEST_SIZE) and reads them
-# from /chosen/random-seed on non-SPTM kernels (pexpert/gen/pe_gen.c). The
-# VMAPPLE template carries that property as 256 zero bytes for the VM
-# firmware to fill; XNU counts an all-zero seed as no seed and panics
-# "Expected 256 seed bytes from bootloader, but got 0".
-RANDOM_SEED_BYTES = 256
 
-# IODTNVRAM (iokit/Kernel/IONVRAM.cpp, initImageFormat) reads the boot
-# firmware's NVRAM bank from /chosen: nvram-bank-size, -bank-count and
-# -current-bank, and the bank's contents as nvram-proxy-data. A zero bank
-# size panics "NVRAM size is 0 bytes"; the VMAPPLE template carries all
-# three as zero and no proxy data. The CHRP handler (IONVRAMCHRPHandler.cpp)
-# accepts a bank that starts with Apple's 32-byte header named "nvram"
-# (version 1) whose CHRP checksum and Adler-32 match, and reads variables
-# from the partitions named "common" and "system". Without a valid image it
-# keeps a null image and a default 0x800-byte common partition and reads
-# through it, so an image is required, not optional; and it does not check
-# the proxy data's length, so that must be exactly the bank size.
-#
-# The bank's size, partition split and signature bytes are this smoke
-# loader's choices, not measured Apple VM firmware values: the kernel checks
-# none of them beyond the bounds above. 0x5a and 0x70 are the CHRP NVRAM
-# signatures for Apple's header and an Open Firmware common partition.
-NVRAM_BANK_SIZE = 0x10000
-NVRAM_SYSTEM_SIZE = 0x3000              # including its 16-byte CHRP header
-NVRAM_HEADER_SIG = 0x5A
-NVRAM_PARTITION_SIG = 0x70
-CHRP_BLOCK = 16
+def _refuse(fn, *args, **kwargs):
+    """Run a classic-loader function, refusing the way a loader CLI does."""
+    try:
+        return fn(*args, **kwargs)
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
 
 
 def _chrp_header(sig, length, name):
-    """One 16-byte CHRP partition header. The checksum covers the signature,
-    the length and the name and folds carries back into the low byte."""
-    if length % CHRP_BLOCK or not CHRP_BLOCK <= length <= 0xFFFF * CHRP_BLOCK:
-        raise ValueError(f'CHRP partition length {length:#x}')
-    body = struct.pack('<H12s', length // CHRP_BLOCK, name.encode())
-    total = sig + sum(body)
-    while total > 0xFF:
-        total = (total & 0xFF) + (total >> 8)
-    return struct.pack('<BB', sig, total) + body
+    return _refuse(classicload._classic_chrp_header, sig, length, name)
 
 
 def nvram_image(bank_size=NVRAM_BANK_SIZE, system_size=NVRAM_SYSTEM_SIZE):
-    """An empty version-1 Apple NVRAM bank: the 32-byte header, then an
-    empty system and common partition filling the bank. Empty means each
-    partition's first byte is NUL, where the kernel stops reading variables."""
-    import zlib
-    common_size = bank_size - 32 - system_size
-    if common_size < CHRP_BLOCK:
-        raise ValueError(f'NVRAM bank {bank_size:#x} too small for a {system_size:#x} system partition')
-    image = bytearray(bank_size)
-    image[0:16] = _chrp_header(NVRAM_HEADER_SIG, 32, 'nvram')
-    struct.pack_into('<I', image, 20, 1)                    # generation
-    image[32:48] = _chrp_header(NVRAM_PARTITION_SIG, system_size, 'system')
-    off = 32 + system_size
-    image[off:off + 16] = _chrp_header(NVRAM_PARTITION_SIG, common_size, 'common')
-    # The Adler-32 sits at offset 16 and covers everything from the
-    # generation (offset 20) to the end of the bank.
-    struct.pack_into('<I', image, 16, zlib.adler32(bytes(image[20:])))
-    return bytes(image)
+    return classicload.classic_nvram_image(bank_size, system_size)
 
 
 def _segments(kc):
-    """(vmaddr, file offset, file size) for each LC_SEGMENT_64, and the entry
-    virtual address, from the kernelcache's main Mach-O header."""
-    data = kc.read_bytes()
-    magic, ncmds = struct.unpack_from('<I', data, 0)[0], struct.unpack_from('<I', data, 16)[0]
-    if magic != 0xFEEDFACF:
-        raise SystemExit(f'{kc}: not a 64-bit Mach-O (kernelcache expected)')
-    segs, entry, p = [], None, 32
-    for _ in range(ncmds):
-        cmd, size = struct.unpack_from('<II', data, p)
-        if cmd == 0x19:                                     # LC_SEGMENT_64
-            va, vs, fo, fs = struct.unpack_from('<QQQQ', data, p + 24)
-            segs.append((va, fo, fs, vs))
-        elif cmd == 5:                                      # LC_UNIXTHREAD
-            entry = struct.unpack_from('<Q', data, p + 16 + 32 * 8)[0]
-        p += size
-    if not segs or entry is None:
-        raise SystemExit(f'{kc}: no segments or no LC_UNIXTHREAD entry')
+    """(data, segments, entry VA) for the kernelcache at path `kc`."""
+    data = pathlib.Path(kc).read_bytes()
+    try:
+        segs, entry = classicload.classic_segments(data)
+    except ValueError as e:
+        raise SystemExit(f'{kc}: {e}') from None
     return data, segs, entry
 
 
 def _trim_cpus(dt, count):
-    """Keep only the CPU nodes whose reg (the MPIDR affinity the template
-    numbers 0..N-1) is below count, the way the VM firmware describes the
-    VM it actually started. The boot CPU must be cpu reg 0 and "running";
-    a template with fewer CPUs than QEMU runs is refused rather than
-    padded, because a node for each extra CPU would have to be invented."""
-    cpus = '/device-tree/cpus'
-    kept, dropped = [], []
-    for path in dt.children.get(cpus, []):
-        reg = dt.get(path, 'reg')
-        if reg is None or len(reg) != 4:
-            raise SystemExit(f'device tree: {path} has no 4-byte reg')
-        (kept if struct.unpack('<I', reg)[0] < count else dropped).append(path)
-    regs = sorted(struct.unpack('<I', dt.get(p, 'reg'))[0] for p in kept)
-    if regs != list(range(count)):
-        raise SystemExit(f'device tree: CPU regs {regs} do not cover the {count} vCPUs QEMU runs')
-    boot = next(p for p in kept if dt.get(p, 'reg') == bytes(4))
-    if (dt.get(boot, 'state') or b'').rstrip(b'\0') != b'running':
-        raise SystemExit(f'device tree: boot CPU {boot} is not "running"')
-    for path in dropped:
-        doomed = [path]
-        while doomed:
-            node = doomed.pop()
-            doomed += dt.children.pop(node, [])
-            del dt.nodes[node]
-    dt.children[cpus] = kept
-    return len(dropped)
+    return _refuse(classicload.classic_trim_cpus, dt, count)
 
 
 def _complete_dt_tree(dt, out=None, entropy=os.urandom):
-    """Complete an already-parsed VMAPPLE ADT for QEMU. Kept separate from the
-    file wrapper so tools/test-vmapple-smoke.py can exercise it with a wholly
-    synthetic tree, never Apple material. When `out` is provided, save the
-    generated tree there for the host-only smoke run. `entropy(n)` supplies
-    the boot seed; the seeded tree is written to `out` only, never committed."""
-    resolved = dt.resolve_placeholders()
-
-    seed = dt.get('/device-tree/chosen', 'random-seed')
-    if seed is None or len(seed) < RANDOM_SEED_BYTES:
-        raise SystemExit(f'device tree: /chosen/random-seed has '
-                         f'{"no" if seed is None else len(seed)} bytes, XNU needs {RANDOM_SEED_BYTES}')
-    fill = entropy(len(seed))
-    if len(fill) != len(seed) or not any(fill):
-        raise SystemExit('device tree: the entropy source returned no usable random-seed')
-    dt.set('/device-tree/chosen', 'random-seed', fill)
-
-    dt.put('/device-tree/chosen', 'nvram-bank-size', struct.pack('<I', NVRAM_BANK_SIZE))
-    dt.put('/device-tree/chosen', 'nvram-bank-count', struct.pack('<I', 1))
-    dt.put('/device-tree/chosen', 'nvram-current-bank', struct.pack('<I', 0))
-    dt.put('/device-tree/chosen', 'nvram-proxy-data', nvram_image())
-
-    dt.add('/device-tree/chosen', 'dram-base', struct.pack('<Q', GUEST_RAM_BASE))
-    dt.add('/device-tree/chosen', 'dram-size', struct.pack('<Q', GUEST_MEM_SIZE))
-    _trim_cpus(dt, GUEST_CPUS)
-    dt.set_u32('/device-tree', 'clock-frequency', TIMEBASE_HZ)
-    changed = dt.set_all('timebase-frequency', struct.pack('<Q', TIMEBASE_HZ), under='/device-tree/cpus')
-    if not changed:
-        raise SystemExit('device tree: no cpu timebase-frequency properties found')
-
-    armio = '/device-tree/arm-io'
-    dt.set(armio, 'ranges', struct.pack('<QQQ', 0, ARMIO_PARENT_BASE, 0x40000000))
-    dt.set(armio + '/uart0', 'reg', struct.pack('<QQ', QEMU_UART_OFF, 0x1000))
-    gic = dt.get(armio + '/gic', 'reg')
-    if len(gic) != 48:
-        raise SystemExit(f'device tree: gic reg has {len(gic)} bytes, expected 48')
-    dt.set(armio + '/gic', 'reg',
-           struct.pack('<QQQQ', QEMU_GICD_OFF, 0x10000, QEMU_GICR_OFF, QEMU_GICR_SIZE) + gic[32:])
-
-    blob = dt.serialize()
+    """Complete an already-parsed VMAPPLE ADT for QEMU. Kept separate from
+    the file wrapper so tools/test-vmapple-smoke.py can exercise it with a
+    wholly synthetic tree, never Apple material."""
+    blob, resolved = _refuse(classicload.classic_complete_dt, dt, _LAYOUT, entropy)
     if out is not None:
         (out / 'devicetree.vma2smoke').write_bytes(blob)
     return blob, resolved
@@ -248,63 +115,24 @@ def _complete_dt(dt_path, out):
 
 
 def _boot_args(virt_base, dt_va, dt_len):
-    b = bytearray(BOOT_ARGS_SIZE)
-    struct.pack_into('<HH', b, 0, 1, 2)                    # Revision, Version
-    struct.pack_into('<QQQQ', b, 8, virt_base, GUEST_RAM_BASE,
-                     GUEST_MEM_SIZE, TOP_OF_KERNEL_DATA)
-    # Boot_Video at 0x28 left zero: no framebuffer; the serial line is the
-    # console for this test.
-    struct.pack_into('<I', b, 0x58, 0)                    # machineType
-    struct.pack_into('<Q', b, 0x60, dt_va)
-    struct.pack_into('<I', b, 0x68, dt_len)
-    line = CMDLINE.encode()
-    b[0x6c:0x6c + len(line)] = line
-    struct.pack_into('<Q', b, 0x478, GUEST_MEM_SIZE)      # memSizeActual
-    return bytes(b)
+    return bytes(classicload.boot_args(virt_base, GUEST_RAM_BASE, GUEST_MEM_SIZE,
+                                       TOP_OF_KERNEL_DATA, dt_va, dt_len, CMDLINE))
 
 
-def lay_out(kc, out):
+MONITOR_LAYOUT = classicload.QEMU_MONITOR_LAYOUT
+
+
+def lay_out(kc, out, layout=None):
     """Build the guest image. Returns (payload path, payload PA, entry PA,
-    boot_args PA)."""
+    boot_args PA). `layout` defaults to the Phase 0C QEMU-device layout;
+    the Phase 3 monitor layout keeps the template's own device map."""
     out.mkdir(parents=True, exist_ok=True)
-    data, segs, entry_va = _segments(pathlib.Path(kc))
-    mh_va = min(va for va, _, _, _ in segs)
-    span = max(va + vs for va, _, _, vs in segs) - mh_va
-    if GUEST_RAM_BASE + span > DT_PA:
-        raise SystemExit(f'kernelcache spans {span:#x}; does not fit below {DT_PA:#x}')
-
     dt_path = ROOT / 'downloads' / 'extracted' / 'vma2macosap' / 'DeviceTree.vma2macosap'
     if not dt_path.exists():
         raise SystemExit(f'no device tree template at {dt_path}')
-    dt_blob, resolved = _complete_dt(dt_path, out)
-    if len(dt_blob) > BOOT_ARGS_PA - DT_PA:
-        raise SystemExit(f'device tree is {len(dt_blob):#x} bytes; only {BOOT_ARGS_PA - DT_PA:#x} '
-                         f'fit before boot_args')
-    dt_va = DT_PA - GUEST_RAM_BASE + mh_va                # KVA in the physmap
-
-    payload = bytearray(TOP_OF_KERNEL_DATA - GUEST_RAM_BASE)
-    for va, fo, fs, _vs in segs:
-        payload[va - mh_va:va - mh_va + fs] = data[fo:fo + fs]
-    payload[DT_PA - GUEST_RAM_BASE:DT_PA - GUEST_RAM_BASE + len(dt_blob)] = dt_blob
-    args = _boot_args(mh_va, dt_va, len(dt_blob))
-    if BOOT_ARGS_PA + len(args) > TOP_OF_KERNEL_DATA:
-        raise SystemExit('boot_args do not fit below topOfKernelData')
-    payload[BOOT_ARGS_PA - GUEST_RAM_BASE:BOOT_ARGS_PA - GUEST_RAM_BASE + len(args)] = args
-
-    blob_path = out / 'vmapple-guest.bin'
-    blob_path.write_bytes(payload)
-    entry_pa = entry_va - mh_va + GUEST_RAM_BASE
-
-    layout = {
-        'mh_va': f'{mh_va:#x}', 'entry_va': f'{entry_va:#x}', 'entry_pa': f'{entry_pa:#x}',
-        'phys_base': f'{GUEST_RAM_BASE:#x}', 'mem_size': f'{GUEST_MEM_SIZE:#x}',
-        'dt_pa': f'{DT_PA:#x}', 'dt_va': f'{dt_va:#x}', 'dt_len': len(dt_blob),
-        'boot_args_pa': f'{BOOT_ARGS_PA:#x}', 'top_of_kernel_data': f'{TOP_OF_KERNEL_DATA:#x}',
-        'placeholders_resolved': resolved, 'timebase_hz': TIMEBASE_HZ,
-        'cmdline': CMDLINE,
-    }
-    (out / 'layout.json').write_text(json.dumps(layout, indent=2))
-    return blob_path, GUEST_RAM_BASE, entry_pa, BOOT_ARGS_PA
+    image = _refuse(classicload.build_classic_image, kc, dt_path, layout or _LAYOUT)
+    blob_path = classicload.write_classic_image(image, out)
+    return blob_path, image.payload_pa, image.entry_pa, image.boot_args_pa
 
 
 # What progress looks like on the serial line, earliest first. XNU's first
