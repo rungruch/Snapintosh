@@ -29,6 +29,9 @@ void mon_eoir0_write(uint64_t v) { (void)v; }
 void mon_eoir1_write(uint64_t v) { (void)v; }
 uint64_t mon_lr0_read(void) { return fake_lr0; }
 void mon_lr0_write(uint64_t v) { fake_lr0 = v; }
+static uint64_t fake_lr[4];
+uint64_t mon_lr_read(unsigned n) { return fake_lr[n & 3]; }
+void mon_lr_write(unsigned n, uint64_t v) { fake_lr[n & 3] = v; }
 uint64_t mon_misr_read(void) { return 0; }
 void mon_cnthp_rearm(uint32_t ticks) { (void)ticks; }
 static uint64_t last_redist_addr; static uint32_t last_redist_value;
@@ -149,6 +152,38 @@ int main(void)
     CHECK(strstr(uart_capture, "mailbox: request at") != NULL, "mailbox: the request is logged");
     CHECK(access(MON_MAILBOX_IPA + 0xff8, 3, 5, 0, 0) == 0, "mailbox: a read is a named stop");
     CHECK(access(MON_MAILBOX_IPA + 0x10, 2, 5, 1, 0) == 0, "mailbox: another store is a named stop");
+
+    /* Trapped system registers: IMPDEF space, the guest's SGI, the rest. */
+    #define SYSREG(op0, op1, crn, crm, op2, rt, read) ((0x18ull << 26) | ((uint64_t)(op0) << 20) \
+        | ((uint64_t)(op2) << 17) | ((uint64_t)(op1) << 14) | ((uint64_t)(crn) << 10) \
+        | ((uint64_t)(rt) << 5) | ((uint64_t)(crm) << 1) | (read))
+    CHECK(monitor_sysreg(SYSREG(3, 0, 15, 2, 0, 1, 1), frame) == 2,
+          "an IMPDEF register (CRn 15) is left to the stub's RAZ/WI");
+    memset(fake_lr, 0, sizeof(fake_lr));
+    frame[2] = (3ull << 24) | 1;                                 /* SGI 3 to CPU 0 */
+    CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 0), frame) == 1
+          && (fake_lr[1] >> 62) == 1 && ((fake_lr[1] >> 60) & 1) && (fake_lr[1] & 0xffffffff) == 3,
+          "ICC_SGI1R_EL1 to itself: a pending Group 1 SGI in LR1");
+    CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 0), frame) == 1 && fake_lr[2] == 0,
+          "the same SGI while pending takes no second LR");
+    frame[2] = (5ull << 24) | 1;
+    CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 0), frame) == 1
+          && (fake_lr[2] & 0xffffffff) == 5, "a second SGI takes LR2");
+    frame[2] = (6ull << 24) | (1ull << 40);
+    CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 0), frame) == 1 && fake_lr[3] == 0,
+          "IRM 1 (every other CPU) reaches no one");
+    frame[2] = (6ull << 24) | 2;
+    CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 0), frame) == 1 && fake_lr[3] == 0,
+          "an SGI to an absent CPU is discarded");
+    frame[2] = (7ull << 24) | 1;
+    monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 0), frame);
+    frame[2] = (8ull << 24) | 1;
+    CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 0), frame) == 0,
+          "no free list register is a named stop");
+    CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 7, 2, 0), frame) == 0,
+          "ICC_SGI0R_EL1 is a named stop, not silently ignored");
+    CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 1), frame) == 0,
+          "a read of ICC_SGI1R_EL1 is a named stop");
 
     /* No syndrome (ISV 0): the instruction is decoded. LDR x5, [x6] and
      * STRB w7, [x6] against the PL011 flags and data registers. */

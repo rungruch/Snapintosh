@@ -458,10 +458,24 @@ pac_install_keys:
 	isb
 	ret
 
-/* Trapped system register: Apple IMPDEF via TIDCP (and any other EC 0x18).
- * Reads read as zero, writes are ignored, and the instruction is skipped. */
+/* Trapped system register (EC 0x18): Apple IMPDEF via TIDCP, and with the
+ * monitor the GIC's SGI registers too. Without the monitor every one reads
+ * as zero and ignores writes, exactly the Phase 0C smoke. With it, only the
+ * implementation-defined space does: monitor_sysreg serves ICC_SGI1R_EL1
+ * and makes anything else a named stop. */
 do_sysreg:
-	bl	tidcp_record		// B5: note the register, then RAZ/WI below
+	ldr	x0, =monitor_enabled
+	ldr	x0, [x0]
+	cbz	x0, 3f
+	mov	x0, x25			// ESR_EL2
+	mov	x1, x29			// the guest's saved x0..x30
+	bl	monitor_sysreg
+	cmp	x0, #1
+	b.eq	1f			// served: skip the instruction
+	cbnz	x0, 3f			// implementation-defined: RAZ/WI below
+	mov	x0, #0x400		// named stop, already printed
+	b	record_and_halt
+3:	bl	tidcp_record		// B5: note the register, then RAZ/WI below
 	tbz	x25, #0, 1f		// ISS bit0: 0 = write (MSR), 1 = read (MRS)
 	ubfx	x0, x25, #5, #5		// Rt
 	cmp	x0, #31			// xzr target: nothing to write
@@ -724,6 +738,32 @@ mon_lr0_read:
 mon_lr0_write:
 	msr	ICH_LR0_EL2, x0
 	isb
+	ret
+// List registers 1 to 3 (n in x0): the guest's software interrupts.
+.global mon_lr_read
+mon_lr_read:
+	cmp	x0, #1
+	b.ne	2f
+	mrs	x0, ICH_LR1_EL2
+	ret
+2:	cmp	x0, #2
+	b.ne	3f
+	mrs	x0, ICH_LR2_EL2
+	ret
+3:	mrs	x0, ICH_LR3_EL2
+	ret
+.global mon_lr_write
+mon_lr_write:
+	cmp	x0, #1
+	b.ne	2f
+	msr	ICH_LR1_EL2, x1
+	b	4f
+2:	cmp	x0, #2
+	b.ne	3f
+	msr	ICH_LR2_EL2, x1
+	b	4f
+3:	msr	ICH_LR3_EL2, x1
+4:	isb
 	ret
 .global mon_misr_read
 mon_misr_read:

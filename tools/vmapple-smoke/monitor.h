@@ -29,6 +29,8 @@ void mon_eoir0_write(uint64_t iar);  /* ICC_EOIR0_EL1 */
 void mon_eoir1_write(uint64_t iar);  /* ICC_EOIR1_EL1: drop priority + deactivate */
 uint64_t mon_lr0_read(void);         /* ICH_LR0_EL2 */
 void mon_lr0_write(uint64_t value);  /* ICH_LR0_EL2 */
+uint64_t mon_lr_read(unsigned n);    /* ICH_LR<n>_EL2, n 1 to 3 */
+void mon_lr_write(unsigned n, uint64_t value);
 uint64_t mon_misr_read(void);        /* ICH_MISR_EL2 */
 void mon_uart_putc(char c);          /* the monitor's own PL011 at EL2 */
 void mon_redist_write(uint64_t addr, uint32_t value); /* physical GICR store */
@@ -68,6 +70,12 @@ void monitor_irq(void);
  * Group 0 and signal as FIQ (the Phase 0C boot took 175 FIQs at EL1 and
  * one IRQ), so this is the path the guest's ticks actually take. */
 void monitor_fiq(void);
+
+/* A trapped system-register access (ESR_EL2 class 0x18). Returns 1 when
+ * served (the caller skips the instruction), 2 for the implementation-
+ * defined space the caller reads as zero and ignores writes to, and 0 for
+ * a named stop, already printed. */
+int monitor_sysreg(uint64_t esr, uint64_t *frame);
 
 /* Print the handled/stopped counters on the monitor's UART. */
 void monitor_print_stats(void);

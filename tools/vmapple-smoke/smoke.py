@@ -469,6 +469,13 @@ def report_monitor(text, mmio_log, out, screen=None):
                 ipa, kind = line.split('unmodelled IPA ')[1].split()[:2]
                 stop_line = f'STOP: UNMODELLED IPA {int(ipa, 16):016X} {kind.upper()}'
                 break
+            if 'EL2: stop: unmodelled system register' in line:
+                name, kind = line.split('system register ')[1].split()[:2]
+                stop_line = f'STOP: SYSTEM REGISTER {name.upper()} {kind.upper()}'
+                break
+            if 'EL2: stop: no free list register' in line:
+                stop_line = f'STOP: NO FREE LIST REGISTER FOR SGI {int(line.split()[-1]):02d}'
+                break
         mailbox = 'EL2: mailbox:' in text
         problems += check_screen(screen, stop_line, out, mailbox)
     if stopped:

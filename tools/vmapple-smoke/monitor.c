@@ -586,6 +586,91 @@ static void handle_physical(uint64_t iar, int group0)
 }
 
 void monitor_irq(void) { handle_physical(mon_iar1_read(), 0); }
+/* ---- trapped system registers ---------------------------------------------
+ * With HCR_EL2.IMO and FMO set, the guest's writes to the GIC's SGI
+ * registers trap to EL2 (exception class 0x18), alongside the Apple
+ * implementation-defined registers HCR_EL2.TIDCP traps. Only the
+ * implementation-defined space (op0 3, CRn 11 or 15) is the stub's
+ * read-as-zero, write-ignored; an architectural register silently ignored
+ * would be a fabricated success. ICC_SGI1R_EL1 is served; anything else is
+ * a named stop. */
+
+/* A Group 1 software interrupt for the guest's one CPU, in list registers
+ * 1 to 3 (LR0 carries the timer). A purely virtual interrupt needs no EOI
+ * maintenance: the LR goes invalid when the guest deactivates it. */
+#define LR_PENDING_G1(vintid) \
+    ((1ull << 62) | (1ull << 60) | (0xa0ull << 48) | (uint64_t)(vintid))
+
+static int inject_sgi(unsigned intid)
+{
+    unsigned free = 0;
+    for (unsigned n = 1; n <= 3; n++) {
+        uint64_t lr = mon_lr_read(n);
+        if ((lr >> 62) == 0) { if (!free) free = n; continue; }
+        if ((lr & 0xffffffffull) == intid && (lr >> 62) == 1) return 1;  /* already pending */
+    }
+    if (!free) {
+        char line[48] = "STOP: NO FREE LIST REGISTER FOR SGI ";
+        line[36] = (char)('0' + intid / 10);
+        line[37] = (char)('0' + intid % 10);
+        line[38] = 0;
+        puts_("EL2: stop: no free list register for software interrupt ");
+        putdec(intid);
+        puts_("\n");
+        band_note(1, line, 0x00ff5050u);
+        return 0;
+    }
+    mon_lr_write(free, LR_PENDING_G1(intid));
+    return 1;
+}
+
+/* ICC_SGI1R_EL1 (GICv3 architecture): TargetList [15:0], Aff1 [23:16],
+ * INTID [27:24], Aff2 [39:32], IRM [40], RS [47:44], Aff3 [55:48]. The
+ * guest has one CPU at affinity 0.0.0.0. A software interrupt for a CPU
+ * that does not exist is discarded, as the architecture discards one for
+ * an absent PE; IRM 1 means every CPU but the sender, of which there is
+ * none. */
+static int sgi1r_write(uint64_t value)
+{
+    unsigned intid = (unsigned)(value >> 24) & 15;
+    int irm = (int)(value >> 40) & 1;
+    int self = !irm && !(value & 0x00ff00ff00ff0000ull) && !((value >> 44) & 15) && (value & 1);
+    return self ? inject_sgi(intid) : 1;
+}
+
+int monitor_sysreg(uint64_t esr, uint64_t *frame)
+{
+    unsigned op0 = (unsigned)(esr >> 20) & 3, op2 = (unsigned)(esr >> 17) & 7;
+    unsigned op1 = (unsigned)(esr >> 14) & 7, crn = (unsigned)(esr >> 10) & 15;
+    unsigned rt = (unsigned)(esr >> 5) & 31, crm = (unsigned)(esr >> 1) & 15;
+    int read = (int)(esr & 1);
+    if ((op0 == 1 || op0 == 3) && (crn == 11 || crn == 15)) return 2;   /* IMPDEF space */
+    if (op0 == 3 && op1 == 0 && crn == 12 && crm == 11 && op2 == 5 && !read)
+        return sgi1r_write(rt == 31 ? 0 : frame[rt]);           /* ICC_SGI1R_EL1 */
+    /* "s<op0>_<op1>_c<crn>_c<crm>_<op2>", the assembler's generic name. */
+    char name[24];
+    unsigned n = 0;
+    const unsigned field[5] = { op0, op1, crn, crm, op2 };
+    for (unsigned i = 0; i < 5; i++) {
+        name[n++] = i == 0 ? 's' : '_';
+        if (i == 2 || i == 3) name[n++] = 'c';
+        if (field[i] >= 10) name[n++] = (char)('0' + field[i] / 10);
+        name[n++] = (char)('0' + field[i] % 10);
+    }
+    name[n] = 0;
+    puts_("EL2: stop: unmodelled system register ");
+    puts_(name);
+    puts_(read ? " read\n" : " write\n");
+    char line[64] = "STOP: SYSTEM REGISTER ";
+    unsigned k = 22;
+    for (unsigned i = 0; name[i]; i++) line[k++] = name[i];
+    const char *dir = read ? " READ" : " WRITE";
+    for (unsigned i = 0; dir[i]; i++) line[k++] = dir[i];
+    line[k] = 0;
+    band_note(1, line, 0x00ff5050u);
+    return 0;
+}
+
 void monitor_fiq(void) { handle_physical(mon_iar0_read(), 1); }
 
 void monitor_print_stats(void)
