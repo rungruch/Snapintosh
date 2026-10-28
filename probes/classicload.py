@@ -374,24 +374,43 @@ def split_screen(layout, framebuffer, monitor_rows):
                                  stride)).validate()
 
 
-def derive_gaokun3_layout(reserved, dramatic_top=0x80000000 + (16 << 30),
-                          guest_mem_size=0x60000000, timebase_hz=19_200_000):
-    """Derive the gaokun3 ClassicLayout from the SLB reserved regions.
+# The gaokun3's screen: the device tree's simple-framebuffer at 0xC6200000,
+# 1600x2560 portrait (el2qual's DT read, runs 14-27, OBSERVED). Its no-map
+# region is 0xFA0000 bytes = 1600 * 2560 * 4, so the stride is 6400 bytes.
+GAOKUN3_FRAMEBUFFER = (0xC6200000, 1600, 2560, 6400)
+# The monitor's band (decision 3): 160 rows = 25 pages of 6400-byte rows,
+# so the guest's 2400 rows end on a page and stage 2 can deny the band.
+GAOKUN3_MONITOR_ROWS = 160
+
+
+def derive_gaokun3_layout(reserved, dram_top=0x80000000 + (16 << 30),
+                          guest_mem_size=0x60000000, timebase_hz=19_200_000,
+                          firmware_reserved=(), framebuffer=GAOKUN3_FRAMEBUFFER,
+                          monitor_rows=GAOKUN3_MONITOR_ROWS):
+    """Derive the gaokun3 ClassicLayout (Phase 3 P6).
 
     `reserved` is a list of (base, size) no-map regions from the machine's
-    own device tree (Phase 3 P6); the guest's DRAM, its loader data and
-    its panic chunk must all sit in one free gap of the first DRAM
-    window, and the layout refuses any overlap: interiors must not meet,
-    while a reserved region that ends where the guest begins is adjacent,
-    not overlapping. The kernelcache's Mach header keeps a 32 MiB-block
-    offset of 0x1004000, so ram_base must match it.
+    own device tree; `firmware_reserved` adds the regions UEFI's memory map
+    does not offer as conventional memory (run 24 found UEFI reserving
+    0xC6200000-0xC8600000, more than the tree's framebuffer region). The
+    guest's DRAM, its loader data and its panic chunk must all sit in one
+    free gap of the first DRAM window, and the layout refuses any overlap:
+    interiors must not meet, while a region that ends where the guest
+    begins is adjacent, not overlapping. The kernelcache's Mach header
+    keeps a 32 MiB-block offset of 0x1004000, so ram_base must match it.
+    These regions only choose the window; on the machine, q1n1 allocates
+    every chunk at its address against the live map and refuses a held one.
+
+    One CPU (the owner's decision, 2026-10-28): /cpus is trimmed to the
+    boot CPU, as Phase 3's scope has it.
 
     The payload windows mirror the QEMU layouts: the device tree sits
     0x4ffc000 bytes into the window, boot_args 256 KiB later and
-    topOfKernelData 64 KiB after that. Device IPAs stay the VirtualMac
-    template's; the framebuffer is decision 3, still open, so none is
-    published here.
+    topOfKernelData 64 KiB after that. The screen is split (decision 3):
+    the guest is told about the top rows, and the monitor keeps the bottom
+    `monitor_rows`. Device IPAs stay the VirtualMac template's.
     """
+    reserved = list(reserved) + list(firmware_reserved)
     dt_off = 0x4FFC000
     span = dt_off + 0x50000                     # payload through topOfKernelData
     gaps = []
@@ -400,8 +419,8 @@ def derive_gaokun3_layout(reserved, dramatic_top=0x80000000 + (16 << 30),
         if base > cursor:
             gaps.append((cursor, base))
         cursor = max(cursor, base + size)
-    if cursor < dramatic_top:
-        gaps.append((cursor, dramatic_top))
+    if cursor < dram_top:
+        gaps.append((cursor, dram_top))
 
     def overlaps(a_base, a_size, b_base, b_size):
         return a_base < b_base + b_size and b_base < a_base + a_size
@@ -418,16 +437,17 @@ def derive_gaokun3_layout(reserved, dramatic_top=0x80000000 + (16 << 30),
         window = (ram_base, guest_mem_size + 0x100000)
         if any(overlaps(*window, rb, rs) for rb, rs in reserved):
             continue
-        return ClassicLayout(
+        return split_screen(ClassicLayout(
             name='gaokun3', ram_base=ram_base, mem_size=guest_mem_size,
             dt_pa=ram_base + dt_off, boot_args_pa=ram_base + dt_off + 0x40000,
             top_of_kernel_data=ram_base + dt_off + 0x50000,
             panic_pa=ram_base + guest_mem_size, panic_size=0x100000,
-            panic_log_size=0x80000, timebase_hz=timebase_hz, guest_cpus=8,
+            panic_log_size=0x80000, timebase_hz=timebase_hz, guest_cpus=1,
             armio_parent_base=0x10000000, uart_off=0x10010000,
             gicd_off=0x00000000, gicr_off=0x00010000,
             cmdline='-v serial=3 -noprogress',
-            drop_nodes=QEMU_MONITOR_LAYOUT.drop_nodes).validate()
+            drop_nodes=QEMU_MONITOR_LAYOUT.drop_nodes).validate(),
+            framebuffer, monitor_rows)
     raise ValueError('gaokun3 layout: no reserved-free gap fits the guest window')
 
 

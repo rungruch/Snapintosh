@@ -159,7 +159,12 @@ def test_gaokun3_layout():
     layout = classicload.derive_gaokun3_layout(GAOKUN3_RESERVED)
     check(layout.name == 'gaokun3' and layout.timebase_hz == 19_200_000,
           'the gaokun3 layout carries the 19.2 MHz counter rate')
-    check(layout.guest_cpus == 8, 'the gaokun3 layout starts all 8 cores')
+    check(layout.guest_cpus == 1, 'the gaokun3 layout starts one CPU (Phase 3 scope)')
+    check(layout.video == (0xC6200000, 1600, 2400, 6400, 32),
+          'the guest is told about the top 2400 rows of the DT framebuffer')
+    check(layout.monitor_band == (0xC6200000 + 2400 * 6400, 1600, 160, 6400),
+          'the monitor keeps the bottom 160 rows')
+    check((layout.monitor_band[0] & 0xfff) == 0, 'the split falls on a 4 KiB page')
     check(layout.ram_base & 0x1FFFFFF == 0x1004000,
           'ram_base keeps the kernelcache header offset')
     for base, size in GAOKUN3_RESERVED:
@@ -168,6 +173,20 @@ def test_gaokun3_layout():
               f'the guest window avoids reserved region {base:#x}')
     check(layout.panic_pa == layout.ram_base + layout.mem_size,
           'the panic chunk sits just above the reported DRAM')
+    # Run 24: UEFI reserves 0xC6200000-0xC8600000, past the tree's region.
+    uefi = [(0xC6200000, 0x2400000)]
+    both = classicload.derive_gaokun3_layout(GAOKUN3_RESERVED, firmware_reserved=uefi)
+    for base, size in GAOKUN3_RESERVED + uefi:
+        check(not (both.ram_base < base + size
+                   and base < both.ram_base + both.mem_size + both.panic_size),
+              f'the guest window also avoids UEFI-reserved {base:#x}')
+    whole_gap = [(0x80000000, 0x8c600000 - 0x80000000)]
+    check(refuses(classicload.derive_gaokun3_layout, whole_gap,
+                  0x80000000 + (16 << 30), 0x60000000, 19_200_000,
+                  [(0x8c600000, (16 << 30) - 0xc600000)]),
+          'UEFI-reserved regions alone can refuse the layout')
+    check(refuses(classicload.derive_gaokun3_layout, GAOKUN3_RESERVED,
+                  monitor_rows=100), 'a split that does not fall on a page is refused')
     qemu = classicload.split_screen(classicload.QEMU_MONITOR_LAYOUT,
                                     classicload.QEMU_SPLIT_SCREEN, classicload.QEMU_MONITOR_ROWS)
     check(qemu.video == (0x62000000, 1024, 512, 4096, 32)
