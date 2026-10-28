@@ -12,6 +12,7 @@
   python3 tools/el2qual-usb.py usb-inventory --systemd-boot F --usb-probe F
   python3 tools/el2qual-usb.py q1n1-foothold --q1n1 F (and stage2's other inputs)
   python3 tools/el2qual-usb.py vmapple-h1 --systemd-boot F --q1n1 F --dtb F --bundle DIR
+  python3 tools/el2qual-usb.py vmapple-h2 --systemd-boot F --q1n1 F --slbounce F --tcblaunch F --dtb F --bundle DIR
 
 This only builds a directory tree, by default build/el2qual-usb/<stage>/.
 It never writes to a disk or a mounted volume: copying the tree onto a
@@ -44,6 +45,11 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
            ExitBootServices, fills its seed from UEFI's RAW RNG, reports,
            releases it and waits for a key. It never calls
            ExitBootServices, so there is no slbounce or tcblaunch.exe.
+  vmapple-h2  Phase 3 step H2: as vmapple-h1 plus slbounce and
+           tcblaunch.exe, one entry --vmapple-enter --exit-vhe: q1n1
+           keeps a version 2 bundle (with the gaokun3 monitor) through
+           ExitBootServices and enters the monitor; the guest is not
+           entered. Booting it writes the real GIC (decision 4).
   usb-inventory  systemd-boot and q1n1's holding USB protocol inventory
            (q1n1-usb-probe-hold.efi) only: no slbounce, tcblaunch.exe or
            device tree, so nothing on it can attempt a Secure Launch.
@@ -152,7 +158,7 @@ STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRI
 USB_PROBE_PATH = 'EFI/q1n1/q1n1-usb-probe-hold.efi'
 USB_INVENTORY_ENTRY = ('q1n1-usb-inventory.conf', 'q1n1: USB protocol inventory (read only, no EL2 switch)')
 STAGES = ('stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit', 'usb-inventory', 'q1n1-foothold',
-          'usb-read', 'entropy', 'vmapple-h1')
+          'usb-read', 'entropy', 'vmapple-h1', 'vmapple-h2')
 
 # q1n1's first boot on the gaokun3 (docs/GAOKUN3-PHASE2.md), in order: its
 # --el2 foothold under slbounce's VHE state, drawing on the device tree's
@@ -253,6 +259,25 @@ VMAPPLE_MARKERS = {b'--vmapple-place': '-DQ1N1_VMAPPLE_STICK',
                    b'PLACED AND VERIFIED': '-DQ1N1_VMAPPLE_STICK'}
 BUNDLE_DIR = 'Snapintosh/vmapple'
 
+# Phase 3 step H2 (docs/GAOKUN3-PHASE3.md): as H1, plus slbounce and
+# tcblaunch.exe so q1n1 leaves the firmware at EL2, keeps a version 2
+# bundle, and enters the monitor (the guest is not entered). Two entries
+# share one stick: the default halts after stage-2 setup before any GIC
+# access (--gic-hold), and the second runs monitor_init's GIC setup and
+# halts before the guest (decision 4).
+VMAPPLE_H2_ENTRIES = (
+    ('q1n1-vmapple-h2.conf',
+     'q1n1: enter the VirtualMac monitor, stage 2 only (H2a, no GIC access)',
+     '--vmapple-enter --exit-vhe --hold-at-monitor --gic-hold'),
+    ('q1n1-vmapple-h2-gic.conf',
+     'q1n1: enter the VirtualMac monitor with GIC setup (H2b, guest not entered)',
+     '--vmapple-enter --exit-vhe --hold-at-monitor'),
+)
+VMAPPLE_H2_ENTRY = VMAPPLE_H2_ENTRIES[0]
+VMAPPLE_H2_MARKERS = {b'--vmapple-enter': '-DQ1N1_VMAPPLE_STICK',
+                      b'VHE EXIT ': '-DQ1N1_VHE_EXIT',
+                      b'DT SIMPLE-FB': '-DQ1N1_DT_FRAMEBUFFER'}
+
 
 def check_bundle(bundle):
     """The bundle's own check (tools/vmapple-stick.py check): every chunk's
@@ -274,7 +299,12 @@ def check_bundle(bundle):
     files = sorted(p for p in (Path(bundle) / BUNDLE_DIR).iterdir() if p.is_file())
     if not any(p.name == 'bundle.bin' for p in files):
         raise LayoutError(f'bundle {bundle}: no {BUNDLE_DIR}/bundle.bin')
-    return files
+    import json as _json
+    try:
+        manifest = _json.loads((Path(bundle) / 'manifest.json').read_text())
+    except (OSError, ValueError) as error:
+        raise LayoutError(f'bundle {bundle}: no readable manifest.json: {error}') from None
+    return files, manifest
 
 
 def build_vmapple_h1(out, systemd_boot, q1n1, dtb, bundle, replace, extra):
@@ -290,7 +320,7 @@ def build_vmapple_h1(out, systemd_boot, q1n1, dtb, bundle, replace, extra):
     if missing:
         raise LayoutError(f'{q1n1}: not a q1n1 build with {" ".join(missing)}')
     require_dtb(dtb)
-    chunks = check_bundle(bundle)
+    chunks, _manifest = check_bundle(bundle)
     out = check_destination(out, replace)
     if out.exists() and any(out.iterdir()):
         shutil.rmtree(out)
@@ -317,6 +347,81 @@ def build_vmapple_h1(out, systemd_boot, q1n1, dtb, bundle, replace, extra):
     return manifest
 
 
+def check_bundle_v2(bundle, manifest):
+    """An H2 bundle must be version 2 with a monitor to enter: the binary
+    header's version, a monitor entry inside its own chunk, a parameter
+    page, and a described screen split (the gaokun3 panel)."""
+    import struct as _struct
+    binary = (Path(bundle) / BUNDLE_DIR / 'bundle.bin').read_bytes()
+    if len(binary) < 16 or _struct.unpack_from('<Q', binary, 8)[0] != 2:
+        raise LayoutError(f'bundle {bundle}: not a version 2 bundle (no monitor to enter); '
+                          'rebuild it with tools/vmapple-stick.py --monitor')
+    monitor = manifest.get('monitor') or {}
+    chunks = manifest.get('chunks') or []
+    index = monitor.get('chunk')
+    if not isinstance(index, int) or not 0 <= index < len(chunks) \
+            or chunks[index].get('pa') != monitor.get('entry_pa'):
+        raise LayoutError(f'bundle {bundle}: its monitor entry is not the monitor chunk')
+    if not monitor.get('params_pa'):
+        raise LayoutError(f'bundle {bundle}: no parameter page for the monitor')
+    fb = monitor.get('framebuffer') or {}
+    if not all(fb.get(k) for k in ('pa', 'width', 'stride', 'guest_rows', 'band_rows')):
+        raise LayoutError(f'bundle {bundle}: no screen split described for the monitor')
+    return monitor
+
+
+def build_vmapple_h2(out, systemd_boot, q1n1, slbounce, tcblaunch, dtb, bundle,
+                     replace, extra):
+    if extra:
+        raise LayoutError('vmapple-h2 takes --systemd-boot, --q1n1, --slbounce, '
+                          '--tcblaunch, --dtb and --bundle only')
+    if not all((systemd_boot, q1n1, slbounce, tcblaunch, dtb, bundle)):
+        raise LayoutError('vmapple-h2 needs --systemd-boot, --q1n1, --slbounce, '
+                          '--tcblaunch, --dtb and --bundle')
+    require_pe(systemd_boot, 'systemd-boot', {SUBSYSTEM_EFI_APPLICATION})
+    require_pe(q1n1, 'q1n1', {SUBSYSTEM_EFI_APPLICATION})
+    require_pe(slbounce, 'slbounce', {SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER,
+                                      SUBSYSTEM_EFI_RUNTIME_DRIVER})
+    require_pe(tcblaunch, 'tcblaunch.exe')
+    data = Path(q1n1).read_bytes()
+    missing = sorted({d for m, d in VMAPPLE_H2_MARKERS.items() if m not in data})
+    if missing:
+        raise LayoutError(f'{q1n1}: not a q1n1 build with {" ".join(missing)}')
+    require_dtb(dtb)
+    chunks, bundle_manifest = check_bundle(bundle)
+    monitor = check_bundle_v2(bundle, bundle_manifest)
+    out = check_destination(out, replace)
+    if out.exists() and any(out.iterdir()):
+        shutil.rmtree(out)
+    placed = {}
+    def put(rel, payload):
+        dest = out / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(payload)
+        placed[rel] = hashlib.sha256(payload).hexdigest()
+    put('EFI/BOOT/BOOTAA64.EFI', Path(systemd_boot).read_bytes())
+    put(Q1N1_PATH, data)
+    put(f'EFI/systemd/drivers/{SLBOUNCE_NAME}', Path(slbounce).read_bytes())
+    put('tcblaunch.exe', Path(tcblaunch).read_bytes())
+    dtb_name = Path(dtb).name
+    put(f'dtb/{dtb_name}', Path(dtb).read_bytes())
+    for path in chunks:
+        put(f'{BUNDLE_DIR}/{path.name}', path.read_bytes())
+    default_name = VMAPPLE_H2_ENTRIES[0][0]
+    put('loader/loader.conf', f'timeout 15\ndefault {default_name}\neditor no\n'.encode())
+    for name, title, options in VMAPPLE_H2_ENTRIES:
+        put(f'loader/entries/{name}', entry_text(title, options, dtb_name, '/' + Q1N1_PATH).encode())
+    import json as _json
+    manifest = {'stage': 'vmapple-h2', 'always_switch': False, 'files': placed,
+                'bundle_entry_pa': bundle_manifest['entry_pa'],
+                'monitor_entry_pa': monitor['entry_pa'],
+                'params_pa': monitor['params_pa'],
+                'bundle_qualification': hashlib.sha256(
+                    _json.dumps(bundle_manifest, sort_keys=True).encode()).hexdigest()}
+    (out / MANIFEST).write_text(_json.dumps(manifest, indent=2) + '\n')
+    return manifest
+
+
 def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=None,
                  dtb=None, always_switch=False, replace=False, usb_probe=None, bundle=None):
     """Validate every input, then write the tree; returns the manifest."""
@@ -325,8 +430,11 @@ def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=No
     if stage == 'vmapple-h1':
         return build_vmapple_h1(out, systemd_boot, efi, dtb, bundle, replace,
                                 any((slbounce, tcblaunch, always_switch, usb_probe)))
+    if stage == 'vmapple-h2':
+        return build_vmapple_h2(out, systemd_boot, efi, slbounce, tcblaunch, dtb,
+                                bundle, replace, any((always_switch, usb_probe)))
     if bundle:
-        raise LayoutError('--bundle belongs to the vmapple-h1 stage only')
+        raise LayoutError('--bundle belongs to the vmapple-h1 and vmapple-h2 stages only')
     if stage == 'usb-inventory':
         return build_usb_inventory(out, systemd_boot, usb_probe, replace,
                                    any((slbounce, tcblaunch, dtb, always_switch, efi)))
@@ -443,18 +551,20 @@ def main():
                     help='slbounce was built with SLBOUNCE_ALWAYS_SWITCH=1 (no --dtb)')
     ap.add_argument('--replace', action='store_true', help='replace an existing tree')
     ap.add_argument('--usb-probe', help="q1n1's q1n1-usb-probe-hold.efi (usb-inventory only)")
-    ap.add_argument('--q1n1', help="q1n1's gaokun3 build of q1n1.efi (q1n1-foothold and "
-                    'vmapple-h1)')
-    ap.add_argument('--bundle', help='a tools/vmapple-stick.py bundle directory (vmapple-h1 only)')
+    ap.add_argument('--q1n1', help="q1n1's gaokun3 build of q1n1.efi (q1n1-foothold, "
+                    'vmapple-h1, vmapple-h2)')
+    ap.add_argument('--bundle', help='a tools/vmapple-stick.py bundle directory '
+                    '(vmapple-h1, vmapple-h2 only)')
     a = ap.parse_args()
     efi = a.efi
-    if a.stage in ('q1n1-foothold', 'vmapple-h1'):
+    if a.stage in ('q1n1-foothold', 'vmapple-h1', 'vmapple-h2'):
         if efi or not a.q1n1:
             print(f'REFUSED: {a.stage} takes --q1n1 (not --efi)')
             return 1
         efi = a.q1n1
     elif a.q1n1:
-        print('REFUSED: --q1n1 belongs to the q1n1-foothold and vmapple-h1 stages only')
+        print('REFUSED: --q1n1 belongs to the q1n1-foothold, vmapple-h1 and '
+              'vmapple-h2 stages only')
         return 1
     elif a.stage == 'usb-inventory':
         pass
