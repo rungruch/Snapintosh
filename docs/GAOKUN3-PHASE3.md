@@ -1090,6 +1090,35 @@ What it does not show: anything past ExitBootServices. Entering the
 monitor needs a gaokun3 build of it, and that is H2's work, with decision
 4 (the first write to the real GIC) still the owner's.
 
+### H2 piece 1 rehearsed in QEMU, 2026-10-28 (QEMU only)
+
+The q1n1-to-monitor hand-off (the agent handover's recommended first
+piece) is built and rehearsed end to end on QEMU's EDK2:
+
+- **Bundle version 2** (`tools/vmapple-stick.py --monitor`): the header
+  grows to 176 bytes with the monitor entry and parameter page, the
+  stage-2 RAM range and the screen split; the monitor image is a chunk.
+  Version 1 bundles still build, check and place byte for byte as before.
+- **q1n1 `--vmapple-enter`**: keeps a version 2 bundle allocated through
+  ExitBootServices, writes the parameter page (`smoke_params`: guest
+  entry, `boot_args`, flags, magic, stage-2 range), leaves VHE
+  (`--exit-vhe`) and jumps to the monitor at EL2.
+- **Test-only seed**: EDK2 lists no `RAW`, so the rehearsal build's
+  `-DQ1N1_VMAPPLE_TEST_SEED` takes the firmware's default RNG and reports
+  it as test-only, never as RAW. Combined with `Q1N1_GAOKUN3` it does not
+  compile. A real boot takes RAW or does not boot.
+- **Result** (`tools/test-vmapple-handoff-qemu.py`): `PLACED AND
+  VERIFIED, SEED FROM TEST-ONLY RNG (QEMU REHEARSAL)`, `KEPT: ENTERING
+  THE MONITOR (PHASE 3 STEP H2)`, the monitor's stage-2 line, the kernel
+  banner, and the root-mount wait. No panic.
+
+What it does not show: anything on the gaokun3. The monitor entered is
+the QEMU build (QEMU GIC and PL011 addresses, semihosting exits); a
+gaokun3 build of it (H2 piece 2) does not exist, and with it the exact
+write list for decision 4, which stays the owner's. The monitor is
+entered under q1n1's inherited EL2 translation regime, which the QEMU
+rehearsal exercised but the gaokun3 build must re-examine.
+
 ## Decisions for the owner
 
 1. **Phase 3 before the USB host link, loaded from the stick.** It changes

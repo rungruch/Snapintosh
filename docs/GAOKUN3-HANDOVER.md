@@ -34,10 +34,15 @@ with conditions, and a real-hardware boot can reopen it.
 | 0C: route decision | Route B ACCEPTED, 2026-10-26, with conditions | [PHASE0C](GAOKUN3-PHASE0C.md#decision) |
 | 1: guards | Thermal guard pinned to tsens and run once at EL2 (run 10); battery guard and the trend check host-tested against Windows readings | [PHASE1-GUARDS](GAOKUN3-PHASE1-GUARDS.md) |
 | 2: EL2 entry and USB link | VHE exit PASSED on the machine (runs 11, 12; q1n1 runs 14, 15). USB link **paused**: USB0's DMA is translated by `apps_smmu`, and the bypass's first write (stage 2) is designed and host-modelled only | [PHASE2](GAOKUN3-PHASE2.md), [USB-DEVICE-MODE](GAOKUN3-USB-DEVICE-MODE.md) |
-| 3: VirtualMac kernel to a console | **In progress, QEMU and host only.** P1, P2, P4 and P7 done; decisions 1, 2, 3 and 5 made. P3: **the stock kernel reaches the root-mount wait in QEMU with every device a monitor model** (decision 5's answers, the self-interrupt fix, guest RAM above the device windows, the MSI frame's type register). P5: the bundle builder and q1n1's `--vmapple-place` built. P6: the gaokun3 layout with one CPU and the split screen | [PHASE3](GAOKUN3-PHASE3.md) |
+| 3: VirtualMac kernel to a console | **In progress.** P1 to P4 and P7 done (QEMU and host); H1 PASSED on the gaokun3 (run 28); decisions 1, 2, 3 and 5 made. P3: **the stock kernel reaches the root-mount wait in QEMU with every device a monitor model** (decision 5's answers, the self-interrupt fix, guest RAM above the device windows, the MSI frame's type register). P5: the bundle builder and q1n1's `--vmapple-place` built. P6: the gaokun3 layout with one CPU and the split screen | [PHASE3](GAOKUN3-PHASE3.md) |
 
 Recent results worth knowing before anything else:
 
+- **Run 28 (2026-10-28): Phase 3 step H1 passes.** From the stick, q1n1
+  placed the VirtualMac bundle at its exact addresses in the gaokun3's live
+  memory map, verified every hash in place, and seeded it from `RAW`.
+  Nothing was entered
+  ([PHASE3](GAOKUN3-PHASE3.md#run-28-2026-10-28-h1-passes)).
 - **Run 27 (2026-10-27): the firmware offers real entropy.** UEFI's RNG
   protocol lists `RAW` and `HASH`, and `RAW` delivered 256 non-zero,
   varying bytes before ExitBootServices. Phase 0C condition 3's seed
@@ -101,10 +106,11 @@ Open, for the owner ([PHASE3](GAOKUN3-PHASE3.md#decisions-for-the-owner)):
 4. **Hardware H2 to H4**, each with its own go-ahead on the day. H1
    PASSED as run 28: q1n1 placed and verified the bundle at its exact
    addresses on the gaokun3, with the seed from `RAW`
-   ([run 28](GAOKUN3-PHASE3.md#run-28-2026-10-28-h1-passes)). H2 needs a
-   gaokun3 build of the monitor and the q1n1-to-monitor hand-off, then
-   decision 4. H2, the first write to the real GIC, needs a gaokun3
-   build of the monitor, which does not exist yet.
+   ([run 28](GAOKUN3-PHASE3.md#run-28-2026-10-28-h1-passes)). H2, the
+   first write to the real GIC, needs the q1n1-to-monitor hand-off, a
+   gaokun3 build of the monitor (neither exists yet) and decision 4. An
+   agent picking this up should start from
+   [GAOKUN3-AGENT-HANDOVER.md](GAOKUN3-AGENT-HANDOVER.md).
 5. **After Phase 3:** the USB link resumes at stage 2 of the S2CR bypass
    ([step 1i](GAOKUN3-USB-DEVICE-MODE.md#step-1i-stage-2-the-first-smmu-write-design-and-host-model)),
    the first SMMU write, which needs its own go-ahead.
