@@ -88,15 +88,29 @@ def deferred_seed_image(kernelcache, dt_path, layout):
 
 
 def q1n1_bundle(manifest, qualification):
-    """bundle.bin: q1n1's struct q1n1_vmb_manifest (96-byte header, then
-    one 112-byte record per chunk)."""
+    """bundle.bin: q1n1's struct q1n1_vmb_manifest, then one 112-byte
+    record per chunk. Version 1 is the 96-byte header H1 placed. Version 2
+    (a `monitor` entry in the manifest) extends it to 176 bytes with the
+    monitor's entry and parameter page, the stage-2 RAM range and the
+    screen split, for the H2 hand-off; --vmapple-place still accepts both,
+    the entering mode requires version 2."""
     chunks = manifest['chunks']
     if not 0 < len(chunks) <= Q1N1_VMB_MAX:
         refusal(f'{len(chunks)} chunks; q1n1 places 1 to {Q1N1_VMB_MAX}')
     seed = manifest['seed']
-    body = struct.pack('<8Q32s', Q1N1_VMB_MAGIC, 1, len(chunks), 112, manifest['entry_pa'],
-                       manifest['boot_args_pa'], seed['pa'], seed['chunk'],
-                       bytes.fromhex(qualification))
+    monitor = manifest.get('monitor')
+    if monitor is None:
+        body = struct.pack('<8Q32s', Q1N1_VMB_MAGIC, 1, len(chunks), 112, manifest['entry_pa'],
+                           manifest['boot_args_pa'], seed['pa'], seed['chunk'],
+                           bytes.fromhex(qualification))
+    else:
+        fb = monitor['framebuffer']
+        body = struct.pack('<18Q32s', Q1N1_VMB_MAGIC, 2, len(chunks), 112,
+                           manifest['entry_pa'], manifest['boot_args_pa'],
+                           seed['pa'], seed['chunk'], monitor['entry_pa'],
+                           monitor['params_pa'], monitor['s2_lo'], monitor['s2_hi'],
+                           fb['pa'], fb['width'], fb['stride'], fb['guest_rows'],
+                           fb['band_rows'], 0, bytes.fromhex(qualification))
     for c in chunks:
         path = '\\' + c['file'].replace('/', '\\')
         raw = path.encode('ascii')
@@ -107,9 +121,12 @@ def q1n1_bundle(manifest, qualification):
     return body
 
 
-def bundle_bytes(image, seed_pa, seed_chunk):
+def bundle_bytes(image, seed_pa, seed_chunk, monitor=None):
     """(manifest_dict, {relative path: bytes}) for a ClassicImage whose seed
-    slot is empty (deferred_seed_image)."""
+    slot is empty (deferred_seed_image). `monitor` is (data, pa, params_pa,
+    s2_range, framebuffer) for a version 2 bundle: the monitor image as one
+    more chunk, entered at its first byte. framebuffer is
+    (pa, width, stride, guest_rows, band_rows) or None."""
     files = {}
     chunks = []
     for i, (pa, data) in enumerate(image.chunks):
@@ -129,6 +146,26 @@ def bundle_bytes(image, seed_pa, seed_chunk):
         'devicetree': {'size': len(image.dt_blob), 'sha256': _sha(image.dt_blob)},
         'info': image.info,
     }
+    if monitor is not None:
+        data, pa, params_pa, (s2_lo, s2_hi), fb = monitor
+        if pa % 0x1000 or params_pa % 0x1000:
+            refusal('the monitor image and parameter page must be page aligned')
+        placed = sorted((c['pa'], c['pa'] + c['size']) for c in chunks)
+        for lo, hi in placed + [(params_pa, params_pa + 0x1000)]:
+            if pa < hi and lo < pa + len(data):
+                refusal(f'the monitor image at {pa:#x} overlaps {lo:#x}')
+        if params_pa < pa + len(data) and pa < params_pa + 0x1000:
+            refusal('the parameter page overlaps the monitor image')
+        name = f'{STICK_DIR}/chunk{len(chunks)}.bin'
+        files[name] = data
+        chunks.append({'file': name, 'pa': pa, 'size': len(data), 'sha256': _sha(data)})
+        fb_pa, fb_width, fb_stride, fb_guest, fb_band = fb or (0, 0, 0, 0, 0)
+        manifest['monitor'] = {
+            'chunk': len(chunks) - 1, 'entry_pa': pa, 'params_pa': params_pa,
+            's2_lo': s2_lo, 's2_hi': s2_hi,
+            'framebuffer': {'pa': fb_pa, 'width': fb_width, 'stride': fb_stride,
+                            'guest_rows': fb_guest, 'band_rows': fb_band},
+        }
     files[f'{STICK_DIR}/bundle.bin'] = q1n1_bundle(manifest, qualification_hash(manifest))
     return manifest, files
 
@@ -179,7 +216,20 @@ def build(args):
         refusal(f'unknown layout {args.layout}')
     image, seed_pa, seed_chunk = deferred_seed_image(args.kernelcache, dt_path, layout)
     validate_chunks(image, layout)
-    manifest, files = bundle_bytes(image, seed_pa, seed_chunk)
+    monitor = None
+    if args.monitor:
+        if args.monitor_pa is None or args.params_pa is None:
+            refusal('--monitor needs --monitor-pa and --params-pa')
+        s2 = (layout.ram_base & ~0x1FFFFF,
+              (layout.panic_pa + layout.panic_size + 0x1FFFFF) & ~0x1FFFFF)
+        fb = None
+        if layout.video is not None and layout.monitor_band is not None:
+            vbase, vwidth, vrows, vstride, _ = layout.video
+            _, _, brows, _ = layout.monitor_band
+            fb = (vbase, vwidth, vstride, vrows, brows)
+        monitor = (pathlib.Path(args.monitor).read_bytes(), args.monitor_pa,
+                   args.params_pa, s2, fb)
+    manifest, files = bundle_bytes(image, seed_pa, seed_chunk, monitor)
     out = pathlib.Path(args.out)
     for name, data in files.items():
         (out / name).parent.mkdir(parents=True, exist_ok=True)
@@ -254,6 +304,11 @@ def main():
     b.add_argument('--uefi-reserved', default='',
                    help='gaokun3: comma list of base:size regions UEFI\'s memory map does not '
                         'offer (from el2qual\'s recorded map, e.g. run 24\'s 0xc6200000:0x2400000)')
+    b.add_argument('--monitor', help='monitor image (raw binary) for a version 2 bundle')
+    b.add_argument('--monitor-pa', type=lambda v: int(v, 0),
+                   help='physical address the monitor image is placed and entered at')
+    b.add_argument('--params-pa', type=lambda v: int(v, 0),
+                   help='physical address of the parameter page q1n1 writes for the monitor')
     b.add_argument('--out', required=True)
     c = sub.add_parser('check')
     c.add_argument('--out', required=True)

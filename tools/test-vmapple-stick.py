@@ -99,6 +99,36 @@ def main():
               and path.rstrip(b'\0') == b'\\Snapintosh\\vmapple\\chunk0.bin',
               'bundle.bin records chunk 0 with q1n1\'s absolute path')
 
+        mon_data = bytes(range(256)) * 8
+        manifest_v2, files_v2 = stick.bundle_bytes(
+            image, seed_pa, seed_chunk,
+            monitor=(mon_data, 0x40200000, 0x43000000, (0x81000000, 0x9D200000),
+                     (0x9E000000, 1024, 4096, 512, 88)))
+        binary_v2 = files_v2['Snapintosh/vmapple/bundle.bin']
+        count_v2 = len(manifest_v2['chunks'])
+        check(len(binary_v2) == 176 + 112 * count_v2,
+              'version 2 bundle.bin is a 176-byte header and 112-byte records')
+        fields = struct.unpack_from('<18Q', binary_v2, 0)
+        check(fields[1] == 2 and fields[8] == 0x40200000 and fields[9] == 0x43000000
+              and fields[10:12] == (0x81000000, 0x9D200000)
+              and fields[12:17] == (0x9E000000, 1024, 4096, 512, 88),
+              'version 2 header carries the monitor entry, parameter page, stage-2 '
+              'range and screen split')
+        check(binary_v2[144:176] == bytes.fromhex(stick.qualification_hash(manifest_v2)),
+              'version 2 bundle.bin carries the qualification hash')
+        check(files_v2[manifest_v2['chunks'][-1]['file']] == mon_data
+              and manifest_v2['monitor']['chunk'] == count_v2 - 1,
+              'the monitor image is the last chunk')
+        check(refuses(stick.bundle_bytes, image, seed_pa, seed_chunk,
+                      (mon_data, image.chunks[0][0], 0x43000000, (0x81000000, 0x9D200000), None)),
+              'a monitor image overlapping a guest chunk is refused')
+        check(refuses(stick.bundle_bytes, image, seed_pa, seed_chunk,
+                      (mon_data, 0x40200000, 0x40200000, (0x81000000, 0x9D200000), None)),
+              'a parameter page overlapping the monitor image is refused')
+        check(binary[64:96] == bytes.fromhex(stick.qualification_hash(manifest))
+              and struct.unpack_from('<Q', binary, 8)[0] == 1,
+              'a bundle without a monitor stays version 1, byte for byte')
+
         chunk0 = out / 'Snapintosh' / 'vmapple' / 'chunk0.bin'
         chunk0.write_bytes(b'\x00' + files['Snapintosh/vmapple/chunk0.bin'][1:])
         check(refuses(stick.check, Args(out=str(out))), 'a tampered chunk is refused')
