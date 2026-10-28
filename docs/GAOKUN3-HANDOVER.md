@@ -34,7 +34,7 @@ with conditions, and a real-hardware boot can reopen it.
 | 0C: route decision | Route B ACCEPTED, 2026-10-26, with conditions | [PHASE0C](GAOKUN3-PHASE0C.md#decision) |
 | 1: guards | Thermal guard pinned to tsens and run once at EL2 (run 10); battery guard and the trend check host-tested against Windows readings | [PHASE1-GUARDS](GAOKUN3-PHASE1-GUARDS.md) |
 | 2: EL2 entry and USB link | VHE exit PASSED on the machine (runs 11, 12; q1n1 runs 14, 15). USB link **paused**: USB0's DMA is translated by `apps_smmu`, and the bypass's first write (stage 2) is designed and host-modelled only | [PHASE2](GAOKUN3-PHASE2.md), [USB-DEVICE-MODE](GAOKUN3-USB-DEVICE-MODE.md) |
-| 3: VirtualMac kernel to a console | **In progress, QEMU and host only.** P1, P2, P4 and P7 done; decisions 1, 2, 3 and 5 made. P3: with decision 5's answers and the self-interrupt fix, the boot reaches the root-mount wait without the PCIe node; with it, now that guest RAM sits above the PCIe windows, it stops at the MSI controller's check of the MSI frame, which needs a GICv2m model. P5: the bundle builder and q1n1's `--vmapple-place` built. P6: the gaokun3 layout with one CPU and the split screen | [PHASE3](GAOKUN3-PHASE3.md) |
+| 3: VirtualMac kernel to a console | **In progress, QEMU and host only.** P1, P2, P4 and P7 done; decisions 1, 2, 3 and 5 made. P3: **the stock kernel reaches the root-mount wait in QEMU with every device a monitor model** (decision 5's answers, the self-interrupt fix, guest RAM above the device windows, the MSI frame's type register). P5: the bundle builder and q1n1's `--vmapple-place` built. P6: the gaokun3 layout with one CPU and the split screen | [PHASE3](GAOKUN3-PHASE3.md) |
 
 Recent results worth knowing before anything else:
 
@@ -93,11 +93,11 @@ Open, for the owner ([PHASE3](GAOKUN3-PHASE3.md#decisions-for-the-owner)):
      ([P5](GAOKUN3-PHASE3.md#p5-result-the-stick-bundle-placed-by-q1n1)).
    - **P6:** one CPU, the device tree's and UEFI's reserved regions, and
      the split screen ([P6](GAOKUN3-PHASE3.md#p6-result-the-gaokun3-layout)).
-3. **Model the MSI frame as Arm's GICv2m** (P3). Guest RAM now sits above
-   the PCIe windows, and the `pmap_enter_pv` panic is gone. With the PCIe
-   node kept, the next stop is the PCIe MSI controller's assertion on the
-   MSI frame's `+0x8`, GICv2m's `MSI_TYPER`, which the model answers with
-   zero ([P3](GAOKUN3-PHASE3.md#guest-ram-moved-above-the-device-windows-2026-10-28)).
+3. ~~**P3's bar**~~ MET, 2026-10-28, QEMU only: the root-mount wait with
+   the PCIe node kept and no QEMU device answering the guest. The MSI
+   frame turned out not to be GICv2m; the kernel's own check gave its type
+   register's format
+   ([P3](GAOKUN3-PHASE3.md#the-msi-frame-2026-10-28-p3s-bar-met)).
 4. **Hardware H1 to H4**, each with its own go-ahead on the day. H1 is
    ready to plan: q1n1 `--vmapple-place` from the stick, report only,
    nothing entered. H2, the first write to the real GIC, needs a gaokun3

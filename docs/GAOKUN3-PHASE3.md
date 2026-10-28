@@ -1,10 +1,9 @@
 # gaokun3 Phase 3: the VirtualMac kernel to a console (design)
 
-**Status, 2026-10-28: P1, P2, P4 and P7 done; P3 met on its default
-policy (a console, then a named stop) and open on its root-mount bar,
-which waits on decision 5; P5 and P6 built, host and QEMU only. Decisions
-1 to 3 and the CPU count are made; 4 and 5 are open. Nothing run on
-hardware.** It does Phase 3 before Phase 2's USB
+**Status, 2026-10-28: P1 to P4 and P7 done; P5 and P6 built; all host and
+QEMU only. In QEMU the stock kernel reaches the root-mount wait with every
+device a monitor model (P3's bar). Decisions 1, 2, 3 and 5 and the CPU
+count are made; decision 4 is open. Nothing run on hardware.** It does Phase 3 before Phase 2's USB
 host link, with the guest loaded from the USB stick. That
 changes the order [Phase 0C](GAOKUN3-PHASE0C.md#decision) set, and
 AGENTS.md calls standalone execution "a direction, not an already
@@ -571,6 +570,48 @@ PCIe node kept):
   flags and stub addresses match `layout.h`. A stale magic in `smoke.py`
   refused every boot once before that check existed.
 
+### The MSI frame, 2026-10-28: P3's bar met
+
+**Not GICv2m.** A GICv2m model of the MSI frame was tried first, as
+decision 5's option (a) suggested, with `MSI_TYPER` giving INTIDs
+128–191. The assertion still fired. The 26A428 kernel's own check (local
+study of the kernelcache's `AppleVirtualPlatformPCIEMSIController`,
+OBSERVED) reads the type register at `+0x8` and:
+
+- requires **bit 31**, a valid bit that GICv2m's `MSI_TYPER` does not
+  have;
+- then takes **bits 12:0** and **bits 28:16** as two 13-bit fields of the
+  MSI interrupt range it allocates. Which field is the first INTID and
+  which the count is not settled by that code (INFERRED either way).
+
+**The model.** `monitor.c` answers the type register with bit 31 set and
+both fields 128. That is INTIDs 128–255 under either reading: inside the
+GIC model's 288 and clear of every interrupt the tree names (the devices'
+37 and 48–51, PCIe's 64–79). The range is the platform's own choice. No
+other register's meaning is known, and Phase 3 has no PCIe functions to
+raise an MSI, so any other access to the frame is a named stop.
+
+**Result** (OBSERVED, QEMU only; `smoke.py boot --monitor --mmio-trace`,
+PCIe node kept): **the stock 26A428 kernel reaches the root-mount wait**,
+`Waiting on … IOMedia … Apple_HFS`, with no panic.
+
+- QEMU's MMIO trace shows only the PL011, the redistributor, and one write
+  to QEMU's real distributor. That write is the monitor's `GICD_CTLR`
+  enable at setup, made at EL2. The bar's checker now allows exactly that
+  one write and nothing more, and a host test pins it.
+- No QEMU device answers the guest. **P3's bar is met.**
+- With `--framebuffer`, the split screen still matches pixel for pixel.
+
+**Evidence:**
+
+- `tools/test-vmapple-monitor.py` PASS, 52 checks, including the type
+  register's valid bit and fields, and the stops on other accesses.
+- `tools/test-vmapple-smoke.py` PASS, 82 checks, including the bar's
+  distributor rule: a second distributor access, a different write, or a
+  guest-visible QEMU device each fail it.
+- `tools/test-vmapple-classic.py` 75 and `tools/test-vmapple-stick.py` 16,
+  both PASS.
+
 ## P4 result: the split console
 
 **2026-10-28: PASS, OBSERVED, QEMU only.** `smoke.py boot --monitor
@@ -843,12 +884,12 @@ its own go-ahead.
   windows. The bar: the same root-mount wait as the smoke, with **no QEMU
   device visible to the guest**. Every device it sees is a monitor model,
   as on the gaokun3. `--mmio-trace` checks it: no guest access may be
-  answered by a QEMU device. PARTIAL, 2026-10-28: with decision 5's
-  answers and the self-interrupt fix, the boot reaches the root-mount wait
-  without the PCIe node. With it, after guest RAM moved above the PCIe
-  windows, it stops at the PCIe MSI controller's check of the MSI frame's
-  type register, which needs a GICv2m model
-  ([result](#guest-ram-moved-above-the-device-windows-2026-10-28)).
+  answered by a QEMU device. DONE, 2026-10-28, QEMU only: with decision
+  5's answers, the self-interrupt fix, guest RAM above the device windows
+  and the MSI frame's type register, the stock kernel reaches the
+  root-mount wait with the PCIe node kept, and the MMIO trace shows no
+  QEMU device answering the guest
+  ([result](#the-msi-frame-2026-10-28-p3s-bar-met)).
 - **P4. The split console**, with the framebuffer in QEMU RAM. The harness
   renders it to an image and checks the banner text in both regions.
   DONE, 2026-10-28, QEMU only: the split, with the band checked pixel for
@@ -1130,6 +1171,9 @@ stick path that read belongs to the loader before ExitBootServices (P5).
   (decision 5).
 - The configuration table's `rnd` field: on the gaokun3, a real source for
   it, if the kernel ever reads it.
+- The MSI frame's type register: which 13-bit field is the first INTID
+  and which the count. Both are 128 today, so either reading works; an
+  MSI would settle it, and Phase 3 has none.
 - XNU's verbose console on a portrait framebuffer.
 - Whether the kernel needs anything Apple-only from the A78C. Only the
   hardware can say (overturn condition 1).
