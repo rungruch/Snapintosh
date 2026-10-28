@@ -225,6 +225,75 @@ class Layout(unittest.TestCase):
         with self.assertRaises(usb.LayoutError):                                     # not a PE app
             usb.build_layout('usb-inventory', self.out('v'), None, self.sdboot, usb_probe=self.slb)
 
+    def vmapple_bundle(self, name='bundle'):
+        """A real bundle from the synthetic kernelcache and tree."""
+        import importlib.util
+        root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root / 'probes'))
+        sys.path.insert(0, str(root / 'tools' / 'vmapple-smoke'))
+        import classicload
+        def load(mod, path):
+            spec = importlib.util.spec_from_file_location(mod, root / path)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            return m
+        classic = load('classic_fixtures_usb', 'tools/test-vmapple-classic.py')
+        stick = load('vmapple_stick_usb', 'tools/vmapple-stick.py')
+        kc = self.file('kernelcache.synthetic', b'')
+        classic.synthetic_kernelcache(kc)
+        tree = self.file('devicetree.synthetic', classic._fixtures.synthetic_tree())
+        from dataclasses import replace
+        layout = replace(classicload.QEMU_MONITOR_LAYOUT, drop_nodes=())
+        image, seed_pa, seed_chunk = stick.deferred_seed_image(kc, tree, layout)
+        manifest, files = stick.bundle_bytes(image, seed_pa, seed_chunk)
+        out = Path(self.tmp.name) / name
+        for rel, data in files.items():
+            (out / rel).parent.mkdir(parents=True, exist_ok=True)
+            (out / rel).write_bytes(data)
+        (out / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+        return out
+
+    def test_vmapple_h1_stage(self):
+        q1n1 = self.file('q1n1.efi', pe(payload=b'--vmapple-place PLACED AND VERIFIED'))
+        bundle = self.vmapple_bundle()
+        m = usb.build_layout('vmapple-h1', self.out(), q1n1, self.sdboot, dtb=self.dtb,
+                             bundle=bundle)
+        out = self.out()
+        self.assert_manifest_complete(out, m)
+        self.assertIn('Snapintosh/vmapple/bundle.bin', m['files'])
+        self.assertIn('Snapintosh/vmapple/chunk0.bin', m['files'])
+        self.assertIn('EFI/q1n1/q1n1.efi', m['files'])
+        self.assertFalse(any(k in rel for rel in m['files'] for k in ('slbounce', 'tcblaunch')))
+        text = (out / 'loader/entries/q1n1-vmapple-h1.conf').read_text()
+        self.assertIn('options --vmapple-place --hold\n', text)
+        self.assertIn('devicetree /dtb/', text)
+        self.assertEqual((out / 'Snapintosh/vmapple/bundle.bin').read_bytes(),
+                         (bundle / 'Snapintosh/vmapple/bundle.bin').read_bytes())
+
+    def test_vmapple_h1_refusals(self):
+        q1n1 = self.file('q1n1.efi', pe(payload=b'--vmapple-place PLACED AND VERIFIED'))
+        plain = self.file('q1n1-plain.efi', pe(payload=b'q1n1 VHE EXIT  DT SIMPLE-FB'))
+        bundle = self.vmapple_bundle()
+        with self.assertRaises(usb.LayoutError):                     # no stick option built in
+            usb.build_layout('vmapple-h1', self.out('a'), plain, self.sdboot, dtb=self.dtb,
+                             bundle=bundle)
+        for extra in (dict(slbounce=self.slb), dict(tcblaunch=self.tcb), dict(always_switch=True)):
+            with self.assertRaises(usb.LayoutError):
+                usb.build_layout('vmapple-h1', self.out('b'), q1n1, self.sdboot, dtb=self.dtb,
+                                 bundle=bundle, **extra)
+        with self.assertRaises(usb.LayoutError):                     # no bundle
+            usb.build_layout('vmapple-h1', self.out('c'), q1n1, self.sdboot, dtb=self.dtb)
+        with self.assertRaises(usb.LayoutError):                     # no device tree
+            usb.build_layout('vmapple-h1', self.out('d'), q1n1, self.sdboot, bundle=bundle)
+        chunk = bundle / 'Snapintosh/vmapple/chunk0.bin'
+        chunk.write_bytes(b'\x01' + chunk.read_bytes()[1:])
+        with self.assertRaises(usb.LayoutError):                     # a chunk off its hash
+            usb.build_layout('vmapple-h1', self.out('e'), q1n1, self.sdboot, dtb=self.dtb,
+                             bundle=bundle)
+        with self.assertRaises(usb.LayoutError):                     # --bundle elsewhere
+            usb.build_layout('stage2', self.out('f'), self.efi, self.sdboot, self.slb, self.tcb,
+                             self.dtb, bundle=self.vmapple_bundle('other'))
+
     def test_q1n1_foothold_stage(self):
         q1n1 = self.file('q1n1.efi', pe(payload=b'q1n1 VHE EXIT  DT SIMPLE-FB'))
         m = usb.build_layout('q1n1-foothold', self.out(), q1n1, self.sdboot, self.slb, self.tcb,

@@ -11,6 +11,7 @@
   python3 tools/el2qual-usb.py usb-read (the same inputs as stage2)
   python3 tools/el2qual-usb.py usb-inventory --systemd-boot F --usb-probe F
   python3 tools/el2qual-usb.py q1n1-foothold --q1n1 F (and stage2's other inputs)
+  python3 tools/el2qual-usb.py vmapple-h1 --systemd-boot F --q1n1 F --dtb F --bundle DIR
 
 This only builds a directory tree, by default build/el2qual-usb/<stage>/.
 It never writes to a disk or a mounted volume: copying the tree onto a
@@ -36,6 +37,13 @@ is ignored, so tcblaunch.exe (a Microsoft binary) can never be committed.
   q1n1-foothold  stage2's files with q1n1 (its -DQ1N1_VHE_EXIT
            -DQ1N1_DT_FRAMEBUFFER build) in place of el2qual: its --el2
            foothold under slbounce, then the same after --exit-vhe.
+  vmapple-h1  Phase 3 step H1 (docs/GAOKUN3-PHASE3.md): systemd-boot, the
+           device tree, q1n1's -DQ1N1_VMAPPLE_STICK build and a VirtualMac
+           bundle from tools/vmapple-stick.py. One entry, --vmapple-place
+           --hold: q1n1 places and checks the bundle before
+           ExitBootServices, fills its seed from UEFI's RAW RNG, reports,
+           releases it and waits for a key. It never calls
+           ExitBootServices, so there is no slbounce or tcblaunch.exe.
   usb-inventory  systemd-boot and q1n1's holding USB protocol inventory
            (q1n1-usb-probe-hold.efi) only: no slbounce, tcblaunch.exe or
            device tree, so nothing on it can attempt a Secure Launch.
@@ -144,7 +152,7 @@ STAGE_ENTRIES = {'stage1b': ENTRIES, 'stage2': ENTRIES, 'thermal': THERMAL_ENTRI
 USB_PROBE_PATH = 'EFI/q1n1/q1n1-usb-probe-hold.efi'
 USB_INVENTORY_ENTRY = ('q1n1-usb-inventory.conf', 'q1n1: USB protocol inventory (read only, no EL2 switch)')
 STAGES = ('stage1', 'stage1b', 'stage2', 'thermal', 'vhe-exit', 'usb-inventory', 'q1n1-foothold',
-          'usb-read', 'entropy')
+          'usb-read', 'entropy', 'vmapple-h1')
 
 # q1n1's first boot on the gaokun3 (docs/GAOKUN3-PHASE2.md), in order: its
 # --el2 foothold under slbounce's VHE state, drawing on the device tree's
@@ -235,11 +243,90 @@ def entry_text(title, options, dtb_name, efi='/EFI/el2qual/el2qual.efi'):
     return '\n'.join(lines) + '\n'
 
 
+# Phase 3 step H1 (docs/GAOKUN3-PHASE3.md): q1n1 places and checks the
+# VirtualMac bundle, then holds its report on screen. Report strings only the
+# -DQ1N1_VMAPPLE_STICK code contains (q1n1 platform/uefi/vmapple-stick.c).
+VMAPPLE_H1_ENTRY = ('q1n1-vmapple-h1.conf',
+                    'q1n1: VirtualMac bundle placement check (H1, nothing entered)',
+                    '--vmapple-place --hold')
+VMAPPLE_MARKERS = {b'--vmapple-place': '-DQ1N1_VMAPPLE_STICK',
+                   b'PLACED AND VERIFIED': '-DQ1N1_VMAPPLE_STICK'}
+BUNDLE_DIR = 'Snapintosh/vmapple'
+
+
+def check_bundle(bundle):
+    """The bundle's own check (tools/vmapple-stick.py check): every chunk's
+    hash, bundle.bin against manifest.json, the empty seed slot. Returns
+    the files to place, relative to the stick's root."""
+    import contextlib
+    import importlib.util
+    import io
+    spec = importlib.util.spec_from_file_location('vmapple_stick', ROOT / 'tools' / 'vmapple-stick.py')
+    stick = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(stick)
+    class Args:
+        out = str(bundle)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            stick.check(Args())
+    except SystemExit as refusal:
+        raise LayoutError(f'bundle {bundle}: {refusal}') from None
+    files = sorted(p for p in (Path(bundle) / BUNDLE_DIR).iterdir() if p.is_file())
+    if not any(p.name == 'bundle.bin' for p in files):
+        raise LayoutError(f'bundle {bundle}: no {BUNDLE_DIR}/bundle.bin')
+    return files
+
+
+def build_vmapple_h1(out, systemd_boot, q1n1, dtb, bundle, replace, extra):
+    if extra:
+        raise LayoutError('vmapple-h1 takes --systemd-boot, --q1n1, --dtb and --bundle only: '
+                          'it never leaves the firmware, so no slbounce or tcblaunch.exe')
+    if not all((systemd_boot, q1n1, dtb, bundle)):
+        raise LayoutError('vmapple-h1 needs --systemd-boot, --q1n1, --dtb and --bundle')
+    require_pe(systemd_boot, 'systemd-boot', {SUBSYSTEM_EFI_APPLICATION})
+    require_pe(q1n1, 'q1n1', {SUBSYSTEM_EFI_APPLICATION})
+    data = Path(q1n1).read_bytes()
+    missing = sorted({d for m, d in VMAPPLE_MARKERS.items() if m not in data})
+    if missing:
+        raise LayoutError(f'{q1n1}: not a q1n1 build with {" ".join(missing)}')
+    require_dtb(dtb)
+    chunks = check_bundle(bundle)
+    out = check_destination(out, replace)
+    if out.exists() and any(out.iterdir()):
+        shutil.rmtree(out)
+    placed = {}
+    def put(rel, payload):
+        dest = out / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(payload)
+        placed[rel] = hashlib.sha256(payload).hexdigest()
+    put('EFI/BOOT/BOOTAA64.EFI', Path(systemd_boot).read_bytes())
+    put(Q1N1_PATH, data)
+    dtb_name = Path(dtb).name
+    put(f'dtb/{dtb_name}', Path(dtb).read_bytes())
+    for path in chunks:
+        put(f'{BUNDLE_DIR}/{path.name}', path.read_bytes())
+    name, title, options = VMAPPLE_H1_ENTRY
+    put('loader/loader.conf', f'timeout 15\ndefault {name}\neditor no\n'.encode())
+    put(f'loader/entries/{name}', entry_text(title, options, dtb_name, '/' + Q1N1_PATH).encode())
+    import json as _json
+    qualification = _json.loads((Path(bundle) / 'manifest.json').read_text())
+    manifest = {'stage': 'vmapple-h1', 'always_switch': False, 'files': placed,
+                'bundle_entry_pa': qualification['entry_pa']}
+    (out / MANIFEST).write_text(json.dumps(manifest, indent=2) + '\n')
+    return manifest
+
+
 def build_layout(stage, out, efi, systemd_boot=None, slbounce=None, tcblaunch=None,
-                 dtb=None, always_switch=False, replace=False, usb_probe=None):
+                 dtb=None, always_switch=False, replace=False, usb_probe=None, bundle=None):
     """Validate every input, then write the tree; returns the manifest."""
     if stage not in STAGES:
         raise LayoutError(f'unknown stage {stage}')
+    if stage == 'vmapple-h1':
+        return build_vmapple_h1(out, systemd_boot, efi, dtb, bundle, replace,
+                                any((slbounce, tcblaunch, always_switch, usb_probe)))
+    if bundle:
+        raise LayoutError('--bundle belongs to the vmapple-h1 stage only')
     if stage == 'usb-inventory':
         return build_usb_inventory(out, systemd_boot, usb_probe, replace,
                                    any((slbounce, tcblaunch, dtb, always_switch, efi)))
@@ -356,16 +443,18 @@ def main():
                     help='slbounce was built with SLBOUNCE_ALWAYS_SWITCH=1 (no --dtb)')
     ap.add_argument('--replace', action='store_true', help='replace an existing tree')
     ap.add_argument('--usb-probe', help="q1n1's q1n1-usb-probe-hold.efi (usb-inventory only)")
-    ap.add_argument('--q1n1', help="q1n1's gaokun3 build of q1n1.efi (q1n1-foothold only)")
+    ap.add_argument('--q1n1', help="q1n1's gaokun3 build of q1n1.efi (q1n1-foothold and "
+                    'vmapple-h1)')
+    ap.add_argument('--bundle', help='a tools/vmapple-stick.py bundle directory (vmapple-h1 only)')
     a = ap.parse_args()
     efi = a.efi
-    if a.stage == 'q1n1-foothold':
+    if a.stage in ('q1n1-foothold', 'vmapple-h1'):
         if efi or not a.q1n1:
-            print('REFUSED: q1n1-foothold takes --q1n1 (not --efi)')
+            print(f'REFUSED: {a.stage} takes --q1n1 (not --efi)')
             return 1
         efi = a.q1n1
     elif a.q1n1:
-        print('REFUSED: --q1n1 belongs to the q1n1-foothold stage only')
+        print('REFUSED: --q1n1 belongs to the q1n1-foothold and vmapple-h1 stages only')
         return 1
     elif a.stage == 'usb-inventory':
         pass
@@ -376,7 +465,7 @@ def main():
     out = Path(a.out) if a.out else DEFAULT_OUT / a.stage
     try:
         manifest = build_layout(a.stage, out, efi, a.systemd_boot, a.slbounce, a.tcblaunch,
-                                a.dtb, a.always_switch, a.replace, a.usb_probe)
+                                a.dtb, a.always_switch, a.replace, a.usb_probe, a.bundle)
     except (LayoutError, OSError) as error:
         print(f'REFUSED: {error}')
         return 1
