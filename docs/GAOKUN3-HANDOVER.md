@@ -98,9 +98,12 @@ Open, for the owner ([PHASE3](GAOKUN3-PHASE3.md#decisions-for-the-owner)):
    frame turned out not to be GICv2m; the kernel's own check gave its type
    register's format
    ([P3](GAOKUN3-PHASE3.md#the-msi-frame-2026-10-28-p3s-bar-met)).
-4. **Hardware H1 to H4**, each with its own go-ahead on the day. H1 is
-   ready to plan: q1n1 `--vmapple-place` from the stick, report only,
-   nothing entered. H2, the first write to the real GIC, needs a gaokun3
+4. **Hardware H2 to H4**, each with its own go-ahead on the day. H1
+   PASSED as run 28: q1n1 placed and verified the bundle at its exact
+   addresses on the gaokun3, with the seed from `RAW`
+   ([run 28](GAOKUN3-PHASE3.md#run-28-2026-10-28-h1-passes)). H2 needs a
+   gaokun3 build of the monitor and the q1n1-to-monitor hand-off, then
+   decision 4. H2, the first write to the real GIC, needs a gaokun3
    build of the monitor, which does not exist yet.
 5. **After Phase 3:** the USB link resumes at stage 2 of the S2CR bypass
    ([step 1i](GAOKUN3-USB-DEVICE-MODE.md#step-1i-stage-2-the-first-smmu-write-design-and-host-model)),
@@ -214,7 +217,7 @@ reads the photographs. Every run follows
 Each run is recorded as a row in
 [QUALIFICATION's run table](GAOKUN3-QUALIFICATION.md#runs-so-far): stick
 entry, `el2qual.efi` hash and commit, el2qual version, and the result with
-its evidence class. Runs 1 to 27 are recorded there.
+its evidence class. Runs 1 to 28 are recorded there.
 
 **Writes that need their own explicit go-ahead**, separate from any
 approval of the plan:

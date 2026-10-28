@@ -1017,10 +1017,78 @@ stick path that read belongs to the loader before ExitBootServices (P5).
 
 | Step | What runs | Writes beyond RAM | Answers |
 | --- | --- | --- | --- |
-| H1 | q1n1 preloads the image, checks every hash, and allocates each chunk at its address against the live memory map. The monitor is not entered | none | the transport and the layout |
+| H1 | q1n1 preloads the image, checks every hash, and allocates each chunk at its address against the live memory map. The monitor is not entered. **PASSED, run 28** ([below](#run-28-2026-10-28-h1-passes)) | none | the transport and the layout |
 | H2 | the monitor is up, with stage 2 and the virtual interface ready, and the guest **not** entered | EL2 registers; the GIC timer interrupt | the interrupt path |
 | H3 | the guest is entered, and the PL011 console shows the banner | as H2 | acceptance part 1; first QARMA5 evidence for condition 2 |
 | H4 | the boot runs to its first unmodelled contract | as H2 | acceptance part 2; the run that can reopen Route B |
+
+### H1 prepared, 2026-10-28 (not run)
+
+The H1 stick is `python3 tools/el2qual-usb.py vmapple-h1 --systemd-boot F
+--q1n1 F --dtb F --bundle DIR`. It holds systemd-boot, the device tree, q1n1's
+`-DQ1N1_VMAPPLE_STICK` build, and a bundle. It has one entry,
+`--vmapple-place --hold`, and no slbounce or `tcblaunch.exe`: H1 never
+leaves the firmware. The builder refuses:
+
+- a q1n1 build without the stick option;
+- a bundle that fails its own check;
+- any Secure Launch input.
+
+**The bundle's placement uses the gaokun3's recorded UEFI memory map**
+(gk3probe, 2026-10-05, OBSERVED). DRAM is `0x80000000`–`0x3FFFFFFFF` and
+`0x800000000`–`0x87FFFFFFF`, with no hole at 4 GiB.
+
+- The first P6 placement, at `0xC9004000`, would have given the guest UEFI
+  runtime code and data, ACPI NVS, and boot-services allocations up to
+  4 GiB.
+- Every range not listed as Conventional is now passed as
+  `--uefi-reserved`. The guest moves to `0x101004000`–`0x161104000`, inside
+  one Conventional range, `0xFFFFF000`–`0x1C22DFFFF`.
+- Its qualification hash is `56f025bb…40567be2`.
+
+**q1n1 gained `--hold`:** after the report it turns off the firmware's
+watchdog and waits for a key, so the report can be photographed before
+systemd-boot redraws.
+
+**Rehearsed in QEMU** with the same chain and a QEMU-layout bundle:
+
+- systemd-boot ran the entry with the device tree;
+- q1n1 placed and hash-checked both chunks at their exact addresses;
+- it refused for want of `RAW`, which QEMU's firmware lacks;
+- it then held.
+
+#### Run 28 (2026-10-28): H1 passes
+
+The H1 stick, one boot, photographed, OBSERVED on the machine:
+
+```
+q1n1 AArch64 UEFI entry.
+DT framebuffer: OK
+Entry EL: 1
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 2  BYTES 85245952  ENTRY 0000000103EB4480
+QUALIFICATION 56F025BBA955E538
+RELEASED: NOT ENTERED (PHASE 3 STEP H1)
+HOLDING: PRESS ANY KEY TO RETURN TO THE FIRMWARE
+```
+
+What this shows:
+
+- **The bundle:** the qualification ties the photo to the bundle built
+  against the recorded memory map (`56f025bb…40567be2`).
+- **The live memory map:** it had both guest windows free on this boot,
+  `0x101004000`–`0x10604FFFF` and `0x161004000`–`0x161103FFF`.
+  `AllocateAddress` took both.
+- **The chunks:** both were read from the stick and matched their SHA-256
+  in place, about 85 MB.
+- **The seed:** UEFI's RNG protocol delivered the 256-byte seed with `RAW`,
+  as run 27 predicted, and it was not zero.
+- **Release:** q1n1 released everything and held for the photograph.
+  Nothing was entered, and nothing was written outside RAM.
+
+What it does not show: anything past ExitBootServices. Entering the
+monitor needs a gaokun3 build of it, and that is H2's work, with decision
+4 (the first write to the real GIC) still the owner's.
 
 ## Decisions for the owner
 
