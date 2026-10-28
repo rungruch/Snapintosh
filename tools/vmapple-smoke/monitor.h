@@ -44,6 +44,10 @@ void monitor_set_policy(int absent_fixed, int trace);
 /* Debug only: answer the secondary windows as the Phase 0C smoke's QEMU
  * window did (all-ones reads, sunk writes), to bisect model fidelity. */
 void monitor_set_baseline_answers(int on);
+/* The split console (PARAM_FLAG_FRAMEBUFFER): clear the monitor's band
+ * under the guest's framebuffer rows and draw its banner; a named stop then
+ * draws its line there too. */
+void monitor_set_band(int on);
 
 /* A data abort from the guest. esr is ESR_EL2, ipa the faulting IPA from
  * HPFAR_EL2, elr the guest VA of the faulting instruction, frame the

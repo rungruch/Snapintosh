@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "monitor.h"
+#include "../../probes/font5x7.h"
 #include "layout.h"
 
 uint64_t monitor_handled;
@@ -264,6 +265,61 @@ static int decode_access(uint64_t elr, uint64_t *frame, unsigned *srt,
     return 0;
 }
 
+/* ---- the split console's band (Phase 3 P4, decision 3) -------------------
+ * The monitor's own rows under the guest's framebuffer. Stage 2 never maps
+ * them, so what is here is only ever the monitor's: the harness renders the
+ * band it expects with probes/font5x7.h and compares it pixel for pixel.
+ * Layout, which tools/vmapple-smoke/smoke.py mirrors: background
+ * MON_BAND_BG, glyphs at scale 2 in 12x20-pixel cells, text from x 8,
+ * line n at y 6 + 20n within the band. EL2 runs with its MMU off here, so
+ * these are Device stores: 32-bit and aligned. */
+#define MON_BAND_BG    0x00202020u
+#define MON_BAND_TEXT  0x00ffffffu
+#define MON_BAND_STOP  0x00ff5050u
+static int band_on;
+
+static void band_pixel(unsigned x, unsigned y, uint32_t color)
+{
+    if (x >= MON_FB_WIDTH || y >= MON_FB_BAND_ROWS) return;
+    volatile uint32_t *row = (volatile uint32_t *)(uintptr_t)
+        (MON_FB_PA + (uint64_t)(MON_FB_GUEST_ROWS + y) * MON_FB_STRIDE);
+    row[x] = color;
+}
+
+static void band_text(unsigned line, const char *s, uint32_t color)
+{
+    for (unsigned j = 0; s[j]; j++) {
+        const uint8_t *g = font5x7_glyph(s[j]);
+        unsigned x0 = 8 + j * 12, y0 = 6 + line * 20;
+        for (unsigned row = 0; row < 7; row++)
+            for (unsigned bit = 0; bit < 5; bit++)
+                if (g[row] & (0x10 >> bit))
+                    for (unsigned d = 0; d < 4; d++)
+                        band_pixel(x0 + bit * 2 + (d & 1), y0 + row * 2 + (d >> 1), color);
+    }
+}
+
+void monitor_set_band(int on)
+{
+    band_on = on;
+    if (!on) return;
+    for (unsigned y = 0; y < MON_FB_BAND_ROWS; y++)
+        for (unsigned x = 0; x < MON_FB_WIDTH; x++) band_pixel(x, y, MON_BAND_BG);
+    band_text(0, "SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY", MON_BAND_TEXT);
+}
+
+static void band_stop(uint64_t ipa, int write)
+{
+    if (!band_on) return;
+    char line[48] = "STOP: UNMODELLED IPA ";
+    unsigned n = 21;
+    for (int i = 15; i >= 0; i--) line[n++] = "0123456789ABCDEF"[(ipa >> (4 * i)) & 15];
+    const char *what = write ? " WRITE" : " READ";
+    for (unsigned i = 0; what[i]; i++) line[n++] = what[i];
+    line[n] = 0;
+    band_text(1, line, MON_BAND_STOP);
+}
+
 int monitor_data_abort(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *frame)
 {
     unsigned iss = (unsigned)(esr & 0x1ffffff);
@@ -325,6 +381,7 @@ stop:
     puts_("EL2: stop: unmodelled IPA ");
     puthex(far);
     puts_(write ? " write\n" : " read\n");
+    band_stop(far, write);
     return 0;
 }
 

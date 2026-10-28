@@ -92,6 +92,10 @@ class ClassicLayout:
 
     All addresses are physical. `video` is a boot_args.Video tuple
     (base, width, height, stride_bytes, depth) or None for no framebuffer.
+    `monitor_band` is the screen the monitor keeps for itself under the
+    guest's rows (Phase 3 decision 3, the split console): (base, width,
+    rows, stride_bytes). It must start on the page where the guest's rows
+    end, so stage 2 can map the guest's part and deny the band.
     """
     name: str
     ram_base: int
@@ -112,6 +116,7 @@ class ClassicLayout:
     nvram_bank_size: int = 0x10000
     nvram_system_size: int = 0x3000
     video: Optional[Tuple[int, int, int, int, int]] = None
+    monitor_band: Optional[Tuple[int, int, int, int]] = None
     # Device-tree nodes the completed tree leaves out (Phase 3 decision 5,
     # option b): a VM without that device.
     drop_nodes: Tuple[str, ...] = ()
@@ -139,6 +144,26 @@ class ClassicLayout:
             raise ValueError('classic layout: panic log size exceeds its region')
         if self.guest_cpus < 1 or self.timebase_hz < 1:
             raise ValueError('classic layout: no CPUs or no counter rate')
+        if self.monitor_band is not None:
+            if self.video is None:
+                raise ValueError('classic layout: a monitor band needs a guest framebuffer')
+            vbase, vwidth, vheight, vstride, _ = self.video
+            bbase, bwidth, brows, bstride = self.monitor_band
+            if (bwidth, bstride) != (vwidth, vstride) or brows < 1:
+                raise ValueError('classic layout: the monitor band is not the same screen')
+            if bbase != vbase + vheight * vstride:
+                raise ValueError('classic layout: the monitor band does not follow the guest rows')
+            if bbase & 0xfff:
+                raise ValueError('classic layout: the guest and monitor rows do not split on '
+                                 'a 4 KiB page, so stage 2 cannot separate them')
+        if self.video is not None:
+            vbase, _, vheight, vstride, _ = self.video
+            end = vbase + vheight * vstride
+            if self.monitor_band is not None:
+                end = self.monitor_band[0] + self.monitor_band[2] * self.monitor_band[3]
+            if vbase < top + self.panic_size and self.ram_base < end:
+                raise ValueError('classic layout: the framebuffer overlaps guest DRAM or the '
+                                 'panic region')
         return self
 
 
@@ -328,6 +353,25 @@ def classic_complete_dt(dt, layout, entropy):
                        layout.gicr_size) + gic[32:])
     classic_drop_nodes(dt, layout.drop_nodes)
     return dt.serialize(), resolved
+
+
+# The QEMU split console (Phase 3 P4): tools/vmapple-smoke/layout.h's
+# MON_FB_* constants must agree. 576 MiB of QEMU RAM ends at 0x64000000;
+# the framebuffer sits above the panic chunk, outside reported DRAM.
+QEMU_SPLIT_SCREEN = (0x62000000, 1024, 600, 4096)
+QEMU_MONITOR_ROWS = 88
+
+
+def split_screen(layout, framebuffer, monitor_rows):
+    """`layout` with the screen split (decision 3): the guest is told about
+    the top rows in boot_args.Video, and the monitor keeps the bottom
+    `monitor_rows`. `framebuffer` is (base, width, height, stride_bytes)."""
+    from dataclasses import replace
+    base, width, height, stride = framebuffer
+    guest_rows = height - monitor_rows
+    return replace(layout, video=(base, width, guest_rows, stride, 32),
+                   monitor_band=(base + guest_rows * stride, width, monitor_rows,
+                                 stride)).validate()
 
 
 def derive_gaokun3_layout(reserved, dramatic_top=0x80000000 + (16 << 30),

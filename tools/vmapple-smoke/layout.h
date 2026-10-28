@@ -46,7 +46,23 @@
 #define PARAM_FLAG_UARTPT 32
 #define PARAM_FLAG_BASELINE 64 /* debug: secondary windows as in Phase 0C */
 #define PARAM_FLAG_HALT_ON_OFF 128 /* debug: halt instead of exiting at PSCI off */
+/* bit8: the split console (Phase 3 P4, decision 3). Stage 2 maps only the
+ * guest's rows of the framebuffer; the monitor draws its band below them,
+ * where a guest store is a stage 2 fault. On a named stop the stub halts
+ * instead of exiting, so the harness can read the screen. */
+#define PARAM_FLAG_FRAMEBUFFER 256
 
+/* The QEMU framebuffer for the split console: guest RAM above the panic
+ * chunk (0x61104000) and below QEMU's 576 MiB end (0x64000000), so it is
+ * neither reported DRAM nor firmware-carved memory. A 1024-pixel row is
+ * exactly one 4 KiB page, and the guest's 512 rows are one 2 MiB stage 2
+ * block; the 88 rows below it are the monitor's. No suffix: stub.S uses
+ * these too. probes/classicload.py's QEMU_SPLIT_SCREEN must agree. */
+#define MON_FB_PA         0x62000000
+#define MON_FB_WIDTH      1024
+#define MON_FB_STRIDE     4096
+#define MON_FB_GUEST_ROWS 512
+#define MON_FB_BAND_ROWS  88
 
 /* smoke_fault: the stub records an unexpected EL2 exception here and halts,
  * so the harness can report where the guest died rather than just time out.

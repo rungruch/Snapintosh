@@ -38,6 +38,8 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
+sys.path.insert(0, str(ROOT / 'probes'))
+import classicload                                              # noqa: E402
 HOMEBREW = pathlib.Path('/opt/homebrew/opt/llvm/bin')
 
 STUB_PA = 0x40200000
@@ -56,6 +58,7 @@ PARAM_FLAG_GICPT = 16
 PARAM_FLAG_UARTPT = 32
 PARAM_FLAG_BASELINE = 64
 PARAM_FLAG_HALT_ON_OFF = 128
+PARAM_FLAG_FRAMEBUFFER = 256
 
 
 def tool(name, explicit, env, *extra_dirs):
@@ -152,10 +155,14 @@ def _monitor_ask(sock_path, commands, settle=0.4):
 
 
 def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, timeout, cpu,
-             extra=(), probe_cmds=()):
+             extra=(), probe_cmds=(), stop_cmds=()):
     """Boot the stub at EL2 with one payload loaded at payload_pa. `extra`
-    is appended to QEMU's arguments. Returns (serial_text, exit_code,
-    timed_out, monitor_text)."""
+    is appended to QEMU's arguments. With `stop_cmds` [(command, (file,
+    size))], the stub halts on a named stop instead of exiting (the split
+    console), so the run polls the stub's fault record and, once it
+    appears, sends each command to QEMU's monitor, waits for its file, and
+    ends the run. Returns (serial_text, exit_code, timed_out,
+    monitor_text)."""
     import time
     import kcload                       # the vCPU count the device tree describes
     params = out / 'params.bin'
@@ -173,11 +180,25 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, 
         '-device', f'loader,addr={STUB_PA:#x},cpu-num=0',
         *extra,
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=str(ROOT))
     deadline = time.time() + timeout
     timed_out = False
     monitor_text = ''
+    next_poll = time.time() + 2
     while proc.poll() is None:
+        if stop_cmds and time.time() > next_poll:
+            next_poll = time.time() + 2
+            record = _monitor_ask(mon, [f'xp/1gx {FAULT_PA:#x}'], settle=0.2)
+            if f'{SMOKE_FAULT_MAGIC:016x}' in record.lower():
+                monitor_text = _monitor_ask(mon, [c for c, _ in stop_cmds], settle=1.0)
+                # QEMU writes a dump asynchronously to this exchange: wait
+                # for each file to reach its size before ending the run.
+                until = time.time() + 15
+                while time.time() < until and not all(
+                        f.exists() and f.stat().st_size >= size for _, (f, size) in stop_cmds):
+                    time.sleep(0.2)
+                proc.kill()
+                break
         if time.time() > deadline:
             timed_out = True
             # The guest is still running but silent: ask QEMU where it is.
@@ -248,6 +269,11 @@ def boot(args):
     flags = PARAM_FLAG_TRACE if args.trace else 0
     layout = None
     probe_cmds = []
+    stop_cmds = []
+    screen = out / 'screen.raw'
+    # QEMU echoes monitor input a character at a time; a short path keeps
+    # the command quick. QEMU runs from the repository root.
+    screen_arg = screen.relative_to(ROOT) if screen.is_relative_to(ROOT) else screen
     if args.framebuffer and not args.monitor:
         print('--framebuffer needs --monitor')
         return 2
@@ -267,9 +293,16 @@ def boot(args):
             from dataclasses import replace as _replace2
             layout = _replace2(kcload._LAYOUT, drop_nodes=kcload.MONITOR_LAYOUT.drop_nodes)
         if args.framebuffer:
-            from dataclasses import replace as _replace5
-            layout = _replace5(layout, video=(FB_PA, FB_WIDTH, FB_HEIGHT, FB_WIDTH * 4, 32))
-            probe_cmds = [f'xp/512gx {FB_PA:#x}']
+            # The split console (Phase 3 P4, decision 3): the guest is told
+            # about the top rows; the monitor draws its band below them.
+            flags |= PARAM_FLAG_FRAMEBUFFER
+            layout = classicload.split_screen(layout, classicload.QEMU_SPLIT_SCREEN,
+                                              classicload.QEMU_MONITOR_ROWS)
+            base, _, height, stride = classicload.QEMU_SPLIT_SCREEN
+            screen.unlink(missing_ok=True)
+            dump = f'pmemsave {base:#x} {height * stride} {screen_arg}'
+            probe_cmds = [dump]
+            stop_cmds = [(dump, (screen, height * stride))]
         if args.keep_nodes:
             from dataclasses import replace as _replace
             layout = _replace(layout, drop_nodes=())
@@ -291,7 +324,7 @@ def boot(args):
     text, code, timed_out, monitor_text = run_qemu(qemu, out, stub_bin, payload,
                                                    payload_pa, entry_pa, x0,
                                                    flags, args.timeout, args.cpu, extra,
-                                                   probe_cmds)
+                                                   probe_cmds, stop_cmds)
     sys.stdout.write(text)
     print('--- smoke boot result ---')
     if timed_out:
@@ -305,17 +338,100 @@ def boot(args):
     kcload.report_tidcp(text, monitor_text, out)
     if args.monitor:
         return report_monitor(text, mmio_log if args.mmio_trace else None, out,
-                              fb_text=monitor_text if args.framebuffer else None)
+                              screen=screen if args.framebuffer else None)
     if args.mmio_trace:
         kcload.report_mmio(mmio_log.read_text(errors='replace') if mmio_log.exists() else '',
                            (out / 'devicetree.vma2smoke').read_bytes(), out)
     return kcload.report(text, out)
 
 
-FB_PA, FB_WIDTH, FB_HEIGHT = 0x60000000, 1024, 600
+# The monitor's band, as monitor.c draws it: background, then glyphs from
+# probes/font5x7.h at scale 2 in 12x20-pixel cells from x 8, line n at y
+# 6 + 20n. Colours are the 0x00RRGGBB words monitor.c stores.
+BAND_BG, BAND_TEXT, BAND_STOP = 0x00202020, 0x00FFFFFF, 0x00FF5050
+BAND_BANNER = 'SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY'
 
 
-def report_monitor(text, mmio_log, out, fb_text=None):
+def font5x7():
+    """The glyph table from probes/font5x7.h, so the harness and the monitor
+    draw from one source."""
+    import re
+    text = (ROOT / 'probes' / 'font5x7.h').read_text()
+    body = text[text.index('font5x7[64][7] = {'):text.index('};')]
+    rows = re.findall(r'\{(0x[0-9a-f]{2}(?:,0x[0-9a-f]{2}){6})\}', body)
+    if len(rows) != 64:
+        raise SystemExit(f'font5x7.h: expected 64 glyphs, found {len(rows)}')
+    return [[int(v, 16) for v in r.split(',')] for r in rows]
+
+
+def expected_band(width, rows, lines):
+    """The band's 32-bit words for `lines` [(text, colour)], row-major."""
+    font = font5x7()
+    px = [BAND_BG] * (width * rows)
+    for n, (s, colour) in enumerate(lines):
+        for j, ch in enumerate(s.upper()):
+            c = ord(ch)
+            g = font[c - 0x20] if 0x20 <= c <= 0x5F else font[ord('?') - 0x20]
+            x0, y0 = 8 + j * 12, 6 + n * 20
+            for row in range(7):
+                for bit in range(5):
+                    if g[row] & (0x10 >> bit):
+                        for d in range(4):
+                            x, y = x0 + bit * 2 + (d & 1), y0 + row * 2 + (d >> 1)
+                            if x < width and y < rows:
+                                px[y * width + x] = colour
+    return px
+
+
+def write_png(path, words, width, height):
+    """A PNG of 0x00RRGGBB words, for a person to look at."""
+    import zlib
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        for w in words[y * width:(y + 1) * width]:
+            raw += bytes(((w >> 16) & 0xFF, (w >> 8) & 0xFF, w & 0xFF))
+
+    def chunk(kind, data):
+        body = kind + data
+        return struct.pack('>I', len(data)) + body + struct.pack('>I', zlib.crc32(body))
+    png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0))
+    png += chunk(b'IDAT', zlib.compress(bytes(raw), 6)) + chunk(b'IEND', b'')
+    pathlib.Path(path).write_bytes(png)
+
+
+def check_screen(screen, stop_line, out):
+    """P4's verdict on the split console. Returns a list of problems."""
+    base, width, height, stride = classicload.QEMU_SPLIT_SCREEN
+    band_rows = classicload.QEMU_MONITOR_ROWS
+    guest_rows = height - band_rows
+    if not screen.exists() or screen.stat().st_size != height * stride:
+        return ['the screen was not captured (no named stop, or pmemsave failed)']
+    data = screen.read_bytes()
+    words = list(struct.unpack(f'<{height * stride // 4}I', data))
+    words = [words[y * (stride // 4) + x] for y in range(height) for x in range(width)]
+    write_png(out / 'screen.png', words, width, height)
+    problems = []
+    guest = words[:guest_rows * width]
+    lit_rows = sum(any(guest[y * width:(y + 1) * width]) for y in range(guest_rows))
+    print(f'screen: the guest drew on {lit_rows} of its {guest_rows} rows; '
+          f'picture at {out / "screen.png"}')
+    if lit_rows < 8:
+        problems.append('the guest drew nothing in its framebuffer rows')
+    lines = [(BAND_BANNER, BAND_TEXT)]
+    if stop_line:
+        lines.append((stop_line, BAND_STOP))
+    want = expected_band(width, band_rows, lines)
+    got = words[guest_rows * width:]
+    wrong = sum(a != b for a, b in zip(got, want))
+    print(f'screen: the monitor band ({band_rows} rows) differs from the expected '
+          f'rendering in {wrong} pixels')
+    if wrong:
+        problems.append(f'the monitor band is not exactly its own text ({wrong} pixels differ)')
+    return problems
+
+
+def report_monitor(text, mmio_log, out, screen=None):
     """The Phase 3 P3 verdict: with no QEMU device visible to the guest,
     the boot reaches the root-mount wait (diagnostic absent-fixed gate) or
     stops by name at a fixed address (the default), and QEMU's MMIO trace
@@ -342,16 +458,21 @@ def report_monitor(text, mmio_log, out, fb_text=None):
     if 'EL2: stop: unmodelled IPA' in text:
         line = next(l for l in text.splitlines() if 'unmodelled IPA' in l)
         print(line.strip())
-    if fb_text is not None:
-        words = fb_text.count('0x') - fb_text.count('0x0000000000000000')
-        print(f'framebuffer at {FB_PA:#x}: {words} non-zero words in the first 4 KiB probed')
-        if words < 8:
-            problems.append('the framebuffer has no glyph block (nothing painted)')
+    if screen is not None:
+        stop_line = None
+        for line in text.splitlines():
+            if 'EL2: stop: unmodelled IPA' in line:
+                ipa, kind = line.split('unmodelled IPA ')[1].split()[:2]
+                stop_line = f'STOP: UNMODELLED IPA {int(ipa, 16):016X} {kind.upper()}'
+                break
+        problems += check_screen(screen, stop_line, out)
     if stopped:
         fixed = ('0x0000000030010000' in text or '0x00000000004ff' in text)
         if banner and fixed and 'RESULT' not in text:
-            print('RESULT: PASS (monitor: banner reached, then the named '
-                  'default-deny stop at a fixed address)')
+            for p in problems:
+                print(f'FAIL: {p}')
+            print('RESULT: ' + ('PASS' if not problems else 'FAIL') +
+                  ' (monitor: banner reached, then the named default-deny stop at a fixed address)')
             return 0 if not problems else 1
         problems.append('the run stopped at an unexpected IPA')
     elif 'Waiting on' in text and 'IOMedia' in text:

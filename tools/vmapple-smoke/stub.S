@@ -90,6 +90,10 @@ _start:
 	lsr	x0, x0, #6		// baseline-answers debug flag
 	and	x0, x0, #1
 	bl	monitor_set_baseline_answers
+	mov	x0, x22
+	lsr	x0, x0, #8		// split console
+	and	x0, x0, #1
+	bl	monitor_set_band
 1:
 
 	// Start the TIDCP log empty, so a stale page cannot look like data.
@@ -650,7 +654,20 @@ monitor_setup:
 	ldr	x2, =0x61200000
 	cmp	x1, x2
 	b.lo	1b
-	dsb	sy
+	// The split console (PARAM_FLAG_FRAMEBUFFER): one 2 MiB block maps the
+	// guest's 512 framebuffer rows; the monitor's band below stays absent,
+	// so a guest store there is a stage 2 fault, not a drawn pixel.
+	ldr	x0, =pt_flag
+	ldr	x0, [x0]
+	tbz	x0, #8, 6f
+	ldr	x0, =s2_l2
+	ldr	x1, =MON_FB_PA
+	mov	x2, #0x7fd			// block, AF, SH, WB, S2AP RW
+	orr	x2, x1, x2
+	lsr	x3, x1, #21
+	and	x3, x3, #0x1ff
+	str	x2, [x0, x3, lsl #3]
+6:	dsb	sy
 	ldr	x0, =0x53490			// VTCR: 48-bit IPA/PA, L0 start, WB
 	msr	VTCR_EL2, x0
 	ldr	x0, =s2_l0
@@ -783,6 +800,11 @@ record_and_halt:
 	mrs	x0, HCR_EL2
 	str	x0, [x19, #FAULT_HCR]
 	dsb	sy
+	// With the split console, stay up: the harness reads the screen
+	// through QEMU's monitor once this record appears, then ends the run.
+	ldr	x0, =pt_flag
+	ldr	x0, [x0]
+	tbnz	x0, #8, halt
 	// Stop QEMU so the harness does not wait out its timeout.
 	mov	x0, #0x18
 	ldr	x1, =0x20023		// ADP_Stopped_RunTimeError

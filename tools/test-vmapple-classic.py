@@ -168,6 +168,22 @@ def test_gaokun3_layout():
               f'the guest window avoids reserved region {base:#x}')
     check(layout.panic_pa == layout.ram_base + layout.mem_size,
           'the panic chunk sits just above the reported DRAM')
+    qemu = classicload.split_screen(classicload.QEMU_MONITOR_LAYOUT,
+                                    classicload.QEMU_SPLIT_SCREEN, classicload.QEMU_MONITOR_ROWS)
+    check(qemu.video == (0x62000000, 1024, 512, 4096, 32)
+          and qemu.monitor_band == (0x62200000, 1024, 88, 4096),
+          'the QEMU split matches tools/vmapple-smoke/layout.h (512 + 88 rows)')
+    import re
+    header = (ROOT / 'tools' / 'vmapple-smoke' / 'layout.h').read_text()
+    mon = {k: int(v, 0) for k, v in re.findall(r'#define (MON_FB_\w+)\s+(0x[0-9a-fA-F]+|\d+)', header)}
+    base, width, height, stride = classicload.QEMU_SPLIT_SCREEN
+    check(mon == {'MON_FB_PA': base, 'MON_FB_WIDTH': width, 'MON_FB_STRIDE': stride,
+                  'MON_FB_GUEST_ROWS': height - classicload.QEMU_MONITOR_ROWS,
+                  'MON_FB_BAND_ROWS': classicload.QEMU_MONITOR_ROWS},
+          'layout.h and classicload describe the same QEMU screen')
+    check(refuses(classicload.split_screen, classicload.QEMU_MONITOR_LAYOUT,
+                  (0x60000000, 1024, 600, 4096), 88),
+          'a framebuffer inside guest DRAM is refused')
     check(refuses(classicload.derive_gaokun3_layout, [(0x80000000, 16 << 30)]),
           'a fully reserved DRAM is refused')
     check(refuses(classicload.derive_gaokun3_layout, GAOKUN3_RESERVED, 0x80000000 +
