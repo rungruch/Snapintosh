@@ -42,7 +42,6 @@ REGS(uart_regs, 0x1000);
 REGS(pl031_regs, 0x1000);
 REGS(pl061_regs, 0x1000);
 REGS(pvpanic_regs, 0x1000);
-REGS(msi_regs, 0x1000);
 
 static uint32_t load32(const uint32_t *base, uint64_t off, unsigned size)
 {
@@ -320,6 +319,35 @@ void monitor_set_guest(uint64_t boot_args_pa)
     guest_ram_size = boot_args_pa ? *(volatile uint64_t *)(uintptr_t)(boot_args_pa + 0x18) : 0;
 }
 
+/* ---- the MSI frame (the gic node's third window) -------------------------
+ * The PCIe node's msi-frame-index (2) names this window as its MSI frame.
+ * AppleVirtualPlatformPCIEMSIController reads one register, the type at
+ * +0x8, and (local study of the 26A428 kernelcache, OBSERVED) requires bit
+ * 31 set, then takes bits 12:0 and bits 28:16 as two 13-bit fields of the
+ * MSI interrupt range it allocates from. Which field is the first INTID
+ * and which the count is not settled by that code (INFERRED either way),
+ * so both are 128: INTIDs 128 to 255 under either reading, inside the 288
+ * the distributor model reports and clear of every interrupt the tree
+ * names (the devices' 37 and 48 to 51, PCIe's 64 to 79). The range is this
+ * platform's own choice. It is not Arm's GICv2m: GICv2m's MSI_TYPER has no
+ * valid bit and failed the check (OBSERVED). No other register's meaning
+ * is known, and Phase 3 has no PCIe functions to raise an MSI, so any
+ * other access is a named stop. */
+#define MSI_TYPE_VALID   (1u << 31)
+#define MSI_RANGE_FIELD  128u
+
+static int msi_access(uint64_t off, unsigned size, int write, uint64_t *value)
+{
+    count_other++;
+    if (baseline_answers) {
+        if (!write) *value = (size == 8) ? ~0ull : ((1ull << (8 * size)) - 1);
+        return 1;
+    }
+    if (write || off != 0x008 || size != 4) return 0;
+    *value = MSI_TYPE_VALID | (MSI_RANGE_FIELD << 16) | MSI_RANGE_FIELD;
+    return 1;
+}
+
 struct window { uint64_t base, size; int kind; };
 enum { K_GICD, K_GICR, K_MSI, K_UART, K_PL031, K_PL061, K_PVPANIC, K_PCIE,
        K_BDIF, K_CFG, K_MAILBOX };
@@ -459,7 +487,7 @@ int monitor_data_abort(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *frame
         switch (w->kind) {
         case K_GICD: count_gic++; handled = gicd_access(off, size, write, &value); break;
         case K_GICR: count_gic++; handled = gicr_access(off, size, write, &value); break;
-        case K_MSI:  handled = store_access(msi_regs, off & 0xfff, size, write, &value); break;
+        case K_MSI:  handled = msi_access(off, size, write, &value); break;
         case K_UART: handled = uart_access(off, size, write, &value); break;
         case K_PL031: handled = pl031_access(off, size, write, &value); break;
         case K_PL061: handled = store_access(pl061_regs, off, size, write, &value); break;

@@ -327,6 +327,32 @@ def test_mmio_report():
             check(True, 'a malformed arm-io ranges or out-of-range reg is refused')
 
 
+def test_monitor_bar():
+    """The monitor report's no-QEMU-device rule: the one distributor write
+    the monitor makes at setup is allowed, nothing more."""
+    import io, contextlib, tempfile
+    import smoke
+    serial = ('EL2: monitor: stage 2 default-deny\nDarwin Kernel Version 27\n'
+              'Waiting on <dict><key>IOProviderClass</key><string>IOMedia</string></dict>\n')
+    setup = trace_line('write', 0x08000000, 0x3, 4, 'gicv3_dist')
+    uart = trace_line('write', 0x09000000, 0x41, 4, 'pl011')
+    with tempfile.TemporaryDirectory() as d:
+        out = pathlib.Path(d)
+        log = out / 'mmio.log'
+        for name, trace, want in (
+                ('only the setup write', [uart, setup], 0),
+                ('a second distributor access', [uart, setup,
+                                                 trace_line('read', 0x08000004, 1, 4, 'gicv3_dist')], 1),
+                ('a different distributor write', [uart, trace_line('write', 0x08000000, 0x1, 4,
+                                                                    'gicv3_dist')], 1),
+                ('a guest-visible QEMU device', [uart, trace_line('read', 0x09010000, 1, 4,
+                                                                  'pl031')], 1)):
+            log.write_text('\n'.join(trace) + '\n')
+            with contextlib.redirect_stdout(io.StringIO()):
+                got = smoke.report_monitor(serial, log, out)
+            check(got == want, f'monitor bar, {name}: exit {got}, want {want}')
+
+
 def main():
     test_dt_completion()
     test_nvram()
@@ -336,6 +362,7 @@ def main():
     test_tidcp_log_parse()
     test_tidcp_report_distinguishes_empty_from_unreadable()
     test_mmio_report()
+    test_monitor_bar()
     print(f'PASS test-vmapple-smoke: {checks} checks')
 
 

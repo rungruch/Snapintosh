@@ -469,8 +469,16 @@ def report_monitor(text, mmio_log, out, screen=None):
         print('guest panic line:', line[:160])
         problems.append('the guest panicked')
     if mmio_log is not None and mmio_log.exists():
-        regions = {r[4] for r in kcload.parse_mmio_trace(mmio_log.read_text(errors='replace'))}
+        accesses = kcload.parse_mmio_trace(mmio_log.read_text(errors='replace'))
+        regions = {r[4] for r in accesses}
         allowed = {'pl011', 'gicv3_redist'}
+        # The monitor enables QEMU's real distributor once at setup
+        # (monitor_init: GICD_CTLR = EnGrp0|EnGrp1), because the guest's own
+        # distributor writes go to the model. That one write is the only
+        # distributor access allowed; stage 2 never maps it for the guest.
+        dist = [r for r in accesses if r[4] == 'gicv3_dist']
+        if dist == [('write', 0x08000000, 0x3, 4, 'gicv3_dist')]:
+            allowed.add('gicv3_dist')
         stray = {r for r in regions if not any(r.startswith(a) for a in allowed)}
         print(f'QEMU devices touched (by the monitor at EL2 only): {sorted(regions)}')
         if stray:

@@ -110,6 +110,18 @@ int main(void)
     CHECK(access(0x20000000, 2, 5, 0, 0) == 0 && monitor_stop_ipa == 0x20000000,
           "an unmodelled IPA stops by name");
 
+    /* The MSI frame: the type register the PCIe MSI controller checks. */
+    CHECK(access(MON_GIC_MSI_IPA + 8, 2, 5, 0, 0) == 1 && (frame[5] >> 31) == 1,
+          "MSI frame: the type register has its valid bit, bit 31, which the kernel requires");
+    CHECK((frame[5] & 0x1fff) == 128 && ((frame[5] >> 16) & 0x1fff) == 128,
+          "MSI frame: both 13-bit range fields are 128, INTIDs 128..255 either way");
+    CHECK(access(MON_GIC_MSI_IPA + 0x40, 2, 5, 1, 130) == 0,
+          "MSI frame: a write is a named stop (no MSI source, meaning unknown)");
+    CHECK(access(MON_GIC_MSI_IPA + 0xfcc, 2, 5, 0, 0) == 0,
+          "MSI frame: a read of an unknown register is a named stop");
+    CHECK(access(MON_GIC_MSI_IPA + 8, 3, 5, 0, 0) == 0,
+          "MSI frame: a 64-bit read of the type is a named stop");
+
     /* Decision 5: the backdoor interface answers as QEMU's vmapple does. */
     CHECK(access(MON_BDIF_IPA + 0x10000, 2, 5, 0, 0) == 1 && frame[5] == 1,
           "backdoor: the AUX STATUS reads 1, the value the kernel checks for");
