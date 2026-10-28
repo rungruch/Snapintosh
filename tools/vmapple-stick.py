@@ -2,14 +2,21 @@
 # SPDX-License-Identifier: MIT
 """Build and check a VirtualMac stick bundle for q1n1 (Phase 3 P5).
 
-Host and QEMU only. A bundle is what will later be written to the boot
-stick for q1n1 to preload: the classic loader's chunks (one file per
-chunk), the completed device tree, and a manifest recording every
-chunk's physical address, size and hash, the entry and boot_args
-addresses, the guest profile and the layout. The gaokun3 chain boots
-from q1n1, not from tools/cycle.py, and q1n1's chainload takes a raw
-image, so the bundle is deliberately just chunks plus this manifest;
-loading it on hardware is Phase 3's H steps and is not done here.
+Host and QEMU only. A bundle is what is copied to the boot stick for
+q1n1 to place: the classic loader's chunks (one file per chunk), the
+completed device tree, and a manifest recording every chunk's physical
+address, size and hash, the entry and boot_args addresses, the guest
+profile and the layout. The gaokun3 chain boots from q1n1 (decision 2),
+not from tools/cycle.py. Loading it on hardware is Phase 3's H steps and
+is not done here.
+
+The output directory is the stick's tree: Snapintosh/vmapple/ holds
+bundle.bin, the binary manifest q1n1's -DQ1N1_VMAPPLE_STICK reads
+(q1n1 platform/uefi/vmapple-stick.h), and chunkN.bin; manifest.json and
+devicetree.bin beside them are for the host. The boot seed is never on
+the stick: the chunks carry a zero /chosen/random-seed slot, the
+manifests record where it is, and q1n1 fills it from UEFI's RAW RNG
+before ExitBootServices (Phase 0C condition 3).
 
 Checks mirror the discipline the boot workflow uses elsewhere:
 
@@ -26,6 +33,7 @@ Checks mirror the discipline the boot workflow uses elsewhere:
 import hashlib
 import json
 import pathlib
+import struct
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -37,25 +45,91 @@ def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def bundle_bytes(image):
-    """(manifest_dict, {filename: bytes}) for a ClassicImage."""
+STICK_DIR = 'Snapintosh/vmapple'
+SEED_BYTES = 256
+Q1N1_VMB_MAGIC = 0x31424D56314E3151          # "Q1N1VMB1"
+Q1N1_VMB_MAX = 8
+Q1N1_VMB_PATH_BYTES = 64
+
+
+def deferred_seed_image(kernelcache, dt_path, layout):
+    """The image with an empty /chosen/random-seed slot, and where it is.
+
+    The loader refuses an all-zero seed, so the image is built twice with
+    two different fills; the bytes that differ are exactly the slot. Any
+    other difference, or a slot that is not one 256-byte run inside one
+    chunk, is refused. Returns (image, seed_pa, seed_chunk)."""
+    from dataclasses import replace
+    a = classicload.build_classic_image(kernelcache, dt_path, layout,
+                                        entropy=lambda n: b'\x5a' * n)
+    b = classicload.build_classic_image(kernelcache, dt_path, layout,
+                                        entropy=lambda n: b'\xa5' * n)
+    if [(pa, len(d)) for pa, d in a.chunks] != [(pa, len(d)) for pa, d in b.chunks]:
+        refusal('the seed changes the chunk layout')
+    found = []
+    for i, ((pa, da), (_, db)) in enumerate(zip(a.chunks, b.chunks)):
+        diff = [j for j in range(len(da)) if da[j] != db[j]] if da != db else []
+        if diff:
+            found.append((i, pa, diff))
+    if len(found) != 1:
+        refusal(f'the seed should differ in one chunk, not {len(found)}')
+    index, pa, diff = found[0]
+    if len(diff) != SEED_BYTES or diff[-1] - diff[0] != SEED_BYTES - 1:
+        refusal(f'the seed slot is {len(diff)} bytes, not one {SEED_BYTES}-byte run')
+    start = diff[0]
+    chunks = list(a.chunks)
+    data = bytearray(chunks[index][1])
+    data[start:start + SEED_BYTES] = bytes(SEED_BYTES)
+    chunks[index] = (pa, bytes(data))
+    image = replace(a, chunks=tuple(chunks),
+                    payload=chunks[0][1] if index == 0 else a.payload,
+                    dt_blob=bytes(SEED_BYTES).join(a.dt_blob.split(b'\x5a' * SEED_BYTES, 1)))
+    return image, pa + start, index
+
+
+def q1n1_bundle(manifest, qualification):
+    """bundle.bin: q1n1's struct q1n1_vmb_manifest (96-byte header, then
+    one 112-byte record per chunk)."""
+    chunks = manifest['chunks']
+    if not 0 < len(chunks) <= Q1N1_VMB_MAX:
+        refusal(f'{len(chunks)} chunks; q1n1 places 1 to {Q1N1_VMB_MAX}')
+    seed = manifest['seed']
+    body = struct.pack('<8Q32s', Q1N1_VMB_MAGIC, 1, len(chunks), 112, manifest['entry_pa'],
+                       manifest['boot_args_pa'], seed['pa'], seed['chunk'],
+                       bytes.fromhex(qualification))
+    for c in chunks:
+        path = '\\' + c['file'].replace('/', '\\')
+        raw = path.encode('ascii')
+        if len(raw) >= Q1N1_VMB_PATH_BYTES:
+            refusal(f'chunk path {path} is too long for q1n1')
+        body += struct.pack('<2Q32s64s', c['pa'], c['size'], bytes.fromhex(c['sha256']),
+                            raw.ljust(Q1N1_VMB_PATH_BYTES, b'\0'))
+    return body
+
+
+def bundle_bytes(image, seed_pa, seed_chunk):
+    """(manifest_dict, {relative path: bytes}) for a ClassicImage whose seed
+    slot is empty (deferred_seed_image)."""
     files = {}
     chunks = []
     for i, (pa, data) in enumerate(image.chunks):
-        name = f'chunk{i}.bin'
+        name = f'{STICK_DIR}/chunk{i}.bin'
         files[name] = data
         chunks.append({'file': name, 'pa': pa, 'size': len(data), 'sha256': _sha(data)})
     files['devicetree.bin'] = image.dt_blob
     manifest = {
-        'format': 'snapintosh-vmapple-stick-1',
+        'format': 'snapintosh-vmapple-stick-2',
         'profile': image.info['profile'],
         'layout': image.info['layout'],
         'entry_pa': image.entry_pa,
         'boot_args_pa': image.boot_args_pa,
         'chunks': chunks,
+        'seed': {'pa': seed_pa, 'chunk': seed_chunk, 'size': SEED_BYTES,
+                 'source': 'q1n1 fills it from the UEFI RNG protocol, RAW only'},
         'devicetree': {'size': len(image.dt_blob), 'sha256': _sha(image.dt_blob)},
         'info': image.info,
     }
+    files[f'{STICK_DIR}/bundle.bin'] = q1n1_bundle(manifest, qualification_hash(manifest))
     return manifest, files
 
 
@@ -88,23 +162,27 @@ def build(args):
     if args.layout == 'qemu-monitor':
         layout = classicload.QEMU_MONITOR_LAYOUT
     elif args.layout == 'gaokun3':
-        reserved = []
-        for item in args.reserved.split(','):
-            if not item:
-                continue
-            base, _, size = item.partition(':')
-            reserved.append((int(base, 0), int(size, 0)))
+        def regions(text):
+            out = []
+            for item in text.split(','):
+                if not item:
+                    continue
+                base, _, size = item.partition(':')
+                out.append((int(base, 0), int(size, 0)))
+            return out
+        reserved = regions(args.reserved)
         if not reserved:
             refusal('the gaokun3 layout needs --reserved base:size,... from the SLB tree')
-        layout = classicload.derive_gaokun3_layout(reserved)
+        layout = classicload.derive_gaokun3_layout(
+            reserved, firmware_reserved=regions(args.uefi_reserved))
     else:  # pragma: no cover - argparse choices guard this
         refusal(f'unknown layout {args.layout}')
-    image = classicload.build_classic_image(args.kernelcache, dt_path, layout)
+    image, seed_pa, seed_chunk = deferred_seed_image(args.kernelcache, dt_path, layout)
     validate_chunks(image, layout)
-    manifest, files = bundle_bytes(image)
+    manifest, files = bundle_bytes(image, seed_pa, seed_chunk)
     out = pathlib.Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
     for name, data in files.items():
+        (out / name).parent.mkdir(parents=True, exist_ok=True)
         (out / name).write_bytes(data)
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True))
     print(f'wrote {out}: layout {layout.name}, {len(manifest["chunks"])} chunks, '
@@ -131,6 +209,19 @@ def check(args):
     for (pa, size), (next_pa, _) in zip(placed, placed[1:]):
         if pa + size > next_pa:
             refusal(f'chunks overlap at {pa:#x}')
+    seed = manifest.get('seed', {})
+    try:
+        holder = manifest['chunks'][seed['chunk']]
+        offset = seed['pa'] - holder['pa']
+        slot = (out / holder['file']).read_bytes()[offset:offset + SEED_BYTES]
+    except (KeyError, IndexError, TypeError, OSError):
+        refusal('the manifest does not locate the seed slot')
+    if offset < 0 or len(slot) != SEED_BYTES or any(slot):
+        refusal('the seed slot is not empty: a seed must never come from the stick')
+    binary = out / STICK_DIR / 'bundle.bin'
+    if not binary.exists() or binary.read_bytes() != q1n1_bundle(manifest,
+                                                                 qualification_hash(manifest)):
+        refusal('bundle.bin does not match manifest.json')
     print(f'PASS vmapple-stick check: {out} qualification sha256: '
           f'{qualification_hash(manifest)}')
     return 0
@@ -160,6 +251,9 @@ def main():
     b.add_argument('--layout', choices=('qemu-monitor', 'gaokun3'), required=True)
     b.add_argument('--reserved', default='',
                    help='gaokun3: comma list of base:size reserved regions from the SLB tree')
+    b.add_argument('--uefi-reserved', default='',
+                   help='gaokun3: comma list of base:size regions UEFI\'s memory map does not '
+                        'offer (from el2qual\'s recorded map, e.g. run 24\'s 0xc6200000:0x2400000)')
     b.add_argument('--out', required=True)
     c = sub.add_parser('check')
     c.add_argument('--out', required=True)

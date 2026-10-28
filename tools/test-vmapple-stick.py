@@ -8,6 +8,7 @@ no Apple material and no hardware.
 import importlib.util
 import json
 import pathlib
+import struct
 import sys
 import tempfile
 
@@ -57,8 +58,12 @@ def main():
         dt_path.write_bytes(_fixtures.synthetic_tree())
         from dataclasses import replace
         layout = replace(classicload.QEMU_MONITOR_LAYOUT, drop_nodes=())
-        image = classicload.build_classic_image(
-            kc, dt_path, layout, entropy=lambda n: b'\xa5' * n)
+        image, seed_pa, seed_chunk = stick.deferred_seed_image(kc, dt_path, layout)
+        holder_pa, holder = image.chunks[seed_chunk]
+        slot = holder[seed_pa - holder_pa:seed_pa - holder_pa + 256]
+        check(len(slot) == 256 and not any(slot), 'the bundle carries an empty 256-byte seed slot')
+        check(b'\x5a' * 256 not in image.dt_blob and b'\xa5' * 256 not in image.dt_blob,
+              'no build-time fill is left in the tree')
 
         stick.validate_chunks(image, layout)
         check(True, 'the synthetic image chunks validate')
@@ -67,20 +72,63 @@ def main():
                                        chunks=image.chunks + ((image.chunks[0][0] + 0x4000, b'x'),))
         check(refuses(stick.validate_chunks, bad, layout), 'overlapping chunks are refused')
         out = tmp / 'bundle'
-        out.mkdir()
-        manifest, files = stick.bundle_bytes(image)
+        manifest, files = stick.bundle_bytes(image, seed_pa, seed_chunk)
         for name, data in files.items():
+            (out / name).parent.mkdir(parents=True, exist_ok=True)
             (out / name).write_bytes(data)
         (out / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
         check(stick.check(Args(out=str(out))) == 0, 'check agrees with build')
-        (out / 'chunk0.bin').write_bytes(b'\x00' + files['chunk0.bin'][1:])
+
+        binary = files['Snapintosh/vmapple/bundle.bin']
+        count = len(manifest['chunks'])
+        check(len(binary) == 96 + 112 * count, 'bundle.bin is q1n1\'s 96-byte header and '
+              '112-byte records')
+        magic, version, n, entry_size, entry, boot_args, spa, schunk = \
+            struct.unpack_from('<8Q', binary, 0)
+        check((magic, version, n, entry_size) == (0x31424D56314E3151, 1, count, 112),
+              'bundle.bin header: magic Q1N1VMB1, version 1, the chunk count, 112-byte records')
+        check((entry, boot_args, spa, schunk) == (image.entry_pa, image.boot_args_pa,
+                                                   seed_pa, seed_chunk),
+              'bundle.bin carries the entry, boot_args and seed slot')
+        check(binary[64:96] == bytes.fromhex(stick.qualification_hash(manifest)),
+              'bundle.bin carries the qualification hash')
+        pa, size, digest, path = struct.unpack_from('<2Q32s64s', binary, 96)
+        check((pa, size, digest.hex()) == (manifest['chunks'][0]['pa'],
+                                           manifest['chunks'][0]['size'],
+                                           manifest['chunks'][0]['sha256'])
+              and path.rstrip(b'\0') == b'\\Snapintosh\\vmapple\\chunk0.bin',
+              'bundle.bin records chunk 0 with q1n1\'s absolute path')
+
+        chunk0 = out / 'Snapintosh' / 'vmapple' / 'chunk0.bin'
+        chunk0.write_bytes(b'\x00' + files['Snapintosh/vmapple/chunk0.bin'][1:])
         check(refuses(stick.check, Args(out=str(out))), 'a tampered chunk is refused')
-        (out / 'chunk0.bin').write_bytes(files['chunk0.bin'])
+        chunk0.write_bytes(files['Snapintosh/vmapple/chunk0.bin'])
+        bundle = out / 'Snapintosh' / 'vmapple' / 'bundle.bin'
+        bundle.write_bytes(binary[:40] + b'\xff' * 8 + binary[48:])
+        check(refuses(stick.check, Args(out=str(out))), 'a bundle.bin that disagrees is refused')
+        bundle.write_bytes(binary)
+        name = manifest['chunks'][seed_chunk]['file']
+        seeded = bytearray(files[name])
+        seeded[seed_pa - holder_pa] = 1
+        (out / name).write_bytes(bytes(seeded))
+        manifest2 = json.loads(json.dumps(manifest))
+        manifest2['chunks'][seed_chunk]['sha256'] = stick._sha(bytes(seeded))
+        (out / 'manifest.json').write_text(json.dumps(manifest2, sort_keys=True))
+        check(refuses(stick.check, Args(out=str(out))), 'a bundle carrying a seed is refused')
+        (out / name).write_bytes(files[name])
+        (out / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+
         sha = stick.qualification_hash(manifest)
         check(stick.check_boot(Args(out=str(out), qualification_sha256=sha)) == 0,
               'the matching qualification hash is accepted')
         check(refuses(stick.check_boot, Args(out=str(out), qualification_sha256='0' * 64)),
               'a mismatched qualification hash refuses the boot')
+        nothing = classicload.build_classic_image(kc, dt_path, layout,
+                                                  entropy=lambda n: b'\xa5' * n)
+        from unittest import mock
+        with mock.patch.object(classicload, 'build_classic_image', return_value=nothing):
+            check(refuses(stick.deferred_seed_image, kc, dt_path, layout),
+                  'a seed slot that cannot be located is refused')
     print(f'PASS test-vmapple-stick: {checks} checks')
 
 
