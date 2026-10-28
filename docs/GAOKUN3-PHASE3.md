@@ -484,6 +484,93 @@ a model of `AppleVirtualPlatform`'s contract behind those addresses, whose
 console, then a named stop, which is Phase 3's acceptance) and **open on
 its root-mount bar**, pending decision 5.
 
+### Decision 5 built, 2026-10-28: the root-mount wait, without the PCIe node
+
+With decision 5's answers and the self-interrupt fix (OBSERVED, QEMU
+only, `smoke.py boot --monitor`):
+
+- **AppleVirtualPlatform:** reads the backdoor's AUX `STATUS` (`1`). It
+  stores one mailbox request, which is absorbed and logged. It reads
+  `0x4006cc`–`0x4006e8` from the configuration table, answered with zeros,
+  as QEMU's would be.
+- **Start-up:** BSD start-up passes `dlil_init`, which the dropped
+  self-interrupt had stalled. Then AMFI, the PL031 model, `LightEmUp` and
+  the PCI family's start.
+- **Then it still panics:** `pmap_enter_pv: unexpected PV head`. The
+  panic handler then issues a backdoor disk command, a named stop at
+  `0x30010408`. The harness now counts a panic as a failure, whatever stop
+  follows.
+
+**The panic's cause: the QEMU layout puts guest RAM inside the template's
+PCIe windows** (INFERRED, with one confirming run):
+
+- The VirtualMac template's PCIe node puts ECAM at `0x40000000`–`0x4FFFFFFF`
+  and its memory window from `0x50000000`. QEMU's `vmapple` machine
+  therefore puts RAM at `0x70000000`.
+- `QEMU_MONITOR_LAYOUT` reports guest DRAM at `0x45004000`–`0x61004000`,
+  inside both. When the PCI family maps its windows, it maps pages the
+  kernel also manages as RAM, its own page tables among them. That is what
+  `pmap_enter_pv` refuses; the PV head's type bits, `…0003`, mark a
+  page-table page.
+- The confirming run: the same boot with `--drop-pcie` has no panic and
+  **reaches the root-mount wait**:
+  `Waiting on … IOMedia … Apple_HFS`, with no QEMU device visible to the
+  guest. That is P3's bar, short of the PCIe node.
+
+The gaokun3 layout's guest RAM, at `0xC9004000`, is clear of both windows.
+
+### Guest RAM moved above the device windows, 2026-10-28
+
+**The change:**
+
+- **`QEMU_MONITOR_LAYOUT`'s guest RAM** now starts at `0x81004000`, above
+  both windows. The PCIe memory window is taken as the template writes it,
+  `0x2fff0000` bytes, so it runs to `0x7FFF0000`; QEMU's `vmapple` uses
+  `0x1fff0000`.
+- **The split screen** is at `0x9E000000`, and a monitor run gets 1536 MiB
+  of QEMU RAM.
+- **The stub** maps the guest RAM range the harness passes in the
+  parameter page (version 2), across the 1–2 GiB and 2–3 GiB ranges. It no
+  longer hard-codes a layout.
+- **The loader refuses** any layout whose DRAM, panic region, framebuffer
+  or monitor band overlaps a device window of the completed tree:
+  `classic_device_windows` reads every `arm-io` child's `reg` and the PCIe
+  `ranges`. Only the Phase 0C smoke's layout opts out, to stay as
+  committed. Its RAM overlaps its moved ECAM window too, harmlessly as far
+  as observed.
+
+**Results** (OBSERVED, QEMU only; `smoke.py boot --monitor --framebuffer`,
+PCIe node kept):
+
+- **The `pmap_enter_pv` panic is gone**, which confirms the overlap as its
+  cause.
+- **The next stop is a different panic, in the PCIe MSI controller:**
+  `AppleVirtualPlatformPCIEMSIController.cpp:64 Assertion failed: type &
+  kTypeRegisterValidMask`. The panic handler then issues the backdoor disk
+  command, and the run ends at that named stop. QEMU's `vmapple` machine has
+  no MSI frame model to learn from: its GIC has only the distributor and
+  redistributors.
+- **What the assertion follows** (`--trace`): exactly one access, a read of
+  the MSI frame's `+0x8` (`0x1fff0008`), which the monitor's MSI model
+  answers with zero. The old smoke's QEMU window answered all-ones there,
+  which passes any "valid" test by accident. In Arm's published GICv2m MSI
+  frame, `+0x8` is `MSI_TYPER`, the base SPI and the number of SPIs given
+  to MSIs. So a GICv2m model of the frame, option (a) of decision 5, is the
+  likely fix (INFERRED from the offset and the assertion's wording). It
+  needs an SPI range consistent with the GIC model's interrupt count and
+  the tree's own interrupts.
+- **Unchanged:** the split screen still matches pixel for pixel, and the
+  legacy smoke, the selftest and the real gaokun3 bundle (same qualification
+  hash) are as before.
+
+**Evidence:**
+
+- `tools/test-vmapple-classic.py` PASS, 75 checks. The new ones: the window
+  reader, the refusal of the old QEMU placement and of RAM inside the
+  memory window, and the cross-check that `smoke.py`'s parameter magic,
+  flags and stub addresses match `layout.h`. A stale magic in `smoke.py`
+  refused every boot once before that check existed.
+
 ## P4 result: the split console
 
 **2026-10-28: PASS, OBSERVED, QEMU only.** `smoke.py boot --monitor
@@ -756,10 +843,12 @@ its own go-ahead.
   windows. The bar: the same root-mount wait as the smoke, with **no QEMU
   device visible to the guest**. Every device it sees is a monitor model,
   as on the gaokun3. `--mmio-trace` checks it: no guest access may be
-  answered by a QEMU device. PARTIAL, 2026-10-28: the default policy
-  reaches the banner and the named stop again after the interrupt fix; the
-  root-mount bar needs decision 5's answer for the fixed addresses
-  ([result](#fixed-2026-10-28-the-maintenance-interrupt-storm)).
+  answered by a QEMU device. PARTIAL, 2026-10-28: with decision 5's
+  answers and the self-interrupt fix, the boot reaches the root-mount wait
+  without the PCIe node. With it, after guest RAM moved above the PCIe
+  windows, it stops at the PCIe MSI controller's check of the MSI frame's
+  type register, which needs a GICv2m model
+  ([result](#guest-ram-moved-above-the-device-windows-2026-10-28)).
 - **P4. The split console**, with the framebuffer in QEMU RAM. The harness
   renders it to an image and checks the banner text in both regions.
   DONE, 2026-10-28, QEMU only: the split, with the band checked pixel for
@@ -941,6 +1030,87 @@ stick path that read belongs to the loader before ExitBootServices (P5).
    addresses until their contracts are known. P3 tests each choice in
    QEMU before any hardware step.
 
+   **Evidence for the fixed addresses, 2026-10-28** (QEMU and local study
+   only; the decision stays the owner's):
+
+   - **QEMU's `vmapple` machine** (v11.1.2, `hw/vmapple/`; it implements
+     Virtualization.framework's device model for macOS 12 guests only) maps
+     two of the three:
+     - `0x30000000`–`0x301FFFFF` is the **backdoor interface** (`bdif`), a
+       block-device mailbox for the root and AUX disks. Pages are selected
+       by bits 31:16 of the offset, so `0x30010000` is the AUX device's
+       register 0, `STATUS`, which QEMU answers `1`. Its command register
+       is `+0x408`.
+     - `0x400000`–`0x40FFFF` is the **configuration region**, a table the
+       host fills: version 2, the CPU count, ECID, RAM size, MAC
+       addresses, serial, model and SoC name, with QEMU's field names
+       mostly `unk`. QEMU zero-fills the rest, so it answers `0x4006cc`,
+       past every known field, with zero.
+     - `0x004FFFF8` is not in QEMU's map.
+
+     These are facts read from GPL source (addresses and values), not code.
+     They are OBSERVED for macOS 12 and INFERRED for 26A428.
+   - **The 26A428 kernel** (local study of the kernelcache's
+     `AppleVirtualPlatform`, never committed):
+     - **At `0x30010000`:** it maps the address, reads its first word,
+       compares it with `1`, and records the address +`0x400` beside it.
+       That matches QEMU's `STATUS` and command block (OBSERVED). The
+       named stop's PC is that load.
+     - **At `0x004FFFF8`:** it builds a 24-byte request on its stack,
+       stores the request's physical address there, then reads the
+       request's first halfword back. That is a host mailbox serviced
+       during the trapped store (INFERRED). Nothing public describes it.
+   - **Measured in QEMU**, `smoke.py boot --monitor` with the diagnostic
+     `--vmapple-contracts` gate, which answers the AUX page as QEMU does
+     and makes a command a named stop:
+
+     | Answers | Result |
+     | --- | --- |
+     | default, stop on all three (c) | named stop at `0x30010000` |
+     | backdoor modelled | the kernel's check passes, no assertion; named stop at the mailbox, `0x004FFFF8` |
+     | backdoor modelled, mailbox store absorbed (no reply) | no panic: past `AppleVirtualPlatform` and BSD start-up (`MAC Framework`, `mbinit`), then waits at `dlil_init` for threads to be scheduled. `0x4006cc` is read and answered zero, as QEMU would |
+     | (for contrast) all three invented, `--absent-fixed` | the `pmap_enter_pv` panic in `AppleVirtualPlatform` |
+
+   - **The next blocker is the monitor's, not a platform contract.** In
+     the last run the kernel wrote `ICC_SGI1R_EL1` once, its own software
+     interrupt. With `HCR_EL2.IMO` set, that write traps to EL2. The stub
+     handles every trapped system register (exception class `0x18`) as
+     implementation-defined, reads as zero and ignores writes, so the
+     interrupt was dropped. Threads waiting to be scheduled is what a lost
+     self-interrupt would look like (INFERRED). Silently ignoring an
+     architectural register is also a fabricated success, so it must be
+     either injected or a named stop, whatever decision 5 says.
+
+   **Per-window choices this evidence supports:**
+
+   | Window | Options | Recommended |
+   | --- | --- | --- |
+   | Backdoor `0x30000000` | (c) stop; or (e) model the AUX page's status registers as QEMU documents, with commands a named stop (no disk in Phase 3) | (e): the kernel's own check expects exactly what QEMU answers, and nothing is invented beyond "present, no media" |
+   | Mailbox `0x004FFFF8` | (c) stop; or absorb the store with no reply, logged and shown in the monitor's band | absorb, logged: the guest reads back its own request unchanged, so no value is invented. On Virtualization.framework the host would answer; here no host does, as in the old smoke |
+   | Config region `0x400000` | (c) stop; or model it as QEMU does: the table with QEMU's non-identifying defaults (serial `1234`, model `VM0001`, one CPU), zero elsewhere | model it: QEMU's answer at `0x4006cc` is the zero the kernel accepted. Never the machine's own serial, ECID or MAC addresses |
+
+   With those three, P3's root-mount bar is reachable in principle. It is
+   next blocked by the monitor's dropped self-interrupt, which is P3 work
+   whatever decision 5 says.
+
+   **DECIDED, 2026-10-28, by the owner: as recommended.**
+   - The paravirtual nodes stay dropped (b).
+   - The published-contract models stay (a).
+   - The backdoor interface is modelled as QEMU documents it, and a disk
+     command is a named stop (e).
+   - The mailbox store is absorbed with no answer, logged on the serial
+     line and in the monitor's band.
+   - The configuration region is modelled with QEMU's non-identifying
+     defaults. Its `rnd` field is a named stop until a real source feeds
+     it, and a write is a named stop.
+
+   Built in `tools/vmapple-smoke/monitor.c` as the monitor's default
+   answers; the `--absent-fixed` and `--vmapple-contracts` diagnostics are
+   gone. The dropped self-interrupt is fixed alongside: only the
+   implementation-defined register space is read-as-zero now,
+   `ICC_SGI1R_EL1` is injected into list registers 1 to 3, and any other
+   trapped system register is a named stop.
+
 ## Open questions
 
 - What the firmware's `RAW` algorithm reads from. P7 answered whether
@@ -955,9 +1125,11 @@ stick path that read belongs to the loader before ExitBootServices (P5).
   register 0 in group 0 (P3). Ticks reach the guest in QEMU (OBSERVED: the
   `--absent-fixed` boot runs far past the old stall); on the gaokun3 it is
   H2's question.
-- `AppleVirtualPlatform`'s contract behind `0x30010000`, `0x004FFFF8` and
-  `0x4006cc`: what the root-mount bar needs, and what decision 5 must
-  answer ([P3](#fixed-2026-10-28-the-maintenance-interrupt-storm)).
+- The mailbox at `0x004FFFF8`: what Virtualization.framework answers, and
+  whether any later boot step needs an answer. Today it is absorbed
+  (decision 5).
+- The configuration table's `rnd` field: on the gaokun3, a real source for
+  it, if the kernel ever reads it.
 - XNU's verbose console on a portrait framebuffer.
 - Whether the kernel needs anything Apple-only from the A78C. Only the
   hardware can say (overturn condition 1).
