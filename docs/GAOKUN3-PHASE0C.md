@@ -206,3 +206,10 @@ slbounce's VHE hand-off: `HCR_EL2 = E2H
 assume a non-VHE EL2. Hardware runs remain the owner's, supervised and
 under the Phase 1 guards. No Linux image is booted on the gaokun3 (the
 owner's decision of 2026-10-23).
+
+*(Added after the decision, 2026-10-27: the owner has reordered the
+phases. Phase 3 now comes before Phase 2's USB host link, with the guest
+loaded from the USB stick; the stick-loaded boot is authorized for the
+gaokun3's Phase 3 only, as transitional. The link resumes after Phase 3.
+See [GAOKUN3-PHASE3.md](GAOKUN3-PHASE3.md#decisions-for-the-owner),
+decision 1.)*

@@ -8,6 +8,11 @@ hand-off below, passed on the gaokun3 in el2qual
 behind a build define and an option ([below](#in-q1n1)), tested on the host
 and in QEMU but not yet run on the gaokun3.
 
+**Paused, 2026-10-27:** the owner moved Phase 3 ahead of the USB host link
+([GAOKUN3-PHASE3.md](GAOKUN3-PHASE3.md#decisions-for-the-owner),
+decision 1). The link's next step, stage 2 of the S2CR bypass, resumes
+after Phase 3, still with its own go-ahead.
+
 ## VHE hand-off
 
 ### The problem

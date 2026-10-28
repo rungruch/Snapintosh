@@ -1,11 +1,17 @@
 # gaokun3 Phase 3: the VirtualMac kernel to a console (design)
 
-**Status, 2026-10-27: DESIGN.** Nothing here is built or run. It proposes
-doing Phase 3 before Phase 2's USB host link, with the guest loaded from the
-USB stick. That changes the order [Phase 0C](GAOKUN3-PHASE0C.md#decision)
-set, and AGENTS.md calls standalone execution "a direction, not an already
-implemented or authorized replacement" for the current flow. So it needs
-the machine owner's decision first ([Decisions](#decisions-for-the-owner)).
+**Status, 2026-10-28: P1, P2, P4 and P7 done; P3 met on its default
+policy (a console, then a named stop) and open on its root-mount bar,
+which waits on decision 5; P5 and P6 built, host and QEMU only. Decisions
+1 to 3 and the CPU count are made; 4 and 5 are open. Nothing run on
+hardware.** It does Phase 3 before Phase 2's USB
+host link, with the guest loaded from the USB stick. That
+changes the order [Phase 0C](GAOKUN3-PHASE0C.md#decision) set, and
+AGENTS.md calls standalone execution "a direction, not an already
+implemented or authorized replacement" for the current flow. The owner
+decided for it on 2026-10-27, for the gaokun3's Phase 3 only and as
+transitional (decision 1 in [Decisions](#decisions-for-the-owner)).
+Decisions 2 to 5 are open.
 
 Evidence classes follow AGENTS.md: VERIFIED, OBSERVED, INFERRED,
 EXPERIMENTAL and UNIMPLEMENTED. Unmarked statements about the plan are
@@ -247,6 +253,363 @@ An independent rerun and two tree experiments, all host only:
   immediate, stayed put in both as a control. So the match was a
   coincidence: as far as the tree goes, the address is fixed.
 
+## P2 result: the classic loader and the panic region
+
+**2026-10-27: DONE, OBSERVED, host and QEMU only.**
+
+- The classic loader lives in `probes/classicload.py` and is re-exported by
+  `probes/xnuboot.py`, so there is one loader, not two. It is a separate
+  module only so the smoke harness can use it without `xnuboot`'s SPTM
+  import chain, which needs a newer Python than this host's 3.9. The J700
+  path's `boot_args` and the classic path now share one packing function.
+  The smoke's `kcload.py` is an adapter over it; its duplicate layout,
+  tree-completion and NVRAM code is deleted. With the same entropy source
+  its `lay_out` is byte-identical to the `xnuboot` path
+  (`tools/test-vmapple-classic.py`).
+- The guest profile `vma2macosap-26A428` (`abi='classic-vmapple-v1'`) is
+  registered in `probes/guestprofile.py` with the locally extracted
+  bundle's hashes; the SPTM/TXM fields are zero or None, and
+  `xnuboot.configure_guest` refuses it (fail closed). Its host checks were
+  SKIP on this host: `guestprofile.py` needs Python 3.10 or newer, and
+  only 3.9 is installed here — the same pre-existing limit as the J700
+  profile's consumers.
+- The panic-region contract is published XNU's (`xnu-12377.121.6`,
+  `pexpert/arm/pe_init.c`, `check_for_panic_log`): the region's physical
+  base is `/pram`'s `reg[0]` and its usable size is
+  `/chosen/embedded-panic-log-size`; either missing leaves `gPanicBase`
+  unset. The template's `/pram` reg is all zero and it has no log-size
+  property, so the loader supplies both — and the region must sit outside
+  the DRAM the guest is told it owns, as iBoot's carved region does. A
+  1 MiB region just above `topOfKernelData`, inside DRAM, regressed the
+  QEMU boot to a halt before the kernel's first console line (OBSERVED);
+  the same region just above the reported DRAM passes. Why the in-DRAM
+  placement halts is UNKNOWN; the loader refuses it.
+- Evidence: `python3 tools/test-vmapple-classic.py` PASS (16 checks; the
+  profile checks above SKIP), `python3 tools/test-vmapple-smoke.py` PASS
+  (78 checks, including the panic-region tree checks), `smoke.py selftest`
+  PASS, and `smoke.py boot --trace --mmio-trace` PASS to the root-mount
+  wait with the P1 result reproduced exactly: 14 windows touched, 11 not
+  modelled.
+
+## P3 result: the monitor in QEMU (partial)
+
+**2026-10-27: PARTIAL, OBSERVED, QEMU only.** The Route B monitor exists
+in the smoke harness and boots the stock kernel through its own models,
+but the root-mount bar is not met yet. Decision 5 is still the owner's;
+what is built follows its recommended split, so the decision can still
+change the answers.
+
+**Built** (`tools/vmapple-smoke/stub.S`, `monitor.c`, behind
+`PARAM_FLAG_MONITOR`, off by default; the Phase 0C smoke is unchanged
+without it):
+
+- **Stage 2 default-deny.** A three-level 4 KiB stage 2 maps only guest
+  RAM (2 MiB blocks, 0x44000000 to 0x61200000). The guest's IPAs are the
+  VirtualMac template's own (`QEMU_MONITOR_LAYOUT` in
+  `probes/classicload.py`), so QEMU's devices are unreachable. Stage 2
+  translation faults carry no syndrome (ISV 0), so the monitor translates
+  the guest ELR with `AT S1E1R`, reads the faulting instruction from
+  guest RAM and decodes the unsigned-immediate, register-offset and
+  pre/post-index load/store forms; anything else stops by name. For a
+  stage 2 fault the IPA comes from `HPFAR_EL2`, not `FAR_EL2`.
+- **Device models** (`monitor.c`, host-tested): PL011 (output to the
+  monitor's UART), PL031 and PL061 to their published contracts, a
+  register-state GICv3 distributor and redistributor (identity registers
+  aligned to QEMU's measured `GICD_TYPER 0x037a0208`, `IIDR 0x43b`), the
+  MSI frame, pvpanic, and PCIe configuration space answering all-ones,
+  PCI's defined answer for an absent function.
+- **Virtual GICv3 and timer.** `ICH_HCR_EL2` enables the virtual CPU
+  interface; the physical virtual-timer PPI (27) is delivered through
+  list register 0 with its EOI bit, the maintenance PPI (25) re-arms it,
+  and the physical CPU interface is enabled at EL2 (`ICC_PMR_EL1`,
+  `ICC_IGRPEN1_EL1` — without those, no IRQ ever reached EL2). The PAC
+  service and PSCI are the stub's, unchanged. The paravirtual devices
+  with nodes are dropped by the loader (option b); the fixed addresses
+  stop by default (option c).
+
+**Verified:**
+
+- `smoke.py boot --monitor` PASS, before the interrupt changes below; the
+  2026-10-28 rerun of the same command now stalls (see
+  [the rerun](#rerun-2026-10-28-the-monitor-boot-stalls-after-lockdown_mode)).
+  At the time: the banner and all early console output
+  come through the PL011 model, GIC initialisation completes against the
+  models, and the run stops by name at the first fixed address,
+  `EL2: stop: unmodelled IPA 0x0000000030010000 read`. QEMU's MMIO trace
+  shows only `pl011` and `gicv3_redist`, both touched by the monitor at
+  EL2; no QEMU device answers the guest.
+- Host suites PASS: `tools/test-vmapple-monitor.py` (21 checks, ASan and
+  UBSan, including the negative cases: unmodelled and fixed IPAs stop
+  without the gate), `tools/test-vmapple-smoke.py` (78),
+  `tools/test-vmapple-classic.py` (20; profile checks SKIP, Python 3.9).
+  The legacy smoke and `selftest` PASS unchanged.
+
+**Not met:** under the diagnostic `--absent-fixed` gate the boot passes
+both fixed addresses and a third one P3 found — a computed-pointer read
+at `0x4006cc` during IOKit start, answered by QEMU's flash in the old
+smoke, contract UNKNOWN — and then panics at PCI start:
+`pmap_enter_pv: unexpected PV head` (`pmap_data.c:2409`). No PCIe
+configuration access precedes the panic, so a model answer the PCI path
+consumes before its first config read is the prime suspect (the MSI
+frame read at the `gic` node's third window, +8, is the one such access
+measured). Bisect aids kept in the harness, all debug-only:
+`--keep-nodes` (stops at `avp-ctrr`, as expected), `--drop-pcie` (no
+panic, but the boot then waits past BSD init without reaching the root
+wait), `--passthrough` (stage 2 maps QEMU's GIC and PL011 instead of the
+models; the guest then waits in a lock loop — inconclusive). Whether the
+timer ticks reach the guest is UNVERIFIED: with the physical interface
+enabled, IRQs do reach EL2, but no run has yet lasted long enough past
+BSD init to prove tick delivery.
+
+Next: identify what the PCI path reads before config space (trace model
+answers against the QEMU-device boot's), then re-run the bar.
+
+### Interrupt delivery, 2026-10-28 (OBSERVED, QEMU only)
+
+Chasing that bar found the interrupt path broken in three places, all in
+the monitor, none in the guest (the panicking thread turned out to be a
+victim: without a tick, threads pile up behind deadline waits until one
+of them maps a page whose PV chain a stalled driver half-built):
+
+- QEMU's real distributor was never enabled. The guest's `GICD_CTLR`
+  writes go to the model, so the physical distributor stayed at reset
+  and forwarded nothing; no physical PPI reached the CPU interface at
+  all (zero IRQ/FIQ exceptions at EL2 in QEMU's log). The monitor now
+  enables both groups on the real distributor at setup.
+- The maintenance interrupt was a storm source. With `ICH_HCR_EL2.UIE`
+  set, the underflow condition (no valid list registers) asserts the
+  maintenance PPI permanently: over a million IRQs at EL2 before the
+  guest executed. `UIE` is off. A timer PPI masked at the redistributor
+  while LR0 is busy is re-armed by the maintenance interrupt that the
+  list register's EOI bit raises when the guest deactivates.
+- The guest's timer reaches it as an FIQ, not an IRQ. The Phase 0C boot
+  took 175 FIQs and one IRQ at EL1 in 45 seconds. The monitor injects
+  virtual INTID 27 in group 0, which the guest acknowledges at
+  `ICC_IAR0_EL1`. It handles FIQ and IRQ at both lower and current EL,
+  because an interrupt can also land inside an EL2 fault handler, which
+  previously halted the run.
+
+An intermediate version sourced ticks from EL2's own physical timer
+(`CNTHP`, PPI 26, 100 Hz). The tree no longer arms it (`monitor_init`:
+"no self-tick"): a free-running tick delivered before the guest arms its
+timer disrupted it. The guest's own `CNTV` deadline now fires the
+physical timer PPI, and the monitor injects that. The PPI 26 handler is
+still present but nothing starts the timer it serves.
+
+### Rerun, 2026-10-28: the monitor boot stalls after `lockdown_mode`
+
+The three monitor configurations, rerun on the current tree
+(`smoke.py boot --kernelcache … --timeout 300`), OBSERVED, QEMU only:
+
+| Configuration | Last serial line | PC when QEMU was stopped | Verdict |
+| --- | --- | --- | --- |
+| `--monitor` | `lockdown_mode: lockdown mode in nvram is off` | `0x4020183c`, `mon_misr_read` | FAIL, no exit within 300 s |
+| `--monitor --absent-fixed` | the same | `0x40201824`, `mon_eoir1_write` | FAIL, no exit within 300 s |
+| `--monitor --framebuffer` | the same | `0x402012d0`, `el2_irq_lower` | FAIL, no exit within 300 s |
+
+A 60-second `--monitor` run stopped at the same line, with its PC in
+`mon_redist_write`. Each run prints the banner and early VM start-up
+through the PL011 model, then nothing.
+
+- **This is a regression.** The default policy no longer reaches the
+  named stop at `0x30010000` recorded above. That result predates the
+  interrupt changes.
+- **The cause, at the time INFERRED:** every sampled PC was in EL2's
+  interrupt path, pointing at an interrupt storm at EL2. It was found and
+  fixed the same day
+  ([below](#fixed-2026-10-28-the-maintenance-interrupt-storm)).
+- **The root-mount bar is still not met**, and the earlier PCI-start
+  panic under `--absent-fixed` is neither cured nor reproduced: these runs
+  never get that far.
+
+Host suites on the same tree, all PASS:
+
+- `tools/test-vmapple-monitor.py`: 22 checks;
+- `tools/test-vmapple-smoke.py`: 78;
+- `tools/test-vmapple-classic.py`: 42, with the two profile checks SKIP on
+  Python 3.9;
+- `tools/test-vmapple-stick.py`: 6;
+- `smoke.py selftest`;
+- `tools/test-el2qual.py`: 625,209 checks.
+
+The host suites do not exercise the interrupt path, which is why they all
+pass while the boot stalls.
+
+### Fixed, 2026-10-28: the maintenance interrupt storm
+
+**The cause (VERIFIED by fix and test).** Each timer tick is injected into
+list register 0 with its EOI bit set. After the guest deactivates it, LR0
+is left invalid with EOI still set. Under GICv3 such an LR stays in
+`ICH_EISR_EL2`, so `ICH_MISR_EL2.EOI` stays set and the level-sensitive
+maintenance PPI (25) stays asserted. The maintenance handler re-enabled
+the timer PPIs but never cleared LR0, so PPI 25 re-fired on every `eret`
+and the guest never ran again. That matches every sampled PC.
+
+**The fix.** `monitor.c`'s maintenance handler now clears a spent LR0
+(state invalid) and leaves a pending or active LR0 alone. The host test has
+a new regression, "a maintenance IRQ clears a spent LR0 and its EOI bit".
+It fails on the old code and passes on the new.
+
+**After the fix** (OBSERVED, QEMU only):
+
+- `smoke.py boot --monitor`: PASS again. Banner, then
+  `EL2: stop: unmodelled IPA 0x0000000030010000 read`, the named
+  default-deny stop.
+- `--monitor --absent-fixed` now gets far past `lockdown_mode`: through
+  AppleImage4, CTRR, the credential manager, PSCI and the PCI family's
+  start. It still panics, `pmap_enter_pv: unexpected PV head`, in
+  `AppleVirtualPlatform`. So working ticks did not cure it, and the earlier
+  "victim of a stalled tick" explanation is refuted.
+
+**What the `--absent-fixed` panic follows** (`--trace`, OBSERVED):
+
+1. `AppleVirtualPlatform` reads `0x30010000`. The gate answers all-ones,
+   and the driver's assertion
+   `_hostInterface->custom_device_id == SimpleVirtio::kSimpleVirtioDeviceId`
+   fails.
+2. One instruction then reads eight words at `0x4006cc`–`0x4006e8`,
+   answered with zero.
+3. Soon after, the panic.
+
+Both answers are invented (decision 5 option d), and the panic follows
+them, not the monitor's models or its interrupts (INFERRED from the
+order).
+
+**The P3 bar conflicts with decision 5.** The bar asks for the smoke's
+root-mount wait, using decision 5's answers for P1's windows. Decision 5's
+recommended answer for the fixed addresses is (c), a stop, and a boot that
+stops at `0x30010000` cannot reach the root-mount wait. Reaching it needs
+a model of `AppleVirtualPlatform`'s contract behind those addresses, whose
+26A428 definition is UNKNOWN. So P3 is **met on its default policy** (the
+console, then a named stop, which is Phase 3's acceptance) and **open on
+its root-mount bar**, pending decision 5.
+
+## P4 result: the split console
+
+**2026-10-28: PASS, OBSERVED, QEMU only.** `smoke.py boot --monitor
+--framebuffer` splits a 1024×600 framebuffer at `0x62000000`:
+
+- **Where it is:** above the panic chunk and below QEMU's RAM end, so it
+  is neither reported DRAM nor firmware-carved memory.
+- **The guest's part:** `boot_args.Video` describes the top 512 rows,
+  exactly one 2 MiB stage 2 block, which is all stage 2 maps.
+- **The monitor's part:** the 88 rows below are absent from stage 2, so a
+  guest store there is a stage 2 fault, not a pixel. The monitor draws its
+  banner in that band at start, and each named stop as a red line, with
+  the project's font (`probes/font5x7.h`, now shared with el2qual; its
+  binary is unchanged, `80a1036d`).
+- **How a run ends:** with the split, the stub halts at a named stop
+  instead of exiting. The harness polls its fault record, dumps the screen
+  through QEMU's monitor (`pmemsave`), and ends the run.
+
+The harness then checks, and writes `build/vmapple-smoke/screen.png`:
+
+- **The guest's region:** the kernel drew on 416 of its 512 rows (its
+  verbose console).
+- **The monitor's band:** it equals the band the harness renders from the
+  same font and the expected lines, pixel for pixel: 0 of 90,112 differ.
+  Banner and stop line are both there, and the guest wrote nothing into
+  the band.
+
+**What it does not check:** the kernel's text is not read by machine; the
+picture is kept for a person. On the gaokun3 the split uses 4 KiB pages,
+not a 2 MiB block. Its 6400-byte rows put the boundary on a page at 2400
+guest rows ([P6](#p6-result-the-gaokun3-layout)), but that mapping, and
+the memory type for a real panel, are H2's work.
+
+## P5 result: the stick bundle, placed by q1n1
+
+**2026-10-28: built, host and QEMU only; nothing entered.** Decision 2
+chose q1n1. A bundle crosses from the host to the gaokun3 in two halves.
+
+**Snapintosh half** (`tools/vmapple-stick.py`). The output directory is
+the stick's tree:
+
+- `Snapintosh/vmapple/bundle.bin` is q1n1's binary manifest: a 96-byte
+  header, then one 112-byte record per chunk with its address, size,
+  SHA-256 and path. The header holds the entry, `boot_args`, the seed slot
+  and the bundle's qualification hash.
+- `Snapintosh/vmapple/chunkN.bin` holds the chunks.
+- `manifest.json` and `devicetree.bin` are for the host.
+
+The boot seed is never on the stick. The image is built twice, with two
+fills; the bytes that differ are exactly the `/chosen/random-seed` slot,
+which must be one 256-byte run in one chunk. That run is zeroed, and every
+hash covers the zero slot.
+
+`check` refuses:
+
+- a tampered chunk;
+- a `bundle.bin` that disagrees with `manifest.json`;
+- a filled seed slot.
+
+`check-boot` refuses a mismatched qualification hash. The gaokun3 build
+also takes `--uefi-reserved` ([P6](#p6-result-the-gaokun3-layout)).
+
+**q1n1 half** (q1n1 `platform/uefi/vmapple-stick.{h,c}`, behind
+`-DQ1N1_VMAPPLE_STICK`, option `--vmapple-place`; q1n1's
+`docs/GAOKUN3-VMAPPLE-STICK.md`). Before ExitBootServices it:
+
+1. finds `bundle.bin` on exactly one filesystem;
+2. allocates every chunk at its exact address (`AllocateAddress`, so the
+   live memory map decides);
+3. reads each chunk and checks its SHA-256;
+4. refuses a bundle whose slot is not empty;
+5. fills the slot with 256 bytes from the RNG protocol's `RAW` algorithm.
+   `HASH` is never substituted, and a zero result is refused.
+
+It reports, then releases everything and returns to the firmware. That is
+step H1; nothing is entered.
+
+**Evidence:**
+
+- `python3 tools/test-vmapple-stick.py`: PASS, 16 checks, including the
+  refusals above and the `bundle.bin` layout.
+- q1n1 `python3 tools/test-q1n1-vmapple-stick.py`: PASS, 73 checks, with a
+  fake firmware covering the success path, every refusal, and nothing left
+  allocated after any of them. Nine deliberately broken copies of the core
+  are each rejected.
+- q1n1 `python3 tools/test-q1n1-vmapple-stick-qemu.py`: PASS. On QEMU's
+  EDK2 from a virtual FAT disk, the chunks are placed by `AllocateAddress`
+  and hashed, then refused because EDK2's RNG lists only `RNDR`. Also
+  refused: no RNG protocol (`cortex-a76`), a chunk outside RAM, a
+  corrupted chunk, and bundles on two disks. The default build ignores the
+  option.
+- **Cross-check:** a real gaokun3 bundle, built locally into ignored
+  `build/` and never committed, passes q1n1's own manifest validator
+  compiled on the host. A one-byte corruption fails it.
+- q1n1's default build is unchanged: `q1n1.efi` differs from HEAD's only in
+  the PE timestamp at `0x80`, and the four stage binaries are identical.
+
+**What QEMU cannot show:** the success path with a real `RAW` source. No
+QEMU firmware lists `RAW`; run 27 showed the gaokun3's does.
+
+## P6 result: the gaokun3 layout
+
+**2026-10-28: built, OBSERVED, host only.** `derive_gaokun3_layout` in
+`probes/classicload.py`:
+
+- **One CPU** (the owner's decision): `/cpus` is trimmed to the boot CPU.
+- **Reserved regions from both sources:** the device tree's no-map regions,
+  and with `firmware_reserved` (`vmapple-stick.py --uefi-reserved`) the
+  regions UEFI's memory map does not offer. Run 24 found UEFI reserving
+  `0xC6200000`–`0xC8600000`, more than the tree's framebuffer region. These
+  only choose the window; q1n1's `AllocateAddress` against the live map is
+  the guard on the machine.
+- **The split screen** (decision 3): the device tree's framebuffer at
+  `0xC6200000`, 1600×2560 with 6400-byte rows. The guest gets the top 2400
+  rows, and the monitor keeps the bottom 160 rows, 25 pages, so the split
+  falls on a 4 KiB page. A split off a page boundary is refused, as is a
+  framebuffer that overlaps guest DRAM.
+- **The rest as before:** `ram_base` keeps the kernelcache's 32 MiB-block
+  offset, and a reserved overlap or an oversized guest is refused.
+
+With the device tree's regions, the real gaokun3 bundle places the guest
+at `0xC9004000` (entry `0xCBEB4480`), clear of the UEFI-reserved region.
+`tools/test-vmapple-classic.py` covers the layout: PASS, 67 checks. It
+also checks that `tools/vmapple-smoke/layout.h`'s QEMU screen and
+`classicload`'s agree.
+
 ## Architecture
 
 ```
@@ -384,7 +747,8 @@ its own go-ahead.
   `smoke.py boot --mmio-trace` repeats it.
 - **P2. The guest profile and the classic loader** in `xnuboot`. The smoke
   moves onto it and must pass unchanged. The panic-region contract is read
-  from published XNU.
+  from published XNU. DONE, 2026-10-27, host and QEMU only
+  ([result](#p2-result-the-classic-loader-and-the-panic-region)).
 - **P3. The monitor's Route B pieces, in QEMU**, with
   `-machine virt,virtualization=on,gic-version=3`: stage 2 default-deny,
   the virtual GICv3, the timer, the PAC service, PSCI, the PL011 model and
@@ -392,17 +756,27 @@ its own go-ahead.
   windows. The bar: the same root-mount wait as the smoke, with **no QEMU
   device visible to the guest**. Every device it sees is a monitor model,
   as on the gaokun3. `--mmio-trace` checks it: no guest access may be
-  answered by a QEMU device.
+  answered by a QEMU device. PARTIAL, 2026-10-28: the default policy
+  reaches the banner and the named stop again after the interrupt fix; the
+  root-mount bar needs decision 5's answer for the fixed addresses
+  ([result](#fixed-2026-10-28-the-maintenance-interrupt-storm)).
 - **P4. The split console**, with the framebuffer in QEMU RAM. The harness
   renders it to an image and checks the banner text in both regions.
+  DONE, 2026-10-28, QEMU only: the split, with the band checked pixel for
+  pixel; the guest's text is not read by machine
+  ([result](#p4-result-the-split-console)).
 - **P5. The stick path, behind its q1n1 option:** `xnuboot`'s
   self-describing image, the preload wired into `--el2`, placement by
   exact-address allocation, and entry. The boot seed is read here, before
   `ExitBootServices`, from the RNG protocol's `RAW` algorithm as P7 does.
   Tested in QEMU from a virtual FAT disk, including the refusals for a bad
-  hash, a held address and a missing or failing `RAW` read.
+  hash, a held address and a missing or failing `RAW` read. BUILT,
+  2026-10-28, both halves, host and QEMU only; entry is not part of it
+  ([result](#p5-result-the-stick-bundle-placed-by-q1n1)).
 - **P6. The gaokun3 layout**, from el2qual's recorded memory map, with the
-  loader refusing any overlap.
+  loader refusing any overlap. BUILT, 2026-10-28, host only: one CPU,
+  device-tree and UEFI reserved regions, the split screen
+  ([result](#p6-result-the-gaokun3-layout)).
 - **P7. The entropy source:** a read-only el2qual stage that reports
   whether UEFI offers the RNG protocol and which algorithms. If it does
   not, Phase 3 stops here until a source exists. DONE, 2026-10-27: the
@@ -522,11 +896,30 @@ stick path that read belongs to the loader before ExitBootServices (P5).
 
 1. **Phase 3 before the USB host link, loaded from the stick.** It changes
    Phase 0C's order, and standalone is not yet authorized.
+   **DECIDED, 2026-10-27, by the owner: yes.** Phase 3 comes next, with the
+   guest loaded from the stick through q1n1's `--el2` preload. Its scope:
+   - The stick-loaded, standalone boot is authorized for the gaokun3's
+     Phase 3 only, as a transitional flow. It replaces nothing in the
+     A16's q1n1 and Mac-host workflow.
+   - The USB host link is deferred, not dropped: stage 2 of the S2CR
+     bypass and q1n1 device mode resume after Phase 3, each still with
+     its own go-ahead.
+   - This authorizes the order and the host and QEMU work (P2 to P6). It
+     does not authorize any hardware step: H1 to H4 each need their own
+     go-ahead on the day.
 2. **q1n1 as the stick loader**, rather than a new loader. Recommended: it
    is proven on the gaokun3 (runs 14 and 15), its preload already reads
    hash-checked files, and a new loader would be a parallel
-   implementation.
-3. **The split framebuffer console.**
+   implementation. **DECIDED, 2026-10-28, by the owner: q1n1.** Built as
+   P5's q1n1 half ([P5](#p5-result-the-stick-bundle-placed-by-q1n1)).
+3. **The split framebuffer console.** **DECIDED, 2026-10-28, by the owner:
+   split.** The guest is told about the top rows; the monitor keeps a band
+   below them that stage 2 denies the guest
+   ([P4](#p4-result-the-split-console)).
+   - **Phase 3's CPU count**, settled with decisions 2 and 3: **DECIDED,
+     2026-10-28, by the owner: one CPU**, as this design's scope has it.
+     `/cpus` is trimmed to the boot CPU; more come in a later phase
+     ([P6](#p6-result-the-gaokun3-layout)).
 4. **The real GIC write** in H2, when H2 comes.
 5. **How the monitor answers each window
    [P1](#p1-result-what-the-kernel-touches) lists.** Options:
@@ -558,8 +951,13 @@ stick path that read belongs to the loader before ExitBootServices (P5).
   ([P1](#p1-result-what-the-kernel-touches)).
 - Whether each driver P1 lists accepts its node being absent (decision 5,
   option b).
-- Timer delivery: a list register linked to the physical interrupt, or
-  managed by the monitor.
+- Timer delivery: the guest's own `CNTV` timer PPI, injected through list
+  register 0 in group 0 (P3). Ticks reach the guest in QEMU (OBSERVED: the
+  `--absent-fixed` boot runs far past the old stall); on the gaokun3 it is
+  H2's question.
+- `AppleVirtualPlatform`'s contract behind `0x30010000`, `0x004FFFF8` and
+  `0x4006cc`: what the root-mount bar needs, and what decision 5 must
+  answer ([P3](#fixed-2026-10-28-the-maintenance-interrupt-storm)).
 - XNU's verbose console on a portrait framebuffer.
 - Whether the kernel needs anything Apple-only from the A78C. Only the
   hardware can say (overturn condition 1).
