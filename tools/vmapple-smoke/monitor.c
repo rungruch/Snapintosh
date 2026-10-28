@@ -389,7 +389,15 @@ static void handle_physical(uint64_t iar, int group0)
         return;
     }
     if (intid == MON_INTID_MAINT) {
-        (void)mon_misr_read();                       /* EOI/underflow: re-arm */
+        (void)mon_misr_read();
+        /* The guest has deactivated LR0's interrupt. An LR left invalid
+         * with its EOI bit set keeps ICH_EISR_EL2, and so ICH_MISR_EL2.EOI,
+         * set, and the level-sensitive maintenance PPI stays asserted: it
+         * re-fired on every eret and starved the guest after lockdown_mode.
+         * Clearing the spent LR drops the condition. A pending or active
+         * LR0 is the guest's and is left alone. */
+        if ((mon_lr0_read() >> 62) == 0)
+            mon_lr0_write(0);
         mon_redist_write(GICR_ISENABLER0, (1u << MON_INTID_VTIMER) | (1u << 30) | (1u << 29));
     } else if (intid == MON_INTID_VTIMER || intid == 29 || intid == 30) {
         if ((mon_lr0_read() >> 62) == 0) {           /* LR0 free: inject */

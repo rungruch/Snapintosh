@@ -142,6 +142,12 @@ int main(void)
     fake_iar = MON_INTID_MAINT;
     monitor_irq();
     CHECK((fake_lr0 >> 62) == 1, "a maintenance IRQ does not clear LR0");
+    /* After the guest deactivates, LR0 is invalid with EOI still set;
+     * left so, it keeps the maintenance PPI asserted (an EL2 storm). */
+    fake_lr0 &= ~(3ull << 62);
+    fake_iar = MON_INTID_MAINT;
+    monitor_irq();
+    CHECK(fake_lr0 == 0, "a maintenance IRQ clears a spent LR0 and its EOI bit");
     fake_lr0 = 0;
     fake_iar = MON_INTID_VTIMER;
     monitor_fiq();
