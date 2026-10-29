@@ -1,17 +1,23 @@
 # gaokun3 Phase 3: the VirtualMac kernel to a console (design)
 
-**Status, 2026-10-28: P1 to P4 and P7 done; P5 and P6 built. In QEMU
-the stock kernel reaches the root-mount wait with every device a
-monitor model (P3's bar). Decisions 1 to 5 are made. On hardware, H1
-passed (run 28) and H2 has been attempted twice without passing
-(runs 29 and 30).** It does Phase 3 before Phase 2's USB
-host link, with the guest loaded from the USB stick. That
-changes the order [Phase 0C](GAOKUN3-PHASE0C.md#decision) set, and
-AGENTS.md calls standalone execution "a direction, not an already
-implemented or authorized replacement" for the current flow. The owner
-decided for it on 2026-10-27, for the gaokun3's Phase 3 only and as
-transitional (decision 1 in [Decisions](#decisions-for-the-owner)).
-Decisions 2 to 5 are open.
+**Status, 2026-10-30: P1 to P7 done; the QEMU bar met. Decisions 1 to 5
+are made. On hardware: H1 passed (run 28), H2 passed (run 34, the real
+GIC set up with no storm or restart), the stock kernel entered at EL1
+and installed its PAC keys (run 35), and its own console reached the
+monitor band (run 37). The boot now panics inside the kernel, and each
+panic has been diagnosed from EL2: a trapped `FPCR` access from a zeroed
+`CPACR_EL1` (run 36, fixed), the Cortex-A78C's missing `FEAT_TLBIRANGE`
+(runs 37 to 39, bypassed by a gated in-memory branch rewrite), and a
+halt in `PEHaltRestart` after an early panic (run 39). Run 40 captured
+that panic's metadata but showed its format string unformatted; run 41,
+prepared here, formats the message. No end-to-end macOS boot yet.** It
+does Phase 3 before Phase 2's USB host link, with the guest loaded from
+the USB stick. That changes the order
+[Phase 0C](GAOKUN3-PHASE0C.md#decision) set, and AGENTS.md calls
+standalone execution "a direction, not an already implemented or
+authorized replacement" for the current flow. The owner decided for it
+on 2026-10-27, for the gaokun3's Phase 3 only and as transitional
+(decision 1 in [Decisions](#decisions-for-the-owner)).
 
 Evidence classes follow AGENTS.md: VERIFIED, OBSERVED, INFERRED,
 EXPERIMENTAL and UNIMPLEMENTED. Unmarked statements about the plan are
@@ -1274,11 +1280,23 @@ here. The list as now built (superseding the H2-piece-2 table):
 | `GICR_WAKER` (the boot CPU's frame) | clear ProcessorSleep only if set | wake the redistributor | power cycle |
 | `GICD_CTLR` `0x17a00000` | read, then set bit 1 only (two security states) or bits 0–1 (one) | enable this side's group; keep `ARE_NS` and every firmware bit | restore the value read |
 | `GICR_IGROUPR0` | add maintenance bit, one security state only | QEMU's PPIs reset to Group 0 | restore the value read |
-| `GICR_ISENABLER0` | bits 25 and 27 | maintenance and virtual timer only | `GICR_ICENABLER0` with the same bits |
+| `GICR_ISENABLER0` | bits 25, 26 and 27 | maintenance, EL2 physical timer (`CNTHP`) and virtual timer | `GICR_ICENABLER0` with the same bits |
 
 Nothing here touches a clock, power, the SMMU or any device DMA. The
 next H2 run needs nothing new from decision 4, but it is a new run
 and the owner's on the day.
+
+**PPI 26 added, 2026-10-30.** The original list enabled bits 25 and 27.
+Bit 26 is the EL2 physical timer (`CNTHP`), which fires the roughly 1 s
+diagnostic snapshot the monitor uses to read EL1 state and the panic
+message into its band (introduced with the snapshot at run 36). The bit
+has in fact been set in `GICR_ISENABLER0` since `monitor_init` first ran
+on the real GIC (run 34), where it was enabled but inert until `CNTHP`
+was armed at guest entry (run 36). The owner approved adding PPI 26 to
+decision 4's list on 2026-10-30. It is a redistributor enable like the
+others, undone by `GICR_ICENABLER0`; it touches no clock, power, the
+SMMU or any device DMA. The `monitor.c` write list and the host test
+(`tools/test-vmapple-monitor.c`) enable exactly bits 25, 26 and 27.
 
 #### Runs 31 and 32 (2026-10-28): `--hold-at-monitor` and `--gic-hold` still restart; root cause found and fixed
 
@@ -1481,8 +1499,11 @@ What this shows (VERIFIED on the machine):
 - **Redistributor discovery (`RD FRAME 0`):** matching `GICR_TYPER` bits
   63:32 against `MPIDR_EL1` (`0x81000000`, affinity `0.1.0.0`) matched
   frame 0 at `0x17A60000`. Waking `GICR_WAKER` (if needed) and writing
-  `GICR_ISENABLER0` (`0x17A70100`) to enable PPIs 25 (maintenance) and 27
-  (virtual timer) succeeded without fault.
+  `GICR_ISENABLER0` (`0x17A70100`) to enable PPIs 25 (maintenance), 26
+  (EL2 physical timer, `CNTHP`) and 27 (virtual timer) succeeded without
+  fault. (Bit 26 is enabled here but inert until `CNTHP` is armed at guest
+  entry, run 36; it is part of decision 4's write list, recorded with
+  run 30.)
 - **Virtual CPU interface and EL2 interrupt unmasking:** setting
   `ICH_HCR_EL2 = 1`, `ICC_PMR_EL1 = 0xFF`, and `ICC_IGRPEN1_EL1 = 1` (while
   skipping Secure Group 0 `ICC_IGRPEN0_EL1` at NS-EL2) and unmasking IRQs/FIQs
@@ -1494,6 +1515,411 @@ What it does not show:
   (via PL011 model or framebuffer) and `CNTV` timer ticks fire and inject
   into the running guest. Entry 2 passes `--hold-at-monitor`, so it halted
   at `after_gic` before `eret` to EL1.
+
+### Run 35 (2026-10-28): the guest enters at EL1 and installs PAC keys
+
+Entry 1 (`q1n1-vmapple-h3.conf`, `--vmapple-enter --exit-vhe`) on the initial
+H3 stick (`q1n1.efi` `6f029956…9011408d`, bundle qualification
+`7e0a5b2a678072383084be3c3140451fcc5da8125d8b4023f574cf0ece19c9b3` /
+`7E0A5B2A67807238`), one boot, photographed, VERIFIED on the machine:
+
+```
+q1n1 AArch64 UEFI entry.
+DT framebuffer: OK
+Entry EL: 1
+GOP framebuffer captured.
+ACPI SPCR UART found.
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3 BYTES 85267376 ENTRY 0000000103EB4480
+QUALIFICATION 7E0A5B2A67807238
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000 PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+```
+
+In the monitor band:
+```
+SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY
+PAC KEYS INSTALLED (QARMA5), HVC OK
+GIC CTLR 00000010 -> 00000012  RD FRAME 0
+```
+
+What this showed:
+- The stock 26A428 `VirtualMac2,1` kernel was successfully entered at EL1!
+- The kernel invoked HVC `0xC1000000` (`VMAPPLE_HVC_SET_INITIAL_STATE`),
+  which the monitor handled by installing QARMA5 PAC keys and returning to EL1.
+- After returning to EL1, the kernel halted before emitting any PL011 UART
+  output, with no monitor trap or system restart.
+
+### Run 36 (2026-10-29): EL2 watchdog snapshot pinpoints the EL1 fault
+
+To diagnose the silent stall, live telemetry and an EL2 physical timer
+snapshot (`CNTHP`, PPI 26) were added to the monitor band:
+1. **Line 4 real-time telemetry**: `HVC: <count> ID <hex8>  MMIO: <count> IPA <hex8>`
+   in yellow, updated immediately on every HVC and MMIO trap.
+2. **EL2 physical timer snapshot (`CNTHP`, PPI 26)**: armed right before
+   dropping to EL1 to interrupt EL1 every 1.0s and render `ELR_EL2` (interrupted
+   guest PC), `SPSR_EL2`, `ESR_EL1`, `FAR_EL1`, `ELR_EL1` (faulting PC), and
+   `SCTLR_EL1` in orange on Lines 5..7.
+
+Entry 1 on the Run 36 stick (`q1n1.efi` `6f029956…9011408d`, bundle
+qualification `d315cdd493261653a709e7c15a2eadd5511460c4b7f8dc2292442985460637bd` /
+`D315CDD493261653`), one cold boot, photographed in two pictures,
+VERIFIED on the machine ([QUALIFICATION run 36](GAOKUN3-QUALIFICATION.md#runs-so-far)):
+
+Before `ExitBootServices`:
+```
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3 BYTES 85269224 ENTRY 0000000103EB4480
+QUALIFICATION D315CDD493261653
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000 PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+```
+
+In the monitor band (at snapshot 56, ~56 seconds after entry):
+```
+SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY
+PAC KEYS INSTALLED (QARMA5), HVC OK
+GIC CTLR 00000010 -> 00000012  RD FRAME 0
+HVC: 1 ID C1000000  MMIO: 0 IPA 00000000
+SNAP 56 PC FFFFFE0009F09FC4 SPSR 604013C4
+ESR_EL1 1FE00000 FAR_EL1 0000000000000000
+ELR_EL1 FFFFFE000A07F410 SCTLR FC54793D
+```
+
+**Diagnostic Analysis (VERIFIED against kernelcache disassembly):**
+- **`HVC: 1 ID C1000000  MMIO: 0 IPA 00000000`**: exactly one HVC was made
+  (`SET_INITIAL_STATE`), and zero MMIO stage-2 aborts occurred.
+- **`SCTLR_EL1 = 0xFC54793D`**: bits 0 (`M=1`), 2 (`C=1`), and 12 (`I=1`)
+  confirm the kernel turned virtual memory ON, configured early translation
+  tables, and enabled instruction and data caches!
+- **`ESR_EL1 = 0x1FE00000`**:
+  - `EC = (0x1FE00000 >> 26) & 0x3F` = **`0x07`**!
+  - EC `0x07` is: *Access to Advanced SIMD or floating-point functionality trapped
+    by CPACR_EL1.FPEN, CPTR_EL2.FPEN/TFP, or CPTR_EL3.TFP*.
+- **`ELR_EL1 = 0xFFFFFE000A07F410`**: Disassembly of `kernelcache.release.vma2`
+  at this address confirms:
+  ```assembly
+  0xfffffe000a07f410:  mrs   x8, FPCR
+  0xfffffe000a07f414:  mov   w9, #0x9f00
+  0xfffffe000a07f418:  orr   x9, x8, x9
+  0xfffffe000a07f41c:  cmp   x9, x8
+  0xfffffe000a07f420:  b.eq  0xfffffe000a07f43c
+  0xfffffe000a07f424:  msr   FPCR, x9
+  0xfffffe000a07f428:  mrs   x9, FPCR
+  ```
+  The kernel was executing `sysctl__hw_features` probing floating-point control
+  register bits (`FPCR`), which trapped immediately because `CPACR_EL1` was zeroed!
+- **`PC = 0xFFFFFE0009F09FC4`**: Disassembly confirms the kernel's early panic
+  loop:
+  ```assembly
+  0xfffffe0009f09fc0:  wfe
+  0xfffffe0009f09fc4:  b     0xfffffe0009f09fc0
+  ```
+- **Root cause**: In `tools/vmapple-smoke/stub.S`, the EL1 register reset sequence
+  previously cleared `CPACR_EL1` to `xzr`. In ARMv8-A, `CPACR_EL1.FPEN` (bits [21:20])
+  being `0b00` traps all Advanced SIMD and floating-point operations from EL1 to EL1.
+- **Fix**: Set `CPACR_EL1 = 0x03330000` (`FPEN = 0b11`, `ZEN = 0b11`, `SMEN = 0b11`),
+  giving EL1 and EL0 full untrapped access to FP/SIMD instructions and `FPCR`/`FPSR`.
+
+### Run 37 (2026-10-29): the XNU console is alive; Range TLBI fault diagnosed
+
+Entry 1 on the Run 37 stick (`q1n1.efi` `6f029956…9011408d`, bundle
+qualification `225eb6197f9cabb51ff9c0eb8f6b9ee35d528129a4e0e5987794969bed720111` /
+`225EB6197F9CABB5`), one cold boot, photographed in two pictures,
+VERIFIED on the machine ([QUALIFICATION run 37](GAOKUN3-QUALIFICATION.md#runs-so-far)):
+
+Before `ExitBootServices`:
+```
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3 BYTES 85269224 ENTRY 0000000103EB4480
+QUALIFICATION 225EB6197F9CABB5
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000 PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+```
+
+In the monitor band (at bottom of display, rendered live via the PL011 UART model):
+```
+SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY
+PAC KEYS INSTALLED (QARMA5), HVC OK
+GIC CTLR 00000010 -> 00000012  RD FRAME 0
+PANIC(CPU 0 CALLER 0xFFFFFE000A0899E8): UNDEFINED KERNEL INSTRUCTION: PC=0xFFFFFE000A065974 INSTR=D50882A8 @SLEH.C:1930
+  X28: 0X0000000000000000 FP: 0xFFFFFE000AC67290  LR: 0xF7E6FE0009F0A918  SP: 0xFFFFFE000AC67150
+  PC: 0xFFFFFE000A0903F4 CPSR: 0X604013C4         ESR: 0X0000000096000045  FAR: 0X00000000000000B1
+<END NESTED PANIC STRING>
+```
+
+**What this shows (MILESTONE ACHIEVED):**
+1. **The XNU kernel console is fully functional and visible on screen!**
+   The kernel wrote its panic banner via the PL011 UART register interface,
+   and `monitor.c` parsed and displayed the output in green and cyan.
+2. **`CPACR_EL1` fix succeeded:**
+   The kernel advanced completely past `sysctl__hw_features` (where `mrs x8, fpcr`
+   previously trapped), initialized page tables, initialized trap handling
+   (`sleh.c`), and initialized kernel debugging and console output.
+3. **Exact Fault Identification**:
+   - `INSTR = 0xD50882A8` at `PC = 0xFFFFFE000A065974`:
+     Disassembly of `kernelcache.release.vma2` at this address:
+     ```assembly
+     0xfffffe000a065970:  cbz    w3, 0xfffffe000a0659c4
+     0xfffffe000a065974:  tlbi   rvale1is, x8
+     0xfffffe000a065978:  ret
+     ```
+   - This instruction is **`TLBI RVALE1IS, x8`** (Range TLB Invalidation, EL1,
+     Inner Shareable) in `pmap_flush_tlb_range`.
+   - **Hardware Erratum / Capability Mismatch:** `TLBI RVALE1IS` requires ARMv8.4
+     `FEAT_TLBIRANGE` (`ID_AA64ISAR0_EL1.TLB >= 2`). The Cortex-A78C implements
+     ARMv8.2 with `ID_AA64ISAR0_EL1.TLB = 1` (`FEAT_TLBIOS` only, no range
+     TLBI support). When Cortex-A78C executes `TLBI RVALE1IS`, it generates an
+     Undefined Instruction exception!
+   - Apple Silicon cores (Firestorm / M1 onward) implement `FEAT_TLBIRANGE`, so
+     the stock `VirtualMac2,1` kernel unconditionally uses range TLBI for
+     invalidations of 2 or more pages.
+
+### Run 38 (2026-10-29): HCR_EL2.TTLB tested on hardware
+
+Entry 1 on the Run 38 stick (`q1n1.efi` `6f029956…9011408d`, bundle
+qualification `2c35136f5e05a04d2960180040a4354944c0f89f5a0c7b7e3b30c56da9f83bd9` /
+`2C35136F5E05A04D`), one cold boot, photographed in two pictures,
+VERIFIED on the machine ([QUALIFICATION run 38](GAOKUN3-QUALIFICATION.md#runs-so-far)):
+
+Before `ExitBootServices`:
+```
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3 BYTES 85269264 ENTRY 0000000103EB4480
+QUALIFICATION 2C35136F5E05A04D
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000 PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+```
+
+In the monitor band:
+```
+SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY
+PAC KEYS INSTALLED (QARMA5), HVC OK
+GIC CTLR 00000010 -> 00000012  RD FRAME 0
+PANIC(CPU 0 CALLER 0xFFFFFE000A0899E8): UNDEFINED KERNEL INSTRUCTION: PC=0xFFFFFE000A065974 INSTR=D50882A8 @SLEH.C:1930
+  X28: 0X0000000000000000 FP: 0xFFFFFE000AC67290  LR: 0XE3B4FE0009F0A918  SP: 0xFFFFFE000AC67150
+  PC: 0xFFFFFE000A0903F4 CPSR: 0X604013C4         ESR: 0X0000000096000045  FAR: 0X00000000000000B1
+<END NESTED PANIC STRING>
+```
+
+**Hardware Result & Microarchitectural Finding:**
+- `HCR_EL2.TTLB = 1` did *not* intercept `TLBI RVALE1IS` (`0xD50882A8`).
+- **Hardware Cause (VERIFIED on Cortex-A78C):**
+  On the Cortex-A78C core, which implements ARMv8.2 and lacks `FEAT_TLBIRANGE`,
+  the instruction decode stage rejects `CRm = 2` as an **unallocated opcode**
+  and takes an Undefined Instruction exception to EL1 directly, *before* the
+  execution unit's system instruction trap logic evaluates `HCR_EL2.TTLB`.
+- **Conclusion:** Unallocated instructions on Cortex-A78C cannot be trapped by
+  `HCR_EL2.TTLB`. The kernel execution path must bypass the Range TLBI
+  instructions so the processor never attempts to decode them.
+
+### Run 39 (2026-10-29): Dynamic Branch Bypass at EL2 eliminates Range TLBI fault
+
+XNU's `pmap_flush_tlb_range` already contains a native, full-featured ARMv8.0
+single-page loop using standard `TLBI VALE1IS` / `TLBI VAALE1IS` at
+`0xfffffe000a065900`, guarded by a conditional branch:
+```assembly
+0xfffffe000a06586c:  cmp    x10, #0x2
+0xfffffe000a065870:  b.lo   0xfffffe000a065900   ; 0x54000483 (offset +0x90)
+```
+If `b.lo` is converted to an unconditional branch `b 0xfffffe000a065900`
+(`0x14000024`), the kernel unconditionally executes its single-page loop,
+completely bypassing all 4 Range TLBI instructions in `pmap_flush_tlb_range`.
+Similarly, the second site in global flush (`0xfffffe000a06e014`) has `b.hi
+0xfffffe000a06e03c` (`0x54000148`), which flushes with `tlbi vmalle1`.
+Converting it to unconditional `b 0xfffffe000a06e03c` (`0x1400000a`) bypasses
+both `tlbi rvaae1` instructions.
+
+**Hypervisor Dynamic Mediation Implementation:**
+- To preserve strict provenance under `AGENTS.md` ("Never commit vendor or
+  locally reconstructed private inputs; the stock kernel is normally
+  unmodified"), the on-disk kernelcache (`chunk0.bin`) remains 100%
+  untouched, preserving its vendor SHA-256 and bundle qualification.
+- In `tools/vmapple-smoke/stub.S`, before dropping to EL1, the EL2 monitor
+  inspects the two sites in DRAM (`phys_base = entry_pa - 0x2eb0480`):
+  1. Site 1 (`phys_base + 0x3061870` / `0x104065870`):
+     If `[site1] == 0x54000483`, write `0x14000024` and `dc civac`.
+  2. Site 2 (`phys_base + 0x306a014` / `0x10406e014`):
+     If `[site2] == 0x54000148`, write `0x1400000a` and `dc civac`.
+- Clean to PoC and invalidate instruction cache (`ic iallu; dsb sy; isb`).
+- Reverted `HCR_EL2.TTLB` to 0 (`HCR_EL2 = 0x30080100000`), allowing all
+  standard ARMv8.0 TLBI instructions to execute at native hardware speed with
+  zero EL2 trap overhead.
+
+Entry 1 on the Run 39 stick (`q1n1.efi` `6f029956…9011408d`, bundle
+qualification `3dd09aea61ce4a3476c98e8288557d8b34c1aa86dec97b51c7a91c47fb46b533` /
+`3DD09AEA61CE4A34`), one cold boot, photographed in two pictures,
+VERIFIED on the machine ([QUALIFICATION run 39](GAOKUN3-QUALIFICATION.md#runs-so-far)):
+
+Before `ExitBootServices`:
+```
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3 BYTES 85269304 ENTRY 0000000103EB4480
+QUALIFICATION 3DD09AEA61CE4A34
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000 PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+```
+
+In the monitor band (at snapshot 24, ~24 seconds after entry):
+```
+SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY
+PAC KEYS INSTALLED (QARMA5), HVC OK
+GIC CTLR 00000010 -> 00000012  RD FRAME 0
+HVC: 3 ID C10000F0  MMIO: 6 IPA 20010030
+SNAP 24 PC FFFFFE0009EB2758 SPSR 204013C5
+ESR_EL1 02000000 FAR_EL1 FFFFFE000E004040
+ELR_EL1 FFFFFE0009F0ABC8 SCTLR FC54793D
+```
+
+**Hardware Result & Microarchitectural Analysis:**
+- **Zero Range TLBI Undefined Instruction exceptions**: The dynamic branch
+  bypass in DRAM succeeded 100%!
+- **`HVC: 3 ID C10000F0`**: The kernel successfully made three HVC calls
+  (including `SET_INITIAL_STATE` `0xC1000000` and `VMAPPLE_HVC_KPRINTF_PUTS`
+  `0xC10000F0`), returning cleanly to EL1 every time!
+- **`MMIO: 6 IPA 20010030`**: The kernel accessed the PL011 UART control register
+  (`UARTCR`, IPA `0x20010030`) 6 times to configure UART baud rate, line control,
+  and FIFOs!
+- **Silent Halt at `PC = 0xFFFFFE0009EB2758`**: Disassembly of `kernelcache.release.vma2`
+  reveals:
+  ```assembly
+  0xfffffe0009eb2754:  wfe
+  0xfffffe0009eb2758:  b     0xfffffe0009eb2754
+  ```
+  This is the final halt loop of `PEHaltRestart()`!
+- **`ELR_EL1 = 0xFFFFFE0009F0ABC8`**: The address of `<unknown>` (`0xe7ffdeff` =
+  `TRAP_DEBUGGER`) inside `DebuggerTrapWithState()` called from `panic_with_options()`!
+- **`ESR_EL1 = 0x02000000`**: Undefined instruction exception from `0xe7ffdeff`.
+- **`FAR_EL1 = 0xFFFFFE000E004040`**: Hardware preserves the exact faulting
+  address from the data abort that preceded the panic, because `0xe7ffdeff`
+  does not update `FAR_EL1`!
+- **Why no UART output was visible**: Early boot initializes `serial_init` (`0xfffffe000a7d9760`),
+  but `PE_kputc` (`[0xfffffe00079b8fe8]`) was still `0x0` and `serialmode` was `0x101`.
+  `panic_with_options` bypassed `PE_kputc` and formatted the panic string directly into
+  the PRAM buffer (`Chunk 1` at `0x161004000`) and the CPU 0 debugger state structure
+  (`0xfffffe000ab88140`), then called `DebuggerTrapWithState()`.
+
+### Run 40 (2026-10-30): the panic is captured; its format string is shown unformatted
+
+The monitor was taught to read XNU's `debugger_state` at EL2 and draw the
+panic on lines 4 to 7 of the band, cleaning each read to the point of
+coherency first (the guest wrote with caches on; EL2 reads with its MMU
+off). Entry 1 on the Run 40 stick (q1n1 `6f029956…9011408d`, bundle
+qualification `dd4ea5f8…a18e7dbb` / `DD4EA5F8C140D5EC`), one cold boot,
+photographed in two pictures, OBSERVED on the machine
+([QUALIFICATION run 40](GAOKUN3-QUALIFICATION.md#runs-so-far)).
+
+Before `ExitBootServices`:
+```
+VIRTUALMAC BUNDLE: PLACED AND VERIFIED, SEED FROM RAW
+CHUNKS 3 BYTES 85270984 ENTRY 0000000103EB4480
+QUALIFICATION DD4EA5F8C140D5EC
+KEPT: ENTERING THE MONITOR (PHASE 3 STEP H2)
+MONITOR 0000000162004000 PARAMS 0000000162104000
+Leaving firmware for the VirtualMac monitor.
+```
+
+In the monitor band:
+```
+SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY
+PAC KEYS INSTALLED (QARMA5), HVC OK
+GIC CTLR 00000010 -> 00000012  RD FRAME 0
+PANIC C: FFFFFE000AC6FAE8 FAR: FFFFFE000E004040
+ESR: 02000000 R: 3 PC: FFFFFE0009EB2758
+%S AT PC 0X%016LLX, LR 0X%016LLX (SAVED STATE: %P%S)
+  X0: 0X%016LLX X1: 0X%016LLX X2: 0X%016LLX X3: 0X%016LLX
+```
+
+What this shows (OBSERVED on the machine):
+
+- **The panic's metadata is read correctly.** `R: 3` is `DBOP_PANIC`,
+  `PC: FFFFFE0009EB2758` is the `PEHaltRestart` spin (run 39), and `ESR:
+  02000000` / `FAR: FFFFFE000E004040` match run 39's EL1 syndrome and fault
+  address. The read path (`debugger_state` at `phys_base + 0x3b84140`,
+  cleaned to the point of coherency) works on the machine.
+- **`+0x20` is the arguments, not the caller.** The field drawn as
+  `PANIC C` reads `FFFFFE000AC6FAE8`, which is in the boot stack (run 37's
+  SP and FP were `…AC67150` and `…AC67290`), not the kernel text. So
+  `+0x20` is `db_panic_args` (a `va_list*`), and the caller is a different
+  field. (INFERRED for 26A428, corroborated by the address landing in the
+  stack.)
+- **The message is a format string, not a message.** Lines 6 and 7 are
+  XNU's kernel-abort format verbatim, `%s at pc 0x%016llx, lr 0x%016llx
+  (saved state: %p%s)` and a register-dump template. The run read
+  `panic_str_va` (`+0x18`) and found the format, but did not substitute its
+  arguments. The PRAM panic log at `0x161004000` held no `FUNK` header (no
+  formatted text) at this stall, so the fallback showed the raw format.
+
+So run 40 proved the capture path and the `+0x20`/caller correction, and
+set run 41's task: substitute the arguments.
+
+Validation (host only; no QEMU firmware supplies the gaokun3's `RAW` seed
+or its panel):
+
+- `tools/test-vmapple-monitor.py`: PASS, 77 checks × 2 builds.
+- `tools/test-vmapple-smoke.py`: PASS, 82. `tools/test-el2qual-usb.py`:
+  PASS, 31.
+- The bundle was built into ignored `build/` and placed on the local
+  stick; nothing was committed.
+
+### Run 41 prepared (2026-10-30): format the panic message at EL2
+
+Run 41 adds a bounded mini-printf (`tools/vmapple-smoke/panic.c`,
+`panic_format`) and an EL2 glue (`panic_render`) that reads the guest's
+panic format string and its varargs and substitutes them, so the band
+shows the message rather than the template.
+
+- **The argument source is `db_panic_args` (`+0x20`), as run 40 proved.**
+  XNU stores a `va_list *` there, and Apple's arm64 `va_list` is a plain
+  stack pointer, so `panic_render` dereferences once to the vararg base and
+  reads successive 8-byte slots (INFERRED from published XNU; the run
+  confirms it, and it falls back to one level if the first read faults).
+  The caller is now read from `+0x30`.
+- **`panic_format`** handles `%s %p %x %X %u %d %i %c %%` with width and
+  zero-pad. A `%s` pointer is translated with `AT S1E1R` and read; an
+  unreadable string becomes `<?>`; a missing argument ends the message. It
+  invents nothing.
+- **Paging.** The band shows two message lines per snapshot and scrolls one
+  page each roughly 1 s, so a message longer than two lines (the
+  register-dump template has many) can be read from a short video.
+- **No hardcoded panic-region address.** The run-40 PRAM read at the fixed
+  `0x161004000` is dropped: run 40 showed the `FUNK` log empty at this
+  stall, and a magic physical address is the kind of scattered constant
+  AGENTS.md warns against. Run 41 formats `db_panic_str` directly.
+
+**The Range-TLBI kernel rewrite is now gated.** The in-memory branch bypass
+(run 39) was previously assembled into every build and rewrote the stock
+kernel's instructions even under QEMU, which implements `FEAT_TLBIRANGE`
+and does not need it. It is now behind `VMAPPLE_GAOKUN3_MONITOR`
+(`tools/vmapple-smoke/stub.S`), so the QEMU smoke boots the stock kernel
+unmodified. As a kernel patch it is admitted only for the reviewed kernel:
+the `vma2macosap-26A428` profile pins the kernelcache SHA-256
+(`95f42a48…`, verified in place by q1n1 before entry), and each site is
+rewritten only if it still holds its exact stock branch word.
+
+Validation (host and QEMU only):
+
+- `tools/test-vmapple-monitor.py`: PASS, 89 checks × 2 builds (ASan/UBSan),
+  adding `panic_format`'s conversions, bounds and argument exhaustion, the
+  exact XNU kernel-abort format string, and `panic_render`'s two-level
+  `va_list` and its paging.
+- `tools/test-vmapple-smoke.py`: PASS, 82. `tools/test-vmapple-classic.py`:
+  PASS, 75 (2 profile checks SKIP, Python 3.9).
+  `tools/test-vmapple-stick.py`: PASS, 23. `tools/test-el2qual-usb.py`:
+  PASS, 31. `smoke.py selftest`: PASS.
+- `smoke.py boot --monitor --mmio-trace` (QEMU): PASS, the stock kernel
+  reaches the root-mount wait with no QEMU device visible to the guest, so
+  neither the formatter nor the gating disturbs the QEMU bar.
+
+**This is prepared, not run.** Booting run 41 performs no GIC write beyond
+decision 4's list and enters the guest as run 40 did; it needs the owner's
+explicit go-ahead on the day, and the run is the owner's. The run-41 stick
+and its qualification hash are built when the owner calls for the run.
 
 ## Decisions for the owner
 
@@ -1523,7 +1949,13 @@ What it does not show:
      2026-10-28, by the owner: one CPU**, as this design's scope has it.
      `/cpus` is trimmed to the boot CPU; more come in a later phase
      ([P6](#p6-result-the-gaokun3-layout)).
-4. **The real GIC write** in H2, when H2 comes.
+4. **The real GIC write** in H2. **DECIDED, 2026-10-28, by the owner**, and
+   acted on in runs 29 to 34 (H2 passed at run 34). The write list is in
+   the [run-30 section](#run-30-2026-10-28-the-monitor-is-entered-then-the-machine-restarts);
+   it was amended on 2026-10-30 to record PPI 26 (the EL2 `CNTHP` timer
+   that drives the diagnostic snapshot), which `monitor_init` has in fact
+   enabled since run 34. It touches no clock, power, the SMMU or any device
+   DMA. Each H2 or later run is still the owner's on the day.
 5. **How the monitor answers each window
    [P1](#p1-result-what-the-kernel-touches) lists.** Options:
    - (a) a model to a published contract: the PL031 and PL061, the PCIe

@@ -5,7 +5,7 @@ where everything lives, how to rebuild and test it, the rules that bind the
 work, and what comes next. It summarises; the phase documents it links are
 the record, and win wherever the two disagree.
 
-**As of 2026-10-28.** The tree, not this page, is the source of truth
+**As of 2026-10-30.** The tree, not this page, is the source of truth
 (AGENTS.md, "Start Here"): check `git log` and the linked documents before
 acting on anything here.
 
@@ -34,10 +34,32 @@ with conditions, and a real-hardware boot can reopen it.
 | 0C: route decision | Route B ACCEPTED, 2026-10-26, with conditions | [PHASE0C](GAOKUN3-PHASE0C.md#decision) |
 | 1: guards | Thermal guard pinned to tsens and run once at EL2 (run 10); battery guard and the trend check host-tested against Windows readings | [PHASE1-GUARDS](GAOKUN3-PHASE1-GUARDS.md) |
 | 2: EL2 entry and USB link | VHE exit PASSED on the machine (runs 11, 12; q1n1 runs 14, 15). USB link **paused**: USB0's DMA is translated by `apps_smmu`, and the bypass's first write (stage 2) is designed and host-modelled only | [PHASE2](GAOKUN3-PHASE2.md), [USB-DEVICE-MODE](GAOKUN3-USB-DEVICE-MODE.md) |
-| 3: VirtualMac kernel to a console | **In progress.** P1 to P4 and P7 done (QEMU and host); H1 PASSED on the gaokun3 (run 28); decisions 1, 2, 3 and 5 made. P3: **the stock kernel reaches the root-mount wait in QEMU with every device a monitor model** (decision 5's answers, the self-interrupt fix, guest RAM above the device windows, the MSI frame's type register). P5: the bundle builder and q1n1's `--vmapple-place` built. P6: the gaokun3 layout with one CPU and the split screen | [PHASE3](GAOKUN3-PHASE3.md) |
+| 3: VirtualMac kernel to a console | **In progress.** P1 to P7 done and all decisions (1 to 5) made. On the gaokun3: H1 passed (run 28); H2 passed (run 34: stage 2 and the real GIC set up, no storm, no restart); the stock kernel entered at EL1 and installed its QARMA5 PAC keys (run 35); its own console reached the monitor band (run 37). The boot now panics inside the kernel, and each panic has been read from EL2 and worked past (a zeroed `CPACR_EL1`, run 36; the Cortex-A78C's missing `FEAT_TLBIRANGE`, runs 37 to 39; a halt in `PEHaltRestart`, run 39). Run 40 captured the panic metadata; run 41 (prepared) formats the message. No end-to-end macOS boot yet | [PHASE3](GAOKUN3-PHASE3.md) |
 
 Recent results worth knowing before anything else:
 
+- **Run 41 (2026-10-30, prepared, not run):** the monitor now formats the
+  guest's panic message at EL2 (`tools/vmapple-smoke/panic.c`) instead of
+  showing the raw format string. The range-TLBI kernel rewrite is gated to
+  the gaokun3 build, and PPI 26 is recorded in decision 4's write list
+  ([PHASE3](GAOKUN3-PHASE3.md#run-41-prepared-2026-10-30-format-the-panic-message-at-el2)).
+- **Run 40 (2026-10-30): the kernel panics early, and its metadata reads
+  back at EL2.** The reason code (`DBOP_PANIC`), ESR, FAR and PC all read
+  from XNU's `debugger_state`, but the band showed the panic's format
+  string unsubstituted. `+0x20` proved to be `db_panic_args`, not the
+  caller ([PHASE3](GAOKUN3-PHASE3.md#run-40-2026-10-30-the-panic-is-captured-its-format-string-is-shown-unformatted)).
+- **Run 37 (2026-10-29): the XNU console reached the monitor band**, and
+  the first panic was the Cortex-A78C lacking `FEAT_TLBIRANGE`: the stock
+  kernel's range TLBI is an undefined instruction `HCR_EL2.TTLB` cannot
+  trap ([PHASE3](GAOKUN3-PHASE3.md#run-37-2026-10-29-the-xnu-console-is-alive-range-tlbi-fault-diagnosed)).
+- **Run 35 (2026-10-28): the stock kernel entered at EL1.** `SET_INITIAL_STATE`
+  installed QARMA5 PAC keys and returned to EL1 cleanly (Phase 0C overturn
+  condition 2's first real evidence)
+  ([PHASE3](GAOKUN3-PHASE3.md#run-35-2026-10-28-the-guest-enters-at-el1-and-installs-pac-keys)).
+- **Run 34 (2026-10-28): Phase 3 step H2 passes.** `monitor_setup` (stage 2)
+  and `monitor_init` (the real GIC and virtual CPU interface) completed at
+  EL2 on the gaokun3 with no exception, no interrupt storm and no restart
+  ([PHASE3](GAOKUN3-PHASE3.md#run-34-2026-10-28-h2-passes-with-real-gic-setup)).
 - **Run 28 (2026-10-28): Phase 3 step H1 passes.** From the stick, q1n1
   placed the VirtualMac bundle at its exact addresses in the gaokun3's live
   memory map, verified every hash in place, and seeded it from `RAW`.
@@ -72,10 +94,10 @@ Made by the owner, and binding until the owner changes them:
 | 2026-10-28 | **The screen is split**: the guest gets the top rows, the monitor a band below that stage 2 denies the guest | PHASE3 decision 3 |
 | 2026-10-28 | **One CPU** for Phase 3; more in a later phase | PHASE3, with decision 3 |
 | 2026-10-28 | **AppleVirtualPlatform's fixed addresses** answered as QEMU's `vmapple` documents them: the backdoor interface and the configuration region modelled (QEMU's non-identifying defaults), the mailbox store absorbed and logged | PHASE3 decision 5 |
+| 2026-10-28 | **The real GIC write in H2**: the read-modify-write enable list — `GICD_CTLR`, the boot CPU's redistributor (found by affinity), and PPIs 25, 26 and 27 on `GICR_ISENABLER0`. PPI 26 (the EL2 `CNTHP` snapshot timer) added to the list 2026-10-30 | PHASE3 decision 4, [run 30](GAOKUN3-PHASE3.md#run-30-2026-10-28-the-monitor-is-entered-then-the-machine-restarts) |
 
-Open, for the owner ([PHASE3](GAOKUN3-PHASE3.md#decisions-for-the-owner)):
-
-- **4.** The real GIC write in step H2, when H2 comes.
+All five decisions are made; none is open for the owner right now. Each
+hardware run is still the owner's on the day.
 
 ## What comes next
 
@@ -103,13 +125,15 @@ Open, for the owner ([PHASE3](GAOKUN3-PHASE3.md#decisions-for-the-owner)):
    frame turned out not to be GICv2m; the kernel's own check gave its type
    register's format
    ([P3](GAOKUN3-PHASE3.md#the-msi-frame-2026-10-28-p3s-bar-met)).
-4. **Hardware H2 to H4**, each with its own go-ahead on the day. H1
-   PASSED as run 28: q1n1 placed and verified the bundle at its exact
-   addresses on the gaokun3, with the seed from `RAW`
-   ([run 28](GAOKUN3-PHASE3.md#run-28-2026-10-28-h1-passes)). H2, the
-   first write to the real GIC, needs the q1n1-to-monitor hand-off, a
-   gaokun3 build of the monitor (neither exists yet) and decision 4. An
-   agent picking this up should start from
+4. **Finish Phase 3 on the gaokun3 (H3 and H4), each run the owner's on
+   the day.** H1 and H2 passed (runs 28, 34); the guest is entered (run 35)
+   and its console reaches the band (run 37). The boot now panics early in
+   the kernel. The immediate step is **run 41**: boot the prepared H3 stick
+   so the monitor formats the panic message (`panic.c`), read it to name
+   the kernel fault, and work past it as runs 36 to 39 did for the earlier
+   faults. Phase 3's acceptance (a console, then a named platform contract
+   the monitor does not model — the result that can reopen Route B) is H4.
+   An agent picking this up should start from
    [GAOKUN3-AGENT-HANDOVER.md](GAOKUN3-AGENT-HANDOVER.md).
 5. **After Phase 3:** the USB link resumes at stage 2 of the S2CR bypass
    ([step 1i](GAOKUN3-USB-DEVICE-MODE.md#step-1i-stage-2-the-first-smmu-write-design-and-host-model)),
@@ -127,7 +151,7 @@ This repository:
 | `tools/qemu-el2qual.py` | Boots el2qual under QEMU and EDK2 in 32 configurations with known answers |
 | `tools/test-el2qual*.c`, `tools/test-el2qual*.py` | Host suites, including deliberately broken copies of each module that must be rejected |
 | `probes/classicload.py` | The classic VirtualMac loader (Phase 3 P2): layout, tree completion, NVRAM bank, panic region and image building. Re-exported by `probes/xnuboot.py`; the smoke's `kcload.py` is an adapter over it |
-| `tools/vmapple-smoke/` | The Route B QEMU smoke: an EL2 stub (`stub.S`), the kernelcache loader `kcload.py`, and `smoke.py` (`selftest`; `boot --kernelcache PATH`, with `--mmio-trace`). The Phase 3 monitor sits behind `boot --monitor` and is off by default: `monitor.c`/`monitor.h` hold its device models and interrupt handling, `stub.S` its stage 2 and vectors. Debug-only flags include `--absent-fixed`, `--framebuffer`, `--keep-nodes`, `--drop-pcie` and `--passthrough` |
+| `tools/vmapple-smoke/` | The Route B QEMU smoke and the Phase 3 monitor: an EL2 stub (`stub.S`), the kernelcache loader `kcload.py`, and `smoke.py` (`selftest`; `boot --kernelcache PATH --monitor`, with `--mmio-trace`; `build --gaokun3 --base <pa>` for the real-machine monitor image). `monitor.c`/`monitor.h` hold the device models, interrupt handling and real-GIC setup; `panic.c` reads and formats the guest's panic at EL2; `stub.S` holds stage 2, the vectors, and the guest-entry path (with the gaokun3-only range-TLBI branch bypass behind `VMAPPLE_GAOKUN3_MONITOR`). Debug-only flags include `--framebuffer`, `--keep-nodes`, `--drop-pcie` and `--passthrough` |
 | `tools/vmapple-stick.py` | Builds and checks a Phase 3 stick bundle (P5 host half): one file per chunk, a hashed manifest, and a qualification hash. It never writes to a disk |
 | `docs/GAOKUN3-*.md` | The phase records listed above |
 
@@ -206,6 +230,24 @@ Things that have bitten before:
 - **A list register left invalid with its EOI bit set keeps the GICv3
   maintenance interrupt asserted.** Clear it in the maintenance handler, or
   EL2 takes that interrupt forever.
+- **q1n1 must pass the parameter-page address in `x0`** when it enters the
+  gaokun3 monitor. The old fallback to a fixed `0x43000000` (QEMU's page)
+  is unmapped on the machine and reset it (runs 30 to 32). The QEMU
+  hand-off rehearsal now uses a distinct params address so it genuinely
+  tests the register rather than the fallback.
+- **`llvm-objcopy -O binary` drops `.bss`.** The monitor's `_start` zeroes
+  `[__bss_start, __bss_end)`, and q1n1 maps and zeroes the monitor's whole
+  image, not only its file bytes, or stale RAM shows up as stage-2 tables
+  (run 32).
+- **The monitor is built `-mstrict-align`.** With `SCTLR_EL2.M` off, Clang's
+  unaligned loads on `.rodata` strings faulted (`ESR 0x96000021`, run 32).
+- **The Cortex-A78C lacks `FEAT_TLBIRANGE`.** The stock kernel's range TLBI
+  is an unallocated opcode `HCR_EL2.TTLB` cannot trap (it faults as an
+  undefined instruction before the trap logic runs). The gaokun3 build
+  flips two branches in the kernel's in-memory image to bypass it (runs 37
+  to 39); the rewrite is gated to that build and tied to the pinned
+  kernelcache hash, and QEMU (which has the feature) boots the kernel
+  unmodified.
 
 ## Hardware runs
 
@@ -223,7 +265,7 @@ reads the photographs. Every run follows
 Each run is recorded as a row in
 [QUALIFICATION's run table](GAOKUN3-QUALIFICATION.md#runs-so-far): stick
 entry, `el2qual.efi` hash and commit, el2qual version, and the result with
-its evidence class. Runs 1 to 28 are recorded there.
+its evidence class. Runs 1 to 40 are recorded there.
 
 **Writes that need their own explicit go-ahead**, separate from any
 approval of the plan:
