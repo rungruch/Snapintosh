@@ -273,6 +273,21 @@ class Layout(unittest.TestCase):
         gic_text = (out / 'loader/entries/q1n1-vmapple-h2-gic.conf').read_text()
         self.assertIn('options --vmapple-enter --exit-vhe --hold-at-monitor\n', gic_text)
 
+    def test_vmapple_h3_stage(self):
+        q1n1 = self.file('q1n1.efi', pe(payload=b'--vmapple-enter VHE EXIT  DT SIMPLE-FB'))
+        bundle = self.vmapple_bundle2('bundle_h3')
+        m = usb.build_layout('vmapple-h3', self.out('h3'), q1n1, self.sdboot, self.slb,
+                             self.tcb, self.dtb, bundle=bundle)
+        out = self.out('h3')
+        self.assert_manifest_complete(out, m)
+        self.assertEqual(m['stage'], 'vmapple-h3')
+        self.assertIn('default q1n1-vmapple-h3.conf', (out / 'loader/loader.conf').read_text())
+        h3_text = (out / 'loader/entries/q1n1-vmapple-h3.conf').read_text()
+        self.assertIn('options --vmapple-enter --exit-vhe\n', h3_text)
+        self.assertNotIn('--hold-at-monitor', h3_text)
+        gic_text = (out / 'loader/entries/q1n1-vmapple-h2-gic.conf').read_text()
+        self.assertIn('options --vmapple-enter --exit-vhe --hold-at-monitor\n', gic_text)
+
     def test_vmapple_h2_refusals(self):
         q1n1 = self.file('q1n1.efi', pe(payload=b'--vmapple-enter VHE EXIT  DT SIMPLE-FB'))
         plain = self.file('q1n1-plain.efi', pe(payload=b'--vmapple-place VHE EXIT  DT SIMPLE-FB'))
