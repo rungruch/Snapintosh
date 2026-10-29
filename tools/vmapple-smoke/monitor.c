@@ -140,14 +140,24 @@ static int gicr_access(uint64_t off, unsigned size, int write, uint64_t *value)
 
 /* ---- PL011 model ----------------------------------------------------------
  * The data register goes to the monitor's own UART, so the guest's console
- * output is the serial line. FR always reports transmit and receive empty
- * of backlog: the monitor drains every byte at once and has no input. */
+ * output is the serial line; on the real panel's 160-row band it is also
+ * mirrored onto lines 4 to 7 so the banner and recent output are visible
+ * without a UART. FR always reports transmit and receive empty of backlog:
+ * the monitor drains every byte at once and has no input. */
+static void uart_band_putc(char c);
+static void uart_band_flush(void);
+
 static int uart_access(uint64_t off, unsigned size, int write, uint64_t *value)
 {
     count_uart++;
     if (off == 0x000) {                              /* UARTDR */
-        if (write) mon_uart_putc((char)(*value & 0xff));
-        else *value = 0;
+        if (write) {
+            char c = (char)(*value & 0xff);
+            mon_uart_putc(c);
+            uart_band_putc(c);
+        } else {
+            *value = 0;
+        }
         return 1;
     }
     if (off == 0x018 && !write) {                    /* UARTFR: TXFE|RXFE */
@@ -392,15 +402,15 @@ static int decode_access(uint64_t elr, uint64_t *frame, unsigned *srt,
         return !(insn & (1u << 26));
     }
     if ((insn & 0x3b200000) == 0x38000000
-        && ((insn >> 10) & 3) != 2) {                /* pre/post-index */
+        && ((insn >> 10) & 3) != 2) {                /* unscaled or pre/post-index */
         *size = 1u << (insn >> 30);
         *srt = insn & 0x1f;
         if ((insn >> 22) & 1 && (insn >> 23) & 1) *sign = 1;
         int64_t imm9 = (int32_t)((insn >> 12) & 0x1ff);
         if (imm9 & 0x100) imm9 -= 0x200;
         unsigned rn = (insn >> 5) & 0x1f;
-        if (rn != 31)
-            frame[rn] += (uint64_t)imm9;             /* writeback, pre or post */
+        if (((insn >> 10) & 1) && rn != 31)
+            frame[rn] += (uint64_t)imm9;             /* writeback, pre or post only */
         return !(insn & (1u << 26));
     }
     return 0;
@@ -414,12 +424,26 @@ static int decode_access(uint64_t elr, uint64_t *frame, unsigned *srt,
  * MON_BAND_BG, glyphs at scale 2 in 12x20-pixel cells, text from x 8,
  * line n at y 6 + 20n within the band. EL2 runs with its MMU off here, so
  * these are Device stores: 32-bit and aligned. */
-#define MON_BAND_BG    0x00202020u
-#define MON_BAND_TEXT  0x00ffffffu
-#define MON_BAND_STOP  0x00ff5050u
+#define MON_BAND_BG     0x00202020u
+#define MON_BAND_TEXT   0x00ffffffu
+#define MON_BAND_STOP   0x00ff5050u
+#define MON_BAND_BANNER 0x0080ff80u
+#define MON_BAND_UART   0x00c0ffffu
+#define UART_LINE_CAP   128u
 static int band_on;
 static uint64_t band_fb_pa;
 static unsigned band_width, band_stride, band_guest_rows, band_rows;
+static char uart_cur[UART_LINE_CAP];
+static unsigned uart_cur_len;
+static int uart_first_set;
+static char uart_tail[3][UART_LINE_CAP];
+static unsigned uart_tail_count;
+static uint32_t count_hvc;
+static uint32_t last_hvc_id;
+static uint32_t count_mmio;
+static uint64_t last_mmio_ipa;
+static unsigned timer_snapshot_count;
+static unsigned panic_page;          /* scrolls a multi-line panic message */
 
 static void band_pixel(unsigned x, unsigned y, uint32_t color)
 {
@@ -440,9 +464,13 @@ static void band_clean(void)
 
 static void band_text(unsigned line, const char *s, uint32_t color)
 {
+    unsigned y0 = 6 + line * 20;
+    for (unsigned y = y0; y < y0 + 14; y++)
+        for (unsigned x = 0; x < band_width; x++)
+            band_pixel(x, y, MON_BAND_BG);
     for (unsigned j = 0; s[j]; j++) {
         const uint8_t *g = font5x7_glyph(s[j]);
-        unsigned x0 = 8 + j * 12, y0 = 6 + line * 20;
+        unsigned x0 = 8 + j * 12;
         for (unsigned row = 0; row < 7; row++)
             for (unsigned bit = 0; bit < 5; bit++)
                 if (g[row] & (0x10 >> bit))
@@ -460,11 +488,35 @@ void monitor_set_band(int on, uint64_t fb_pa, unsigned width, unsigned stride,
     band_stride = stride;
     band_guest_rows = guest_rows;
     band_rows = rows;
+    uart_cur_len = 0;
+    uart_first_set = 0;
+    uart_tail_count = 0;
+    count_hvc = 0;
+    last_hvc_id = 0;
+    count_mmio = 0;
+    last_mmio_ipa = 0;
+    timer_snapshot_count = 0;
+    panic_page = 0;
     if (!on) return;
     for (unsigned y = 0; y < band_rows; y++)
         for (unsigned x = 0; x < band_width; x++) band_pixel(x, y, MON_BAND_BG);
     band_text(0, "SNAPINTOSH MONITOR: STAGE 2 DEFAULT-DENY", MON_BAND_TEXT);
     band_clean();
+}
+
+static void band_clean_line(unsigned line)
+{
+    if (!band_on) return;
+    unsigned y0 = line * 20;
+    mon_clean_range(band_fb_pa + ((uint64_t)band_guest_rows + y0) * band_stride,
+                    20ull * band_stride);
+}
+
+static void band_note_line(unsigned line, const char *s, uint32_t color)
+{
+    if (!band_on) return;
+    band_text(line, s, color);
+    band_clean_line(line);
 }
 
 static void band_note(unsigned line, const char *s, uint32_t color)
@@ -474,9 +526,281 @@ static void band_note(unsigned line, const char *s, uint32_t color)
     band_clean();
 }
 
+static void append_str(char *buf, unsigned *pos, const char *s)
+{
+    while (*s && *pos < 63) buf[(*pos)++] = *s++;
+}
+
+static void append_hex(char *buf, unsigned *pos, uint64_t val, int nibbles)
+{
+    for (int i = nibbles - 1; i >= 0 && *pos < 63; i--)
+        buf[(*pos)++] = "0123456789ABCDEF"[(val >> (4 * i)) & 15];
+}
+
+static void append_dec(char *buf, unsigned *pos, uint32_t val)
+{
+    char tmp[10];
+    int n = 0;
+    if (val == 0) {
+        if (*pos < 63) buf[(*pos)++] = '0';
+        return;
+    }
+    while (val > 0 && n < 10) {
+        tmp[n++] = (char)('0' + (val % 10));
+        val /= 10;
+    }
+    for (int i = n - 1; i >= 0 && *pos < 63; i--)
+        buf[(*pos)++] = tmp[i];
+}
+
+static void update_line4_telemetry(void)
+{
+    if (!band_on || band_rows < 160 || uart_first_set) return;
+    char line[64];
+    unsigned k = 0;
+    append_str(line, &k, "HVC: ");
+    append_dec(line, &k, count_hvc);
+    append_str(line, &k, " ID ");
+    append_hex(line, &k, last_hvc_id, 8);
+    append_str(line, &k, "  MMIO: ");
+    append_dec(line, &k, count_mmio);
+    append_str(line, &k, " IPA ");
+    append_hex(line, &k, last_mmio_ipa, 8);
+    line[k] = 0;
+    band_note_line(4, line, 0x00ffff40u);
+}
+
+void monitor_start_telemetry(void)
+{
+    count_hvc = 0;
+    last_hvc_id = 0;
+    count_mmio = 0;
+    last_mmio_ipa = 0;
+    timer_snapshot_count = 0;
+    panic_page = 0;
+    uint64_t frq = mon_cntfrq();
+    if (!frq) frq = 19200000;
+    uint32_t ticks = (uint32_t)(frq + frq / 2);
+    mon_cnthp_rearm(ticks);
+    update_line4_telemetry();
+}
+
+void monitor_telemetry_hvc(uint32_t fn_id)
+{
+    count_hvc++;
+    last_hvc_id = fn_id;
+    update_line4_telemetry();
+}
+
+void monitor_timer_snapshot(void)
+{
+    timer_snapshot_count++;
+    if (uart_first_set) return;
+
+    uint64_t elr_el2 = mon_elr_el2();
+    uint64_t spsr_el2 = mon_spsr_el2();
+    uint64_t esr_el1 = mon_esr_el1();
+    uint64_t far_el1 = mon_far_el1();
+    uint64_t elr_el1 = mon_elr_el1();
+    uint64_t sctlr_el1 = mon_sctlr_el1();
+
+    uint64_t params = mon_params_base();
+    uint64_t phys_base = 0;
+    uint32_t panic_reason = 0;
+    uint64_t panic_str_va = 0;
+    uint64_t panic_args_va = 0;
+    uint64_t panic_caller_va = 0;
+    int is_panic = 0;
+
+    /* XNU's debugger_state, read at EL2 with the MMU off (the kernel wrote
+     * it with caches on, so clean to PoC first). Field offsets are INFERRED
+     * for 26A428 and refined by observation: +0x08 db_current_op (run 40
+     * showed 3, DBOP_PANIC), +0x18 db_panic_str (the format string; run 40
+     * showed it), +0x20 db_panic_args (a va_list*; run 40 read a stack
+     * address here, so it is the args, not the caller), +0x30
+     * db_panic_caller. phys_base derives from the kernelcache entry's fixed
+     * 0x2eb0480 header offset. */
+    if (params) {
+        uint64_t entry_pa = *(const volatile uint64_t *)(params + PARAM_ENTRY);
+        if (entry_pa > 0x2eb0480ull) {
+            phys_base = entry_pa - 0x2eb0480ull;
+            uint64_t dbg_state_pa = phys_base + 0x3b84140ull;
+            mon_clean_range(dbg_state_pa, 64);
+            panic_reason = *(const volatile uint32_t *)(dbg_state_pa + 0x08);
+            panic_str_va = *(const volatile uint64_t *)(dbg_state_pa + 0x18);
+            panic_args_va = *(const volatile uint64_t *)(dbg_state_pa + 0x20);
+            panic_caller_va = *(const volatile uint64_t *)(dbg_state_pa + 0x30);
+        }
+    }
+
+    if (panic_reason != 0 || panic_str_va != 0 ||
+        elr_el1 == 0xfffffe0009f0abc8ull || elr_el2 == 0xfffffe0009eb2758ull) {
+        is_panic = 1;
+    }
+
+    if (tracing && (timer_snapshot_count == 1 || (timer_snapshot_count % 10) == 0)) {
+        puts_("EL2: snap ");
+        putdec(timer_snapshot_count);
+        puts_(" PC ");
+        puthex(elr_el2);
+        puts_(" SPSR ");
+        puthex(spsr_el2);
+        puts_(" ESR_EL1 ");
+        puthex(esr_el1);
+        puts_(" ELR_EL1 ");
+        puthex(elr_el1);
+        if (is_panic) {
+            puts_(" PANIC caller ");
+            puthex(panic_caller_va);
+            puts_(" str ");
+            puthex(panic_str_va);
+        }
+        puts_("\n");
+    }
+
+    if (!band_on || band_rows < 160) return;
+
+    if (is_panic) {
+        char l4[64], l5[64];
+        unsigned k;
+
+        k = 0;
+        append_str(l4, &k, "PANIC C ");
+        append_hex(l4, &k, panic_caller_va, 16);
+        append_str(l4, &k, " FAR ");
+        append_hex(l4, &k, far_el1, 16);
+        l4[k] = 0;
+        band_text(4, l4, 0x0080ff80u);
+
+        k = 0;
+        append_str(l5, &k, "ESR ");
+        append_hex(l5, &k, esr_el1, 8);
+        append_str(l5, &k, " R ");
+        append_dec(l5, &k, panic_reason);
+        append_str(l5, &k, " PC ");
+        append_hex(l5, &k, elr_el2, 16);
+        l5[k] = 0;
+        band_text(5, l5, 0x0080ff80u);
+
+        /* The message itself: format the guest's panic string and its
+         * varargs, two band lines at a time, scrolling one page per
+         * snapshot so a message longer than two lines can be read. */
+        char lines[2][PANIC_LINE_CAP];
+        unsigned total = 0;
+        const unsigned width = 44;      /* chars per band line at this scale */
+        if (phys_base != 0 && panic_str_va != 0)
+            total = panic_render(lines, 2, width, panic_page, panic_str_va, panic_args_va);
+        if (!total) {
+            /* Nothing formatted (no guest RAM, or unreadable): show the
+             * raw format-string pointer rather than inventing text. */
+            k = 0;
+            append_str(lines[0], &k, "STR VA ");
+            append_hex(lines[0], &k, panic_str_va, 16);
+            lines[0][k] = 0;
+            lines[1][0] = 0;
+        }
+        band_text(6, lines[0], 0x0080ff80u);
+        band_text(7, lines[1], 0x0080ff80u);
+
+        unsigned per_page = 2 * width;
+        unsigned pages = total ? (total + per_page - 1) / per_page : 1;
+        panic_page = (panic_page + 1) % pages;
+
+        mon_clean_range(band_fb_pa + ((uint64_t)band_guest_rows + 4 * 20) * band_stride,
+                        4ull * 20 * band_stride);
+    } else {
+        char l5[64], l6[64], l7[64];
+        unsigned k;
+
+        k = 0;
+        append_str(l5, &k, "SNAP ");
+        append_dec(l5, &k, timer_snapshot_count);
+        append_str(l5, &k, " PC ");
+        append_hex(l5, &k, elr_el2, 16);
+        append_str(l5, &k, " SPSR ");
+        append_hex(l5, &k, spsr_el2, 8);
+        l5[k] = 0;
+        band_text(5, l5, 0x00ffa040u);
+
+        k = 0;
+        append_str(l6, &k, "ESR_EL1 ");
+        append_hex(l6, &k, esr_el1, 8);
+        append_str(l6, &k, " FAR_EL1 ");
+        append_hex(l6, &k, far_el1, 16);
+        l6[k] = 0;
+        band_text(6, l6, 0x00ffa040u);
+
+        k = 0;
+        append_str(l7, &k, "ELR_EL1 ");
+        append_hex(l7, &k, elr_el1, 16);
+        append_str(l7, &k, " SCTLR ");
+        append_hex(l7, &k, sctlr_el1, 8);
+        l7[k] = 0;
+        band_text(7, l7, 0x00ffa040u);
+
+        mon_clean_range(band_fb_pa + ((uint64_t)band_guest_rows + 5 * 20) * band_stride,
+                        3ull * 20 * band_stride);
+    }
+}
+
+/* On the real panel's 160-row band (8 text rows 0..7), mirror guest PL011
+ * output onto lines 4..7: line 4 pins the first non-empty line (the kernel
+ * banner), and lines 5..7 show a rolling 3-line window of subsequent output.
+ * QEMU's 88-row band has only 4 lines (0..3) and is untouched. */
+static void uart_copy_line(char *dst, const char *src)
+{
+    unsigned i = 0;
+    while (src[i] && i < UART_LINE_CAP - 1) { dst[i] = src[i]; i++; }
+    dst[i] = 0;
+}
+
+static void uart_band_commit(const char *s)
+{
+    if (!s[0]) return;
+    if (!uart_first_set) {
+        uart_first_set = 1;
+        band_note(4, s, MON_BAND_BANNER);
+        return;
+    }
+    if (uart_tail_count < 3) {
+        unsigned idx = uart_tail_count++;
+        uart_copy_line(uart_tail[idx], s);
+        band_note(5 + idx, uart_tail[idx], MON_BAND_UART);
+        return;
+    }
+    uart_copy_line(uart_tail[0], uart_tail[1]);
+    uart_copy_line(uart_tail[1], uart_tail[2]);
+    uart_copy_line(uart_tail[2], s);
+    band_text(5, uart_tail[0], MON_BAND_UART);
+    band_text(6, uart_tail[1], MON_BAND_UART);
+    band_text(7, uart_tail[2], MON_BAND_UART);
+    band_clean();
+}
+
+static void uart_band_flush(void)
+{
+    if (!band_on || band_rows < 160 || !uart_cur_len) return;
+    uart_cur[uart_cur_len] = 0;
+    uart_cur_len = 0;
+    uart_band_commit(uart_cur);
+}
+
+static void uart_band_putc(char c)
+{
+    if (!band_on || band_rows < 160 || c == '\r') return;
+    if (c == '\n') {
+        uart_band_flush();
+        return;
+    }
+    if (c == '\t') c = ' ';
+    if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7f && uart_cur_len < UART_LINE_CAP - 1)
+        uart_cur[uart_cur_len++] = c;
+}
+
 static void band_stop(uint64_t ipa, int write)
 {
     if (!band_on) return;
+    uart_band_flush();
     char line[48] = "STOP: UNMODELLED IPA ";
     unsigned n = 21;
     for (int i = 15; i >= 0; i--) line[n++] = "0123456789ABCDEF"[(ipa >> (4 * i)) & 15];
@@ -521,6 +845,9 @@ int monitor_data_abort(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *frame
         }
         if (!handled) goto stop;
         monitor_handled++;
+        count_mmio++;
+        last_mmio_ipa = far;
+        update_line4_telemetry();
         if (tracing && w->kind != K_UART) {
             puts_("EL2: mmio ");
             puthex(far);
@@ -538,6 +865,9 @@ int monitor_data_abort(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *frame
     }
 stop:
     monitor_stop_count++;
+    count_mmio++;
+    last_mmio_ipa = far;
+    update_line4_telemetry();
     monitor_stop_ipa = far;
     monitor_stop_write = write;
     puts_("EL2: stop: unmodelled IPA ");
@@ -559,11 +889,15 @@ static uint64_t phys_gicr_rd = PHYS_GICR_BASE;
 #define GICR_IGROUPR0    (phys_gicr_rd + 0x10000 + 0x0080)
 #define GICR_ISENABLER0  (phys_gicr_rd + 0x10000 + 0x0100)
 #define GICR_ICENABLER0  (phys_gicr_rd + 0x10000 + 0x0180)
-/* The only physical PPIs the monitor needs: the GIC maintenance interrupt
- * and the guest's virtual timer. Nothing else is enabled on the real GIC
- * (Phase 3 decision 4's write list, docs/GAOKUN3-PHASE3.md). */
+/* The physical PPIs the monitor enables on the real redistributor, and
+ * nothing else (Phase 3 decision 4's write list, docs/GAOKUN3-PHASE3.md):
+ *   25 (maintenance) re-arms the guest timer after the guest deactivates it;
+ *   27 (virtual timer) is the guest's own CNTV deadline, injected to EL1;
+ *   26 (EL2 physical timer, CNTHP) fires the ~1 s diagnostic snapshot that
+ *      reads EL1 state and the panic message into the band. PPI 26 was added
+ *      to decision 4's list when the snapshot was introduced (run 36). */
 #define GUEST_TIMER_PPIS (1u << MON_INTID_VTIMER)
-#define MONITOR_PPIS     ((1u << MON_INTID_MAINT) | GUEST_TIMER_PPIS)
+#define MONITOR_PPIS     ((1u << MON_INTID_MAINT) | (1u << MON_INTID_HYPTIMER) | GUEST_TIMER_PPIS)
 /* GICv3 (IHI 0069) GICD_CTLR, as EL2 sees it: DS (bit 6) reads one only
  * with a single security state, as QEMU's GIC has; there bit 0 enables
  * Group 0 and bit 1 Group 1. With two security states the Non-secure view
@@ -673,8 +1007,9 @@ int monitor_init(int trace)
      * secure firmware's, not EL2's, and this register is not touched. */
     if (gic_state.ds) {
         uint32_t groups = mon_mmio_read32(GICR_IGROUPR0);
-        if (!(groups & (1u << MON_INTID_MAINT)))
-            mon_redist_write(GICR_IGROUPR0, groups | (1u << MON_INTID_MAINT));
+        uint32_t want = (1u << MON_INTID_MAINT) | (1u << MON_INTID_HYPTIMER);
+        if ((groups & want) != want)
+            mon_redist_write(GICR_IGROUPR0, groups | want);
     }
     mon_redist_write(GICR_ISENABLER0, MONITOR_PPIS);  /* write-1-to-set */
     /* No self-tick: the guest's own CNTV deadline fires the physical
@@ -702,6 +1037,7 @@ void monitor_note(const char *s)
 void monitor_fault(uint64_t vec, uint64_t esr, uint64_t elr)
 {
     if (!band_on || monitor_stop_count) return;
+    uart_band_flush();
     char line[64] = "FAULT ";
     unsigned k = 6;
     for (int i = 2; i >= 0; i--) line[k++] = "0123456789ABCDEF"[(vec >> (4 * i)) & 15];
@@ -742,16 +1078,15 @@ int monitor_gic_report(void)
 static void handle_physical(uint64_t iar, int group0)
 {
     uint64_t intid = iar & 0xffffff;
-    if (intid == 26) {                               /* EL2's own timer: the tick source */
-        mon_cnthp_rearm((uint32_t)(mon_cntfrq() / 10));
-        if ((mon_lr0_read() >> 62) == 0) {
-            mon_lr0_write(LR_PENDING_EOI(MON_INTID_VTIMER));
-            /* Re-arm a timer PPI masked while LR0 was busy (the
-             * maintenance interrupt is not used for this; UIE would
-             * assert it permanently whenever no LR is valid). */
-            mon_redist_write(GICR_ISENABLER0, GUEST_TIMER_PPIS);
+    if (intid == MON_INTID_HYPTIMER) {               /* EL2 physical timer snapshot */
+        if (!uart_first_set) {
+            uint64_t frq = mon_cntfrq();
+            if (!frq) frq = 19200000;
+            mon_cnthp_rearm((uint32_t)frq);
+            monitor_timer_snapshot();
         }
-        mon_eoir1_write(iar);
+        if (group0) mon_eoir0_write(iar);
+        else mon_eoir1_write(iar);
         return;
     }
     if (intid == MON_INTID_MAINT) {
@@ -844,6 +1179,15 @@ int monitor_sysreg(uint64_t esr, uint64_t *frame)
     if ((op0 == 1 || op0 == 3) && (crn == 11 || crn == 15)) return 2;   /* IMPDEF space */
     if (op0 == 3 && op1 == 0 && crn == 12 && crm == 11 && op2 == 5 && !read)
         return sgi1r_write(rt == 31 ? 0 : frame[rt]);           /* ICC_SGI1R_EL1 */
+    if (op0 == 1 && crn == 8) {
+        /* TLBI maintenance instruction trapped via HCR_EL2.TTLB. Cortex-A78C
+         * implements FEAT_TLBIOS (TLB=1) but lacks FEAT_TLBIRANGE (TLB=2), so
+         * range invalidations like TLBI RVALE1IS (D50882A8) would otherwise
+         * fault as Undefined Instruction. Satisfy any EL1 TLBI by invalidating
+         * all EL1 stage-1 translations. */
+        mon_tlbi_vmalle1is();
+        return 1;
+    }
     /* "s<op0>_<op1>_c<crn>_c<crm>_<op2>", the assembler's generic name. */
     char name[24];
     unsigned n = 0;

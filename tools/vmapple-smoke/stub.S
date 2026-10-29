@@ -213,6 +213,96 @@ _start:
 	bl	uart_puts
 	mrs	x0, CNTFRQ_EL0
 	bl	uart_hex
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	ldr	x0, =msg_enter_band
+	bl	monitor_note
+#endif
+	bl	monitor_start_telemetry
+
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	// gaokun3 only. Bypass the stock 26A428 kernel's ARMv8.4 Range TLBI
+	// instructions by flipping two conditional branches in its in-memory
+	// image to unconditional, so the CPU never decodes an unallocated
+	// opcode. The Cortex-A78C implements ARMv8.2 (ID_AA64ISAR0_EL1.TLB=1,
+	// FEAT_TLBIOS) and lacks FEAT_TLBIRANGE (TLB=2); TLBI RVALE1IS then
+	// takes an Undefined Instruction exception the hypervisor cannot trap
+	// (HCR_EL2.TTLB does not see unallocated encodings -- VERIFIED runs 38,
+	// 39). QEMU's -cpu max implements FEAT_TLBIRANGE, so its build takes
+	// the kernel's native range path and this rewrite is both unnecessary
+	// and absent, keeping the QEMU smoke a faithful stock-kernel baseline.
+	//
+	// This is a kernel patch (it changes guest instructions, not the file
+	// on disk), admitted only for the reviewed kernel. Its provenance:
+	//   - the vma2macosap-26A428 profile pins the kernelcache SHA-256
+	//     (95f42a48..., probes/guestprofile.py), and q1n1 verifies every
+	//     bundle chunk's hash in place before entry (run 28 onward);
+	//   - each site is rewritten only if it still holds the exact stock
+	//     branch word (the cmp/b.ne guard below), so a changed kernel is
+	//     left untouched rather than mis-patched.
+	// Site 1: pmap_flush_tlb_range (0xfffffe000a065870): b.lo +0x90 -> b +0x90
+	//         (bypasses tlbi rvale1is / rvaale1is, uses the single-page loop)
+	// Site 2: pmap global flush (0xfffffe000a06e014): b.hi +0x28 -> b +0x28
+	//         (bypasses tlbi rvaae1, uses tlbi vmalle1; one CPU, so a
+	//          non-broadcast VMALLE1 suffices -- revisit for more vCPUs)
+	ldr	x1, =params_base
+	ldr	x1, [x1]
+	ldr	x0, [x1, #PARAM_ENTRY]
+	ldr	x2, =0x2eb0480		// entry_va - mh_va
+	sub	x0, x0, x2		// x0 = phys_base
+	ldr	x2, =0x3061870		// offset to site 1
+	add	x3, x0, x2
+	ldr	w4, [x3]
+	ldr	w5, =0x54000483		// b.lo +0x90
+	cmp	w4, w5
+	b.ne	1f
+	ldr	w5, =0x14000024		// b +0x90
+	str	w5, [x3]
+	dc	civac, x3
+1:
+	ldr	x2, =0x306a014		// offset to site 2
+	add	x3, x0, x2
+	ldr	w4, [x3]
+	ldr	w5, =0x54000148		// b.hi +0x28
+	cmp	w4, w5
+	b.ne	2f
+	ldr	w5, =0x1400000a		// b +0x28
+	str	w5, [x3]
+	dc	civac, x3
+2:
+	dsb	sy
+	isb
+#endif
+
+	// Reset EL1 state: on the gaokun3 UEFI ran at EL1 with M=1, C=1, I=1
+	// before slbounce entered EL2, so SCTLR_EL1 and its companions still
+	// hold the firmware's values unless cleared here.
+	mrs	x0, MIDR_EL1
+	msr	VPIDR_EL2, x0
+	mov	x0, #0x80000000		// uniprocessor-style affinity 0.0.0.0
+	msr	VMPIDR_EL2, x0
+	ldr	x0, =0x30d00800		// architectural RES1 bits; M, C, I all 0
+	msr	SCTLR_EL1, x0
+	msr	TCR_EL1, xzr
+	msr	TTBR0_EL1, xzr
+	msr	TTBR1_EL1, xzr
+	msr	MAIR_EL1, xzr
+	msr	AMAIR_EL1, xzr
+	msr	VBAR_EL1, xzr
+	ldr	x0, =0x03330000		// FPEN 0b11 (no trap FP/SIMD), ZEN 0b11, SMEN 0b11
+	msr	CPACR_EL1, x0
+	msr	CONTEXTIDR_EL1, xzr
+	msr	MDSCR_EL1, xzr
+	msr	SP_EL1, xzr
+	msr	SP_EL0, xzr
+	msr	TPIDR_EL1, xzr
+	msr	TPIDR_EL0, xzr
+	msr	TPIDRRO_EL0, xzr
+	msr	CNTV_CTL_EL0, xzr
+	msr	CNTKCTL_EL1, xzr
+	tlbi	vmalls12e1is
+	ic	iallu
+	dsb	sy
+	isb
 
 	// Drop to EL1h with DAIF masked, at the guest entry, x0 = handoff.
 	msr	ELR_EL2, x20
@@ -224,6 +314,32 @@ _start:
 	mov	x2, xzr
 	mov	x3, xzr
 	mov	x4, xzr
+	mov	x5, xzr
+	mov	x6, xzr
+	mov	x7, xzr
+	mov	x8, xzr
+	mov	x9, xzr
+	mov	x10, xzr
+	mov	x11, xzr
+	mov	x12, xzr
+	mov	x13, xzr
+	mov	x14, xzr
+	mov	x15, xzr
+	mov	x16, xzr
+	mov	x17, xzr
+	mov	x18, xzr
+	mov	x19, xzr
+	mov	x20, xzr
+	mov	x21, xzr
+	mov	x22, xzr
+	mov	x23, xzr
+	mov	x24, xzr
+	mov	x25, xzr
+	mov	x26, xzr
+	mov	x27, xzr
+	mov	x28, xzr
+	mov	x29, xzr
+	mov	x30, xzr
 	eret
 
 param_bad:
@@ -429,6 +545,8 @@ el2_irq_lower:
 do_hvc:
 	ldr	x0, [x29, #0]
 	mov	w26, w0			// low 32 bits = function id
+	mov	w0, w26
+	bl	monitor_telemetry_hvc
 
 	ldr	x1, =params_base
 	ldr	x1, [x1]
@@ -484,6 +602,10 @@ hvc_pac:
 	cmp	w26, w1
 	b.ne	1f
 	bl	pac_install_keys
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	ldr	x0, =msg_pac_done
+	bl	monitor_note
+#endif
 	b	hvc_pac_ok
 1:	ldr	w1, =VMAPPLE_PAC_GET_DEFAULT_KEYS
 	cmp	w26, w1
@@ -832,9 +954,11 @@ monitor_setup:
 #ifdef VMAPPLE_GAOKUN3_MONITOR
 	// The real panel: 6400-byte rows, so the guest's last row ends inside
 	// a 2 MiB block. Map whole blocks where they fit and finish the last
-	// one with 4 KiB pages from the L3 pool; the band stays absent. The
-	// memory type is the RAM block's (write-back): whether the panel's
-	// path wants that is an open H2 question, recorded in PHASE3.
+	// one with 4 KiB pages from the L3 pool; the band stays absent.
+	// Use Normal Outer/Inner Non-cacheable (MemAttr 0b0101: 0x7d5 block,
+	// 0x7d7 page) so guest stores to boot_args.Video reach the display
+	// scanout buffer in DRAM without needing explicit cache maintenance,
+	// while still permitting Normal unaligned and pair stores.
 	ldr	x9, =params_base
 	ldr	x9, [x9]
 	ldr	x1, [x9, #PARAM_FB_PA]
@@ -851,7 +975,7 @@ monitor_setup:
 	add	x4, x4, #0x200000
 	cmp	x4, x10
 	b.hi	8f				// partial block: pages below
-	mov	x2, #0x7fd			// block, AF, SH, WB, S2AP RW
+	mov	x2, #0x7d5			// block, AF, SH, Normal NC, S2AP RW
 	orr	x2, x1, x2
 	lsr	x3, x1, #21
 	and	x3, x3, #0x1ff
@@ -870,7 +994,7 @@ monitor_setup:
 	and	x3, x3, #0x1ff
 	str	x5, [x0, x3, lsl #3]
 	sub	x5, x5, #3
-9:	mov	x2, #0x7ff			// page, AF, SH, WB, S2AP RW
+9:	mov	x2, #0x7d7			// page, AF, SH, Normal NC, S2AP RW
 	orr	x2, x1, x2
 	lsr	x3, x1, #12
 	and	x3, x3, #0x1ff
@@ -890,12 +1014,20 @@ monitor_setup:
 	str	x2, [x0, x3, lsl #3]
 6:
 #ifdef VMAPPLE_GAOKUN3_MONITOR
-	// Clean the stage-2 tables to the point of coherency before
-	// enabling stage 2, and use a 39-bit IPA / 40-bit PA VTCR_EL2
-	// starting at s2_l1 (Cortex-A78C PARange is 40 bits; T0SZ=16 / PS=5
-	// exceeds PARange).
+	// Clean the stage-2 tables and the guest RAM window to the point
+	// of coherency before enabling stage 2 (the guest starts with M=0,
+	// C=0, so any dirty or stale UEFI cache line in [s2_lo, s2_hi)
+	// must be flushed and invalidated first), and use a 39-bit IPA /
+	// 40-bit PA VTCR_EL2 starting at s2_l1 (Cortex-A78C PARange is
+	// 40 bits; T0SZ=16 / PS=5 exceeds PARange).
 	ldr	x0, =s2_l0
 	ldr	x1, =s2_l3_next
+	sub	x1, x1, x0
+	bl	mon_clean_range
+	ldr	x9, =params_base
+	ldr	x9, [x9]
+	ldr	x0, [x9, #PARAM_S2_LO]
+	ldr	x1, [x9, #PARAM_S2_HI]
 	sub	x1, x1, x0
 	bl	mon_clean_range
 	mov	x30, x8
@@ -916,6 +1048,11 @@ monitor_setup:
 	ldr	x0, =s2_l0
 	msr	VTTBR_EL2, x0
 #endif
+	msr	ICH_VMCR_EL2, xzr
+	msr	ICH_LR0_EL2, xzr
+	msr	ICH_LR1_EL2, xzr
+	msr	ICH_LR2_EL2, xzr
+	msr	ICH_LR3_EL2, xzr
 	mov	x0, #1				// ICH_HCR: En only. UIE would assert the
 	msr	ICH_HCR_EL2, x0			// maintenance PPI permanently (no valid LRs)
 	// The architected event stream: the guest's lock and idle loops wait
@@ -1033,8 +1170,9 @@ mon_uart_putc:
 .global mon_clean_range
 mon_clean_range:
 #ifdef VMAPPLE_GAOKUN3_MONITOR
-	add	x1, x0, x1		// the panel reads memory, not caches
-1:	dc	cvac, x0
+	add	x1, x0, x1		// the panel and uncached EL1 read memory, not caches
+	bic	x0, x0, #63
+1:	dc	civac, x0
 	add	x0, x0, #64
 	cmp	x0, x1
 	b.lo	1b
@@ -1060,6 +1198,42 @@ mon_translate_va:
 	at	s1e1r, x0
 	isb
 	mrs	x0, PAR_EL1
+	ret
+.global mon_elr_el2
+mon_elr_el2:
+	mrs	x0, ELR_EL2
+	ret
+.global mon_spsr_el2
+mon_spsr_el2:
+	mrs	x0, SPSR_EL2
+	ret
+.global mon_esr_el1
+mon_esr_el1:
+	mrs	x0, ESR_EL1
+	ret
+.global mon_far_el1
+mon_far_el1:
+	mrs	x0, FAR_EL1
+	ret
+.global mon_elr_el1
+mon_elr_el1:
+	mrs	x0, ELR_EL1
+	ret
+.global mon_sctlr_el1
+mon_sctlr_el1:
+	mrs	x0, SCTLR_EL1
+	ret
+.global mon_tlbi_vmalle1is
+mon_tlbi_vmalle1is:
+	dsb	ish
+	tlbi	vmalle1is
+	dsb	ish
+	isb
+	ret
+.global mon_params_base
+mon_params_base:
+	ldr	x0, =params_base
+	ldr	x0, [x0]
 	ret
 
 /* Freestanding C ABI helpers for -mstrict-align (EL2 runs with M=0 in
@@ -1155,6 +1329,8 @@ halt:
 
 .section .rodata
 msg_setup_done:	.asciz "SETUP DONE: STAGE 2 READY, GIC NOT TOUCHED"
+msg_enter_band:	.asciz "ENTERING GUEST AT EL1"
+msg_pac_done:	.asciz "PAC KEYS INSTALLED (QARMA5), HVC OK"
 msg_enter:	.asciz "EL2: entering guest at EL1\n"
 msg_cntfrq:	.asciz "EL2: cntfrq "
 msg_noparam:	.asciz "EL2: bad params magic\n"

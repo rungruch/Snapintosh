@@ -23,6 +23,14 @@ static size_t uart_len;
 static uint32_t insn_page[1024] __attribute__((aligned(4096)));
 #define insn_word (insn_page[0])
 
+/* A second translation window for the panic tests: VAs in this range map
+ * to panic_mem so panic_render's guest reads hit a real host buffer.
+ * Every other VA keeps aliasing insn_page, as the decoder tests expect. */
+static uint32_t panic_mem[1024] __attribute__((aligned(4096)));
+#define PANIC_VA_BASE 0xfffffe00c0000000ull
+static void pm_u64(unsigned off, uint64_t v) { memcpy((uint8_t *)panic_mem + off, &v, 8); }
+static void pm_str(unsigned off, const char *s) { strcpy((char *)panic_mem + off, s); }
+
 uint64_t mon_iar1_read(void) { return fake_iar; }
 uint64_t mon_iar0_read(void) { return fake_iar; }
 void mon_eoir0_write(uint64_t v) { (void)v; }
@@ -33,7 +41,26 @@ static uint64_t fake_lr[4];
 uint64_t mon_lr_read(unsigned n) { return fake_lr[n & 3]; }
 void mon_lr_write(unsigned n, uint64_t v) { fake_lr[n & 3] = v; }
 uint64_t mon_misr_read(void) { return 0; }
-void mon_cnthp_rearm(uint32_t ticks) { (void)ticks; }
+static uint32_t fake_cnthp_ticks;
+static unsigned fake_cnthp_calls;
+void mon_cnthp_rearm(uint32_t ticks) { fake_cnthp_ticks = ticks; fake_cnthp_calls++; }
+static uint64_t fake_elr_el2 = 0xfffffe000a065974ull;
+static uint64_t fake_spsr_el2 = 0x600003c5ull;
+static uint64_t fake_esr_el1 = 0x02000000ull;
+static uint64_t fake_far_el1 = 0x0ull;
+static uint64_t fake_elr_el1 = 0xfffffe000a065974ull;
+static uint64_t fake_sctlr_el1 = 0x30d00800ull;
+
+uint64_t mon_elr_el2(void) { return fake_elr_el2; }
+uint64_t mon_spsr_el2(void) { return fake_spsr_el2; }
+uint64_t mon_esr_el1(void) { return fake_esr_el1; }
+uint64_t mon_far_el1(void) { return fake_far_el1; }
+uint64_t mon_elr_el1(void) { return fake_elr_el1; }
+uint64_t mon_sctlr_el1(void) { return fake_sctlr_el1; }
+static unsigned fake_tlbi_count;
+void mon_tlbi_vmalle1is(void) { fake_tlbi_count++; }
+static uint64_t fake_params_base;
+uint64_t mon_params_base(void) { return fake_params_base; }
 /* A fake platform GIC: the distributor's CTLR and, per redistributor
  * frame, TYPER, WAKER and IGROUPR0. Writes are logged and applied. */
 static uint64_t last_redist_addr; static uint32_t last_redist_value;
@@ -88,8 +115,37 @@ uint64_t mon_cntpct(void) { return 5000000000ull; }
 uint64_t mon_cntfrq(void) { return 1000000000ull; }
 uint64_t mon_translate_va(uint64_t va)
 {
-    (void)va;
-    return (uint64_t)(uintptr_t)insn_page;   /* PAR form: PA in [47:12] */
+    if (va >= PANIC_VA_BASE && va < PANIC_VA_BASE + 0x1000)
+        return (uint64_t)(uintptr_t)panic_mem;   /* page aligned; low 12 bits select the datum */
+    return (uint64_t)(uintptr_t)insn_page;       /* PAR form: PA in [47:12] */
+}
+
+/* An array-backed panic_args for the pure panic_format tests: a %s value
+ * is an index into `strs`, so no guest translation is needed. */
+struct fake_pa { const uint64_t *vals; unsigned n; const char *const *strs; unsigned nstr; };
+static int fpa_get(void *ctx, unsigned i, uint64_t *out)
+{
+    struct fake_pa *f = (struct fake_pa *)ctx;
+    if (i >= f->n) return -1;
+    *out = f->vals[i];
+    return 0;
+}
+static int fpa_str(void *ctx, uint64_t va, char *buf, unsigned cap)
+{
+    struct fake_pa *f = (struct fake_pa *)ctx;
+    if (va >= f->nstr) { buf[0] = 0; return -1; }
+    const char *s = f->strs[va];
+    unsigned i = 0;
+    for (; i + 1 < cap && s[i]; i++) buf[i] = s[i];
+    buf[i] = 0;
+    return 0;
+}
+static unsigned fmt_check(const char *fmt, const uint64_t *vals, unsigned n,
+                          const char *const *strs, unsigned nstr, char *out, unsigned cap)
+{
+    struct fake_pa f = { vals, n, strs, nstr };
+    struct panic_args a = { fpa_get, fpa_str, &f };
+    return panic_format(out, cap, fmt, &a);
 }
 
 /* --- the test driver ------------------------------------------------------ */
@@ -243,6 +299,11 @@ int main(void)
           "ICC_SGI0R_EL1 is a named stop, not silently ignored");
     CHECK(monitor_sysreg(SYSREG(3, 0, 12, 11, 5, 2, 1), frame) == 0,
           "a read of ICC_SGI1R_EL1 is a named stop");
+    fake_tlbi_count = 0;
+    CHECK(monitor_sysreg(SYSREG(1, 0, 8, 2, 5, 8, 0), frame) == 1 && fake_tlbi_count == 1,
+          "TLBI RVALE1IS (op0=1, CRn=8): served via mon_tlbi_vmalle1is");
+    CHECK(monitor_sysreg(SYSREG(1, 0, 8, 7, 0, 0, 0), frame) == 1 && fake_tlbi_count == 2,
+          "TLBI VMALLE1IS (op0=1, CRn=8): served via mon_tlbi_vmalle1is");
 
     /* No syndrome (ISV 0): the instruction is decoded. LDR x5, [x6] and
      * STRB w7, [x6] against the PL011 flags and data registers. */
@@ -255,6 +316,18 @@ int main(void)
     uart_len = 0;
     CHECK(monitor_data_abort((0x24ull << 26) | (1ull << 6), MON_UART_IPA, 0x1000, frame) == 1
           && uart_len == 1, "a decoded byte store is served");
+    insn_word = 0xf84180c5;                                      /* ldur x5, [x6, #0x18] (unscaled, no writeback) */
+    frame[5] = 0;
+    frame[6] = 0x5500;
+    CHECK(monitor_data_abort(0x24ull << 26, MON_UART_IPA + 0x18, 0x1000, frame) == 1
+          && frame[5] == 0x90 && frame[6] == 0x5500,
+          "an unscaled immediate load (ldur) does not write back to the base register");
+    insn_word = 0xf84184c5;                                      /* ldr x5, [x6], #0x18 (post-index writeback) */
+    frame[5] = 0;
+    frame[6] = 0x5500;
+    CHECK(monitor_data_abort(0x24ull << 26, MON_UART_IPA + 0x18, 0x1000, frame) == 1
+          && frame[5] == 0x90 && frame[6] == 0x5518,
+          "a post-index load applies writeback to the base register");
     insn_word = 0xa9400be5;                                      /* ldp x5, x6, [x7] */
     CHECK(monitor_data_abort(0x24ull << 26, MON_UART_IPA, 0x1000, frame) == 0,
           "an instruction the decoder does not know stops by name");
@@ -282,21 +355,21 @@ int main(void)
           "a timer FIQ (Group 0) is injected through LR0");
 
     /* monitor_init and the platform GIC (Phase 3 decision 4's writes). */
-    const uint32_t ppis = (1u << MON_INTID_MAINT) | (1u << MON_INTID_VTIMER);
+    const uint32_t ppis = (1u << MON_INTID_MAINT) | (1u << MON_INTID_HYPTIMER) | (1u << MON_INTID_VTIMER);
     /* Two security states, as the gaokun3's GIC most likely has: the
      * firmware left ARE_NS and EnableGrp1A set, so the distributor is not
      * written; the boot CPU (MPIDR affinity 0.0.1.0) is frame 1. */
     fake_gic(0x12, 0x81000100ull);
     CHECK(monitor_init(0) == 1 && monitor_gic_report() == 1, "two states, enables set: no stop");
     CHECK(redist_n == 1 && redist_addrs[0] == PHYS_GICR_BASE + 0x20000 + 0x10100 && redist_vals[0] == ppis,
-          "two states, enables set: the only write enables PPIs 25 and 27 on the boot CPU's frame");
+          "two states, enables set: the only write enables PPIs 25, 26, and 27 on the boot CPU's frame");
     /* EnableGrp1A clear: set it alone, keeping ARE_NS. */
     fake_gic(0x10, 0x81000000ull);
     monitor_init(0);
     CHECK(redist_n == 2 && redist_addrs[0] == PHYS_GICD_BASE && redist_vals[0] == 0x12,
           "two states: GICD_CTLR gains EnableGrp1A and keeps ARE_NS");
     CHECK(redist_addrs[1] == PHYS_GICR_BASE + 0x10100 && redist_vals[1] == ppis,
-          "two states: no IGROUPR0 or WAKER write, then PPIs 25 and 27 only");
+          "two states: no IGROUPR0 or WAKER write, then PPIs 25, 26, and 27 only");
     /* ARE_NS clear: not the state the firmware should leave; stop first. */
     fake_gic(0x02, 0x81000000ull);
     CHECK(monitor_init(0) == 0 && redist_n == 0 && monitor_gic_report() == 0,
@@ -310,9 +383,9 @@ int main(void)
           "one state: GICD_CTLR keeps DS and enables both groups");
     CHECK(redist_addrs[1] == PHYS_GICR_BASE + 0x14 && redist_vals[1] == 0x4,
           "one state: a sleeping redistributor is woken, read-modify-write");
-    CHECK(redist_addrs[2] == PHYS_GICR_BASE + 0x10080 && redist_vals[2] == (1u << MON_INTID_MAINT),
-          "one state: the maintenance PPI moves to Group 1");
-    CHECK(redist_vals[3] == ppis, "one state: PPIs 25 and 27 only");
+    CHECK(redist_addrs[2] == PHYS_GICR_BASE + 0x10080 && redist_vals[2] == ((1u << MON_INTID_MAINT) | (1u << MON_INTID_HYPTIMER)),
+          "one state: the maintenance and hyp-timer PPIs move to Group 1");
+    CHECK(redist_vals[3] == ppis, "one state: PPIs 25, 26, and 27 only");
     /* No frame for the boot CPU: stop before any write. */
     fake_gic(0x12, 0x81000500ull);
     fake_typer[2] |= 1u << 4;                                   /* last frame */
@@ -336,6 +409,154 @@ int main(void)
     fake_iar = 30; redist_n = 0; fake_lr0 = 0;
     monitor_irq();
     CHECK(redist_n == 0 && fake_lr0 == 0, "INTID 30 is not the monitor's: nothing injected or written");
+    fake_iar = MON_INTID_HYPTIMER;
+    fake_cnthp_calls = 0;
+    monitor_irq();
+    CHECK(fake_cnthp_calls == 1 && fake_cnthp_ticks == 1000000000u, "the EL2 timer IRQ re-arms CNTHP");
+
+    /* panic_format: the mini-printf used to render the guest's panic
+     * message (Phase 3 step H4). Pure logic over an array-backed source. */
+    {
+        char buf[128];
+        const char *strs[2] = { "Kernel data abort", "" };
+        uint64_t v1[1] = { 0x1234 };
+        CHECK(fmt_check("%016llx", v1, 1, 0, 0, buf, sizeof buf) == 16
+              && strcmp(buf, "0000000000001234") == 0, "panic_format: %016llx zero-pads to width");
+        uint64_t v2[1] = { 0xdead };
+        CHECK(fmt_check("%p", v2, 1, 0, 0, buf, sizeof buf) && strcmp(buf, "0xdead") == 0,
+              "panic_format: %p prefixes 0x");
+        uint64_t v3[1] = { (uint64_t)(int64_t)-5 };
+        CHECK(fmt_check("%d", v3, 1, 0, 0, buf, sizeof buf) && strcmp(buf, "-5") == 0,
+              "panic_format: %d renders a negative value");
+        uint64_t v4[1] = { 0 };                          /* %s value is a strs index */
+        CHECK(fmt_check("%s", v4, 1, strs, 2, buf, sizeof buf) && strcmp(buf, "Kernel data abort") == 0,
+              "panic_format: %s reads the string argument");
+        CHECK(fmt_check("a%%b", 0, 0, 0, 0, buf, sizeof buf) && strcmp(buf, "a%b") == 0,
+              "panic_format: %% is a literal percent");
+        uint64_t v5[1] = { 7 };
+        CHECK(fmt_check("%q", v5, 1, 0, 0, buf, sizeof buf) && strcmp(buf, "%q") == 0,
+              "panic_format: an unknown conversion is emitted literally, consuming no argument");
+        uint64_t v6[1] = { 5 };
+        CHECK(fmt_check("%d %d", v6, 1, 0, 0, buf, sizeof buf) && strcmp(buf, "5 ") == 0,
+              "panic_format: a missing argument ends the message");
+        /* The exact kernel-abort format XNU used in run 40. */
+        uint64_t v7[5] = { 0, 0xfffffe000a065974ull, 0xfffffe0009f0a918ull, 0x4000, 1 };
+        fmt_check("%s at pc 0x%016llx, lr 0x%016llx (saved state: %p%s)",
+                  v7, 5, strs, 2, buf, sizeof buf);
+        CHECK(strcmp(buf, "Kernel data abort at pc 0xfffffe000a065974, lr 0xfffffe0009f0a918"
+                          " (saved state: 0x4000)") == 0,
+              "panic_format: the XNU kernel-abort format string renders fully");
+        unsigned k = 7;                                  /* overrun guard */
+        CHECK(fmt_check("abcdefghij", 0, 0, 0, 0, buf, k) == k - 1 && buf[k - 1] == 0,
+              "panic_format: output is bounded by cap and NUL-terminated");
+    }
+
+    /* panic_render: read the guest's format string and varargs through the
+     * fake translation and format them, including the two-level va_list. */
+    {
+        char plines[2][PANIC_LINE_CAP];
+        memset(panic_mem, 0, sizeof panic_mem);
+        pm_str(0x000, "x=%d s=%s p=%p end");
+        pm_str(0x100, "hi");
+        pm_u64(0x200, 42);                               /* arg 0 */
+        pm_u64(0x208, PANIC_VA_BASE + 0x100);            /* arg 1: the string VA */
+        pm_u64(0x210, 0xdead);                           /* arg 2 */
+        pm_u64(0x300, PANIC_VA_BASE + 0x200);            /* db_panic_args -> the va_list */
+        unsigned ptot = panic_render(plines, 2, 44, 0, PANIC_VA_BASE, PANIC_VA_BASE + 0x300);
+        CHECK(ptot == 22 && strcmp(plines[0], "x=42 s=hi p=0xdead end") == 0 && plines[1][0] == 0,
+              "panic_render formats the format string with its two-level va_list arguments");
+
+        char longfmt[101];
+        for (int i = 0; i < 50; i++) longfmt[i] = 'A';
+        for (int i = 50; i < 100; i++) longfmt[i] = 'B';
+        longfmt[100] = 0;
+        memset(panic_mem, 0, sizeof panic_mem);
+        pm_str(0x000, longfmt);
+        unsigned t0 = panic_render(plines, 2, 44, 0, PANIC_VA_BASE, PANIC_VA_BASE + 0x800);
+        CHECK(t0 == 100 && strlen(plines[0]) == 44 && plines[0][0] == 'A',
+              "panic_render page 0 shows the first window of a long message");
+        unsigned t1 = panic_render(plines, 2, 44, 1, PANIC_VA_BASE, PANIC_VA_BASE + 0x800);
+        CHECK(t1 == 100 && plines[0][0] == 'B' && strlen(plines[0]) == 12 && plines[1][0] == 0,
+              "panic_render page 1 continues the long message");
+    }
+
+    /* The 160-row monitor band: overwriting a note clears the old glyphs,
+     * live telemetry writes line 4, timer snapshot writes lines 5..7,
+     * and guest PL011 output pins the banner on line 4 and scrolls lines 5..7. */
+    {
+        static uint32_t fb[160 * 640];
+        monitor_set_band(1, (uint64_t)(uintptr_t)fb, 640, 640 * 4, 0, 160);
+        monitor_note("SETUP DONE: STAGE 2 READY, GIC NOT TOUCHED");
+        monitor_note("OK");
+        int tail_lit = 0;
+        for (unsigned y = 6 + 2 * 20; y < 6 + 2 * 20 + 14; y++)
+            for (unsigned x = 8 + 4 * 12; x < 640; x++)
+                if (fb[y * 640 + x] != 0x00202020u) tail_lit = 1;
+        CHECK(!tail_lit, "band_text clears the previous text on the line before drawing");
+
+        monitor_start_telemetry();
+        monitor_telemetry_hvc(0xc1000000);
+        int line4_yellow = 0;
+        for (unsigned y = 6 + 4 * 20; y < 6 + 4 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x00ffff40u) line4_yellow = 1;
+        CHECK(line4_yellow, "monitor_start_telemetry and monitor_telemetry_hvc draw live telemetry on line 4");
+
+        monitor_timer_snapshot();
+        int line5_orange = 0, line6_orange = 0, line7_orange = 0;
+        for (unsigned y = 6 + 5 * 20; y < 6 + 5 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x00ffa040u) line5_orange = 1;
+        for (unsigned y = 6 + 6 * 20; y < 6 + 6 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x00ffa040u) line6_orange = 1;
+        for (unsigned y = 6 + 7 * 20; y < 6 + 7 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x00ffa040u) line7_orange = 1;
+        CHECK(line5_orange && line6_orange && line7_orange,
+              "monitor_timer_snapshot draws registers on lines 5, 6, and 7");
+
+        /* When panicked, monitor_timer_snapshot renders caller and panic details in green on lines 4..7 */
+        fake_elr_el1 = 0xfffffe0009f0abc8ull;
+        fake_elr_el2 = 0xfffffe0009eb2758ull;
+        monitor_timer_snapshot();
+        int panic_l4_green = 0, panic_l5_green = 0, panic_l6_green = 0;
+        for (unsigned y = 6 + 4 * 20; y < 6 + 4 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x0080ff80u) panic_l4_green = 1;
+        for (unsigned y = 6 + 5 * 20; y < 6 + 5 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x0080ff80u) panic_l5_green = 1;
+        for (unsigned y = 6 + 6 * 20; y < 6 + 6 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x0080ff80u) panic_l6_green = 1;
+        CHECK(panic_l4_green && panic_l5_green && panic_l6_green,
+              "monitor_timer_snapshot renders panic caller and details in green on lines 4..7 when panicked");
+        fake_elr_el1 = 0xfffffe000a065974ull;
+        fake_elr_el2 = 0xfffffe000a065974ull;
+
+        const char *stream = "Darwin Kernel Version 26.0.0\nline one\nline two\nline three\nline four\n";
+        for (unsigned i = 0; stream[i]; i++)
+            access(MON_UART_IPA, 0, 5, 1, (uint8_t)stream[i]);
+        int line4_green = 0, line7_cyan = 0;
+        for (unsigned y = 6 + 4 * 20; y < 6 + 4 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x0080ff80u) line4_green = 1;
+        for (unsigned y = 6 + 7 * 20; y < 6 + 7 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x00c0ffffu) line7_cyan = 1;
+        CHECK(line4_green && line7_cyan,
+              "on the 160-row band, PL011 output pins the banner on line 4 and scrolls lines 5..7");
+
+        monitor_telemetry_hvc(0xc1000001);
+        monitor_timer_snapshot();
+        int line4_still_green = 0;
+        for (unsigned y = 6 + 4 * 20; y < 6 + 4 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x0080ff80u) line4_still_green = 1;
+        CHECK(line4_still_green, "PL011 banner on line 4 is preserved against subsequent telemetry/snapshot");
+        monitor_set_band(0, 0, 0, 0, 0, 0);
+    }
 
     if (failures) {
         printf("FAIL test-vmapple-monitor: %d of %d checks failed\n", failures, checks);

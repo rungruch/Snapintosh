@@ -106,10 +106,11 @@ def build_image(llvm, out, src, linked, base, defines=()):
     subprocess.run([clang, *CFLAGS, *defs, str(src), '-o', str(obj)], check=True)
     objs = [str(obj)]
     if src.name == 'stub.S':
-        mon = out / 'monitor.o'
-        subprocess.run([clang, *CFLAGS, *defs, '-std=c11', str(HERE / 'monitor.c'),
-                        '-o', str(mon)], check=True)
-        objs.append(str(mon))
+        for unit in ('monitor.c', 'panic.c'):
+            obj_c = out / (pathlib.Path(unit).stem + '.o')
+            subprocess.run([clang, *CFLAGS, *defs, '-std=c11', str(HERE / unit),
+                            '-o', str(obj_c)], check=True)
+            objs.append(str(obj_c))
     elf = out / (linked + '.elf')
     ld = tool('ld.lld', None, 'SNAP_LLD', str(llvm), '/opt/homebrew/opt/lld/bin')
     subprocess.run([ld, '-T', str(HERE / 'stub.ld'), f'--defsym=BASE={base:#x}',

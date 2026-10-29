@@ -44,11 +44,25 @@ uint64_t mon_cntpct(void);           /* CNTPCT_EL0 */
 uint64_t mon_cntfrq(void);           /* CNTFRQ_EL0 */
 uint64_t mon_translate_va(uint64_t va); /* PAR_EL1 after AT S1E1R, bit0 set on fault */
 void mon_cnthp_rearm(uint32_t ticks);   /* CNTHP_TVAL_EL2: next EL2 timer tick */
+uint64_t mon_elr_el2(void);             /* ELR_EL2: guest PC when interrupted */
+uint64_t mon_spsr_el2(void);            /* SPSR_EL2: guest PSTATE when interrupted */
+uint64_t mon_esr_el1(void);             /* ESR_EL1: exception syndrome at EL1 */
+uint64_t mon_far_el1(void);             /* FAR_EL1: fault address at EL1 */
+uint64_t mon_elr_el1(void);             /* ELR_EL1: exception return address at EL1 */
+uint64_t mon_sctlr_el1(void);           /* SCTLR_EL1: system control register at EL1 */
+void mon_tlbi_vmalle1is(void);          /* Invalidate all EL1 translations at EL2 */
+uint64_t mon_params_base(void);         /* Physical base address of smoke_params */
 
 /* Called once from stub.S when the monitor flag is set: finds the boot
- * CPU's redistributor and enables the monitor's two PPIs on the platform
+ * CPU's redistributor and enables the monitor's PPIs on the platform
  * GIC, read-modify-write. Returns 0 for a named stop. */
 int monitor_init(int trace);
+/* Arm CNTHP and start live telemetry on Line 4 right before dropping to EL1. */
+void monitor_start_telemetry(void);
+/* Real-time telemetry: record an HVC call and update Line 4. */
+void monitor_telemetry_hvc(uint32_t fn_id);
+/* Timer snapshot: capture EL1 registers and display on Lines 5..7. */
+void monitor_timer_snapshot(void);
 /* After monitor_set_band: draw monitor_init's GIC line, or its stop, in
  * the band. Returns 0 when monitor_init stopped; the stub then halts. */
 int monitor_gic_report(void);
@@ -99,6 +113,36 @@ int monitor_sysreg(uint64_t esr, uint64_t *frame);
 
 /* Print the handled/stopped counters on the monitor's UART. */
 void monitor_print_stats(void);
+
+/* ---- panic-message extraction (panic.c, Phase 3 step H4) --------------- */
+/* The widest band line the renderer fills, including the terminator. */
+#define PANIC_LINE_CAP 64
+
+/* An abstract source of a panic format string's arguments, so the
+ * formatter is host-testable without EL2 memory. `get` reads the index-th
+ * 8-byte vararg slot (returns 0 on success); `str` copies the C string at
+ * a guest VA into buf (returns 0 on success). */
+struct panic_args {
+    int (*get)(void *ctx, unsigned index, uint64_t *out);
+    int (*str)(void *ctx, uint64_t va, char *buf, unsigned cap);
+    void *ctx;
+};
+
+/* Format `fmt` with arguments from `a` into out[0..cap-1] (NUL-terminated).
+ * Supports %s %p %x %X %u %d %i %c %% with optional width and zero-pad;
+ * length modifiers are consumed and every slot is read as 64 bits. An
+ * argument it cannot read ends the message; an unreadable %s becomes
+ * "<?>". Returns the number of characters written. */
+unsigned panic_format(char *out, unsigned cap, const char *fmt,
+                      const struct panic_args *a);
+
+/* EL2 only: read the guest's panic format string at fmt_va and its
+ * varargs at args_va, format the message, and copy the `page`-th window
+ * of up to `maxlines` lines of `width` chars into out. Returns the full
+ * message length, so the caller can page a long message across snapshots.
+ * Reads guest memory through mon_translate_va. */
+unsigned panic_render(char out[][PANIC_LINE_CAP], unsigned maxlines, unsigned width,
+                      unsigned page, uint64_t fmt_va, uint64_t args_va);
 
 extern uint64_t monitor_handled;     /* accesses a model answered */
 extern uint64_t monitor_stop_ipa;    /* IPA of the named stop, if any */

@@ -169,6 +169,7 @@
 #define PHYS_GICR_BASE   0x080a0000ull   /* QEMU virt redistributor 0 */
 #endif
 #define MON_INTID_VTIMER 27
+#define MON_INTID_HYPTIMER 26
 #define MON_INTID_MAINT  25
 
 #endif
