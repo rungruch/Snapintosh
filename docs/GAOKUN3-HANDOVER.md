@@ -35,6 +35,7 @@ with conditions, and a real-hardware boot can reopen it.
 | 1: guards | Thermal guard pinned to tsens and run once at EL2 (run 10); battery guard and the trend check host-tested against Windows readings | [PHASE1-GUARDS](GAOKUN3-PHASE1-GUARDS.md) |
 | 2: EL2 entry and USB link | VHE exit PASSED on the machine (runs 11, 12; q1n1 runs 14, 15). USB link **paused**: USB0's DMA is translated by `apps_smmu`, and the bypass's first write (stage 2) is designed and host-modelled only | [PHASE2](GAOKUN3-PHASE2.md), [USB-DEVICE-MODE](GAOKUN3-USB-DEVICE-MODE.md) |
 | 3: VirtualMac kernel to a console | **PASSED on hardware (Run 47, 2026-10-30).** Stock 26A428 kernel bootstraps completely through memory management (`pmap_startup`), physical GICv3, virtual timer, PAC QARMA5, context switching (with SSBS/DIT bypassed), IOKit driver matching, and BSD domain init (`L2TP DOMAIN INIT COMPLETE`), reaching the root-mount wait (`missing-boot-media` written to NVRAM). No crash, no panic. Ready for Phase 4 (storage). | [PHASE3](GAOKUN3-PHASE3.md) |
+| 4: Storage mediation and root mount | **IN PROGRESS (2026-10-30).** Step P1 (host model) and Step P2 (QEMU smoke boot validation with APFS mount-complete) PASSED. Step P3 (stick bundle ramdisk provisioning) next. | [PHASE4](GAOKUN3-PHASE4.md) |
 
 Recent results worth knowing before anything else:
 
@@ -173,18 +174,19 @@ hardware run is still the owner's on the day.
    frame turned out not to be GICv2m; the kernel's own check gave its type
    register's format
    ([P3](GAOKUN3-PHASE3.md#the-msi-frame-2026-10-28-p3s-bar-met)).
-4. **Finish Phase 3 on the gaokun3 (H3 and H4), each run the owner's on
-   the day.** H1 and H2 passed (runs 28, 34); the guest is entered (run 35)
-   and its console reaches the band (run 37). The boot now panics early in
-   the kernel, and run 41's formatted panic named the fault. The immediate
-   step is **run 42**: boot the prepared stick, whose device tree reports
-   `dram-size` over the panic region, and see whether the boot gets past
-   `check_for_panic_log`. The band now shows the whole register dump,
-   saved ESR and FAR included, if it panics again. Phase 3's acceptance (a console, then a named platform contract
-   the monitor does not model — the result that can reopen Route B) is H4.
-   An agent picking this up should start from
-   [GAOKUN3-AGENT-HANDOVER.md](GAOKUN3-AGENT-HANDOVER.md).
-5. **After Phase 3:** the USB link resumes at stage 2 of the S2CR bypass
+4. ~~**Finish Phase 3 on the gaokun3 (H3 and H4)**~~ PASSED on hardware
+   (Run 47, 2026-10-30): FairPlay neutralization succeeded 100%, kernel
+   bootstrapped natively through BSD domain init to `missing-boot-media`
+   ([PHASE3](GAOKUN3-PHASE3.md#run-47-2026-10-30-fairplay-neutralized-kernel-bootstraps-to-root-mount-wait)).
+5. **Phase 4: Storage mediation and root filesystem mount.**
+   - **Step P1:** Implement VirtIO Modern block controller on PCIe in
+     `tools/vmapple-smoke/storage.c` with host tests in
+     `tools/test-vmapple-storage.py`.
+   - **Step P2:** QEMU smoke boot with root APFS container image.
+   - **Step P3:** RAM-backed root disk bundle provisioning via q1n1 (zero NVMe risk).
+   - **Step P4:** Hardware qualification on gaokun3.
+   See [PHASE4](GAOKUN3-PHASE4.md).
+6. **After Phase 4:** the USB link resumes at stage 2 of the S2CR bypass
    ([step 1i](GAOKUN3-USB-DEVICE-MODE.md#step-1i-stage-2-the-first-smmu-write-design-and-host-model)),
    the first SMMU write, which needs its own go-ahead.
 

@@ -27,6 +27,7 @@ def main():
                    str(ROOT / 'tools' / 'test-vmapple-monitor.c'),
                    str(ROOT / 'tools' / 'vmapple-smoke' / 'monitor.c'),
                    str(ROOT / 'tools' / 'vmapple-smoke' / 'panic.c'),
+                   str(ROOT / 'tools' / 'vmapple-smoke' / 'storage.c'),
                    '-o', str(exe)]
             built = subprocess.run(cmd, capture_output=True, text=True)
             if built.returncode:

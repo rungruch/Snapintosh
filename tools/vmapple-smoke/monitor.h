@@ -57,6 +57,7 @@ uint64_t mon_params_base(void);         /* Physical base address of smoke_params
  * CPU's redistributor and enables the monitor's PPIs on the platform
  * GIC, read-modify-write. Returns 0 for a named stop. */
 int monitor_init(int trace);
+int monitor_inject_virq(unsigned intid);
 /* Arm CNTHP and start live telemetry on Line 4 right before dropping to EL1. */
 void monitor_start_telemetry(void);
 /* Real-time telemetry: record an HVC call and update Line 4. */

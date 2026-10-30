@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "monitor.h"
+#include "storage.h"
 #include "../../probes/font5x7.h"
 #include "layout.h"
 
@@ -205,38 +206,28 @@ static int store_access(uint32_t *regs, uint64_t off, unsigned size, int write,
     return 1;
 }
 
-/* PCIe configuration space with no functions: all-ones reads are PCI's
- * defined answer for an absent function. Writes are ignored. */
-static int pcie_access(unsigned size, int write, uint64_t *value)
+/* PCIe configuration space: mediated by storage.c for VirtIO Modern block
+ * storage at BDF 00:01.0; all other slots answer all-ones. */
+static int pcie_access(uint64_t off, unsigned size, int write, uint64_t *value)
 {
     count_pcie++;
-    if (!write) *value = (size == 8) ? ~0ull : ((1ull << (8 * size)) - 1);
-    return 1;
+    return storage_pcie_cfg_access(off, size, write, value);
 }
 
-/* ---- AppleVirtualPlatform's fixed addresses (Phase 3 decision 5) --------
- * The owner's decision of 2026-10-28: answer the three as Apple's virtual
- * machine does where that is known, and never invent a value beyond it.
- * The facts, not the code, come from QEMU v11.1.2's vmapple machine
- * (hw/vmapple/bdif.c, cfg.c; GPL-2.0-or-later), which implements
- * Virtualization.framework's device model for macOS 12 guests: OBSERVED
- * there, INFERRED for 26A428. No identifier of the real machine is ever
- * used. */
-
-/* The backdoor interface at 0x30000000: a block-device mailbox, one page
- * per device selected by bits 31:16 of the offset (ROOT 0, AUX 0x10000).
- * Reads are QEMU's: STATUS (+0) 1, CFG (+4) 2, +8 0x420, BUSY (+0x10) 1,
- * +0x400 1, NEXT_DEVICE (+0x420) 0x8000000 for ROOT and 0x10000 for AUX,
- * +0x434 0, anything else all-ones. The 26A428 kernel reads the AUX
- * page's +0 and compares it with 1 (local study of the kernelcache,
- * OBSERVED), which is QEMU's answer: present. A command (+0x408) asks for
- * a disk transfer; Phase 3 has no disk behind it, so it is a named stop.
- * Other writes are ignored, as QEMU ignores them. */
+/* AppleVirtualPlatform fixed addresses: QEMU vmapple defaults (OBSERVED).
+ * BDIF at 0x30000000: block mailbox; ROOT 0, AUX 0x10000. Command +0x408 handled
+ * by storage.c; status +0 is 1. Other writes ignored. */
 static int bdif_access(uint64_t off, unsigned size, int write, uint64_t *value)
 {
     uint64_t devid = off & 0xffff0000u, reg = off & 0xffffu;
     count_other++;
-    if (write) return reg != 0x408;
+    if (write) {
+        if (reg == 0x408) {
+            if (storage_is_active()) return storage_bdif_cmd(devid, *value);
+            return 0;
+        }
+        return 1;
+    }
     switch (reg) {
     case 0x000: *value = 1; break;
     case 0x004: *value = 2; break;
@@ -253,17 +244,9 @@ static int bdif_access(uint64_t off, unsigned size, int write, uint64_t *value)
     return 1;
 }
 
-/* The configuration region at 0x400000: a 64 KiB table the host fills.
- * Field offsets are QEMU's struct as compiled (its comments are stale past
- * 0x100): version 2 (+0), CPU count (+4), +8 1, +0xc 1, +0x10 0x20, ECID
- * (+0x18) zero as QEMU's default, RAM size (+0x20), +0x2c 1, +0x30 1, the
- * MAC addresses (+0x40..) zero as QEMU's default, CPU IDs (+0x100) 0 for
- * the one CPU, serial (+0x500) "1234", +0x520 "D/A", model (+0x540)
- * "VM0001", +0x580 1, SoC name (+0x584) "Apple M1 (Virtual)"; QEMU's
- * non-identifying defaults, zero elsewhere. QEMU fills rnd (+0x38) from
- * the host's random source, so a read of it is a named stop until a real
- * source feeds it: a fixed value would be fabricated entropy. Writes are
- * a named stop; their meaning is unknown. */
+/* Configuration region at 0x400000: host-filled 64 KiB table with QEMU's
+ * non-identifying defaults (version 2, serial "1234", model "VM0001", SoC
+ * "Apple M1 (Virtual)"). Reads of rnd (+0x38) stop by name until backed. */
 static const struct { uint32_t off; const char *text; } cfg_strings[] = {
     { 0x500, "1234" }, { 0x520, "D/A" }, { 0x540, "VM0001" }, { 0x584, "Apple M1 (Virtual)" },
 };
@@ -360,7 +343,7 @@ static int msi_access(uint64_t off, unsigned size, int write, uint64_t *value)
 
 struct window { uint64_t base, size; int kind; };
 enum { K_GICD, K_GICR, K_MSI, K_UART, K_PL031, K_PL061, K_PVPANIC, K_PCIE,
-       K_BDIF, K_CFG, K_MAILBOX };
+       K_BDIF, K_CFG, K_MAILBOX, K_PCI_BAR };
 static const struct window windows[] = {
     { MON_GICD_IPA,    0x10000,    K_GICD },
     { MON_GICR_IPA,    0x400000,   K_GICR },
@@ -370,6 +353,7 @@ static const struct window windows[] = {
     { MON_PL061_IPA,   0x1000,     K_PL061 },
     { MON_PVPANIC_IPA, 0x10000,    K_PVPANIC },
     { MON_PCIE_IPA,    MON_PCIE_SIZE, K_PCIE },
+    { MON_PCIE_BAR0_BASE, MON_PCIE_BAR0_SIZE, K_PCI_BAR },
     { MON_BDIF_IPA,    0x200000,   K_BDIF },
     { MON_CFG_IPA,     0x10000,    K_CFG },
     { MON_MAILBOX_IPA, 0x1000,     K_MAILBOX },
@@ -890,7 +874,8 @@ int monitor_data_abort(uint64_t esr, uint64_t far, uint64_t elr, uint64_t *frame
         case K_PL031: handled = pl031_access(off, size, write, &value); break;
         case K_PL061: handled = store_access(pl061_regs, off, size, write, &value); break;
         case K_PVPANIC: handled = store_access(pvpanic_regs, off, size, write, &value); break;
-        case K_PCIE: handled = pcie_access(size, write, &value); break;
+        case K_PCIE: handled = pcie_access(off, size, write, &value); break;
+        case K_PCI_BAR: handled = storage_bar0_access(off, size, write, &value); break;
         case K_BDIF: handled = bdif_access(off, size, write, &value); break;
         case K_CFG: handled = cfg_access(off, size, write, &value); break;
         case K_MAILBOX: handled = mailbox_access(off, size, write, value); break;
@@ -1008,6 +993,7 @@ int monitor_init(int trace)
 {
     monitor_set_policy(trace);
     gic_state.stopped = 0;
+    storage_init_params(mon_params_base());
 
     /* The boot CPU's redistributor: the frame whose GICR_TYPER affinity
      * matches MPIDR_EL1 (both read only), not an assumed first frame. */
@@ -1186,7 +1172,7 @@ void monitor_irq(void) { handle_physical(mon_iar1_read(), 0); }
 #define LR_PENDING_G1(vintid) \
     ((1ull << 62) | (1ull << 60) | (0xa0ull << 48) | (uint64_t)(vintid))
 
-static int inject_sgi(unsigned intid)
+int monitor_inject_virq(unsigned intid)
 {
     unsigned free = 0;
     for (unsigned n = 1; n <= 3; n++) {
@@ -1194,19 +1180,23 @@ static int inject_sgi(unsigned intid)
         if ((lr >> 62) == 0) { if (!free) free = n; continue; }
         if ((lr & 0xffffffffull) == intid && (lr >> 62) == 1) return 1;  /* already pending */
     }
-    if (!free) {
-        char line[48] = "STOP: NO FREE LIST REGISTER FOR SGI ";
-        line[36] = (char)('0' + intid / 10);
-        line[37] = (char)('0' + intid % 10);
-        line[38] = 0;
-        puts_("EL2: stop: no free list register for software interrupt ");
-        putdec(intid);
-        puts_("\n");
-        band_note(1, line, 0x00ff5050u);
-        return 0;
-    }
+    if (!free) return 0;
     mon_lr_write(free, LR_PENDING_G1(intid));
     return 1;
+}
+
+static int inject_sgi(unsigned intid)
+{
+    if (monitor_inject_virq(intid)) return 1;
+    char line[48] = "STOP: NO FREE LIST REGISTER FOR SGI ";
+    line[36] = (char)('0' + intid / 10);
+    line[37] = (char)('0' + intid % 10);
+    line[38] = 0;
+    puts_("EL2: stop: no free list register for software interrupt ");
+    putdec(intid);
+    puts_("\n");
+    band_note(1, line, 0x00ff5050u);
+    return 0;
 }
 
 /* ICC_SGI1R_EL1 (GICv3 architecture): TargetList [15:0], Aff1 [23:16],

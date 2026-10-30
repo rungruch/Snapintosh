@@ -136,6 +136,15 @@ class ClassicLayout:
     # never showed it). Only the Phase 0C smoke's layout opts out, to stay
     # as it was committed.
     dram_covers_panic: bool = True
+    # Size of the /arm-io ranges window. 0x40000000 is what every layout has
+    # always written. The VirtualMac template's own value is 0x70000000: the
+    # PCIe node's memory range sits at arm-io offset 0x40000000, so a
+    # 0x40000000 window cannot translate it. IOPCIBridge::getDTNubAddressing
+    # then resolves no assigned-addresses entry, the nub gets no
+    # IODeviceMemory, and AppleVirtIOPCITransport never maps BAR0 (QEMU
+    # smoke 2026-10-30, OBSERVED: no BAR0 access after PCI configuration).
+    # Only the opt-in block-storage path (smoke.py --root-disk) widens it.
+    armio_size: int = 0x40000000
 
     @property
     def gicr_size(self):
@@ -379,7 +388,7 @@ def classic_complete_dt(dt, layout, entropy):
         raise ValueError('device tree: no cpu timebase-frequency properties found')
 
     armio = '/device-tree/arm-io'
-    dt.set(armio, 'ranges', struct.pack('<QQQ', 0, layout.armio_parent_base, 0x40000000))
+    dt.set(armio, 'ranges', struct.pack('<QQQ', 0, layout.armio_parent_base, layout.armio_size))
     dt.set(armio + '/uart0', 'reg', struct.pack('<QQ', layout.uart_off, 0x1000))
     gic = dt.get(armio + '/gic', 'reg')
     if len(gic) != 48:

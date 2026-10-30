@@ -42,6 +42,8 @@
 #define PARAM_FB_STRIDE     0x40
 #define PARAM_FB_GUEST_ROWS 0x48
 #define PARAM_FB_BAND_ROWS  0x50
+#define PARAM_DISK_PA       0x58
+#define PARAM_DISK_SIZE     0x60
 #define PARAM_FLAG_TRACE 1
 /* bit1: run as the Route B monitor (Phase 3 P3): stage 2 default-deny,
  * virtual GICv3, device models in monitor.c. bit2 is unused: it was the

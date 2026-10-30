@@ -15,6 +15,7 @@
 
 #include "vmapple-smoke/monitor.h"
 #include "vmapple-smoke/layout.h"
+#include "vmapple-smoke/storage.h"
 
 /* --- fakes -------------------------------------------------------------- */
 static uint64_t fake_lr0, fake_iar;
@@ -198,6 +199,33 @@ int main(void)
           "PCIe config read is all-ones");
     CHECK(access(MON_PCIE_IPA + 0x40, 0, 5, 0, 0) == 1 && frame[5] == 0xff,
           "PCIe config byte read is one byte of ones");
+    CHECK(access(MON_PCIE_IPA + 0x8000, 2, 5, 0, 0) == 1 && frame[5] == 0xffffffffull,
+          "PCIe BDF 00:01.0 before storage init is all-ones");
+
+    /* Storage mediation: initialize storage via params extension */
+    {
+        uint8_t dummy_disk[1024];
+        uint8_t pbuf[0x70];
+        memset(pbuf, 0, sizeof(pbuf));
+        uint64_t dpa = (uintptr_t)dummy_disk;
+        uint64_t dsz = sizeof(dummy_disk);
+        memcpy(&pbuf[0x58], &dpa, sizeof(dpa));
+        memcpy(&pbuf[0x60], &dsz, sizeof(dsz));
+        fake_params_base = (uintptr_t)pbuf;
+        storage_init_params(fake_params_base);
+
+        CHECK(access(MON_PCIE_IPA + 0x8000, 2, 5, 0, 0) == 1 && frame[5] == 0x10421af4,
+              "PCIe BDF 00:01.0 after storage init returns VirtIO Block (0x1af4:0x1042)");
+
+        /* BAR0 sizing probe */
+        access(MON_PCIE_IPA + 0x8010, 2, 5, 1, 0xffffffffull);
+        CHECK(access(MON_PCIE_IPA + 0x8010, 2, 5, 0, 0) == 1 && frame[5] == 0xffff0000ull,
+              "PCIe BAR0 probe returns 64 KiB sizing (0xFFFF0000)");
+
+        /* Clean up */
+        storage_init(NULL, 0, 0);
+        fake_params_base = 0;
+    }
 
     /* GICD: TYPER, IIDR, RWP clear; enable set/clear semantics. */
     CHECK(access(MON_GICD_IPA + 4, 2, 5, 0, 0) == 1 && frame[5] == 0x037a0208,

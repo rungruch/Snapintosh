@@ -106,7 +106,7 @@ def build_image(llvm, out, src, linked, base, defines=()):
     subprocess.run([clang, *CFLAGS, *defs, str(src), '-o', str(obj)], check=True)
     objs = [str(obj)]
     if src.name == 'stub.S':
-        for unit in ('monitor.c', 'panic.c'):
+        for unit in ('monitor.c', 'panic.c', 'storage.c'):
             obj_c = out / (pathlib.Path(unit).stem + '.o')
             subprocess.run([clang, *CFLAGS, *defs, '-std=c11', str(HERE / unit),
                             '-o', str(obj_c)], check=True)
@@ -121,12 +121,14 @@ def build_image(llvm, out, src, linked, base, defines=()):
     return elf, binf
 
 
-def params_blob(entry, x0, flags, s2_range=(0, 0)):
+def params_blob(entry, x0, flags, s2_range=(0, 0), disk=(0, 0)):
     """The stub's parameter page (layout.h smoke_params). s2_range is the
     guest RAM the monitor's stage 2 maps; the stub refuses an empty or
     misaligned one only when the monitor runs."""
-    b = bytearray(0x30)
+    b = bytearray(0x68)
     struct.pack_into('<QQQQQQ', b, 0, entry, x0, flags, SMOKE_PARAMS_MAGIC, *s2_range)
+    if disk[0] and disk[1]:
+        struct.pack_into('<QQ', b, 0x58, disk[0], disk[1])
     return bytes(b)
 
 
@@ -171,7 +173,8 @@ def _monitor_ask(sock_path, commands, settle=0.4):
 
 
 def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, timeout, cpu,
-             extra=(), probe_cmds=(), stop_cmds=(), memory='576M', s2=(0, 0)):
+             extra=(), probe_cmds=(), stop_cmds=(), memory='576M', s2=(0, 0),
+             disk=(0, 0), disk_path=None):
     """Boot the stub at EL2 with one payload loaded at payload_pa. `extra`
     is appended to QEMU's arguments. With `stop_cmds` [(command, (file,
     size))], the stub halts on a named stop instead of exiting (the split
@@ -182,18 +185,24 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, 
     import time
     import kcload                       # the vCPU count the device tree describes
     params = out / 'params.bin'
-    params.write_bytes(params_blob(entry_pa, x0, flags, s2))
+    params.write_bytes(params_blob(entry_pa, x0, flags, s2, disk))
     mon = out / 'qemu-monitor.sock'
     mon.unlink(missing_ok=True)
+    loader_args = [
+        '-device', f'loader,file={stub_bin},addr={STUB_PA:#x},force-raw=on',
+        '-device', f'loader,file={payload_bin},addr={payload_pa:#x},force-raw=on',
+        '-device', f'loader,file={params},addr={PARAMS_PA:#x},force-raw=on',
+    ]
+    if disk_path and disk[0] and disk[1]:
+        loader_args.extend(['-device', f'loader,file={disk_path},addr={disk[0]:#x},force-raw=on'])
+    loader_args.extend(['-device', f'loader,addr={STUB_PA:#x},cpu-num=0'])
+
     cmd = [
         qemu, '-M', 'virt,virtualization=on,gic-version=3', '-cpu', cpu,
         '-m', memory, '-smp', str(kcload.GUEST_CPUS), '-display', 'none', '-serial', 'stdio', '-no-reboot',
         '-semihosting-config', 'enable=on,target=native',
         '-monitor', f'unix:{mon},server,nowait',
-        '-device', f'loader,file={stub_bin},addr={STUB_PA:#x},force-raw=on',
-        '-device', f'loader,file={payload_bin},addr={payload_pa:#x},force-raw=on',
-        '-device', f'loader,file={params},addr={PARAMS_PA:#x},force-raw=on',
-        '-device', f'loader,addr={STUB_PA:#x},cpu-num=0',
+        *loader_args,
         *extra,
     ]
     serial_out = out / 'serial.out'
@@ -208,7 +217,22 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, 
             if time.time() > next_poll:
                 next_poll = time.time() + 2
                 cur = serial_out.read_text(errors='replace') if serial_out.exists() else ''
-                if 'Waiting on' in cur and 'IOMedia' in cur:
+                if 'Waiting on' in cur and 'IOMedia' in cur and not disk_path:
+                    monitor_text = _monitor_ask(mon, [
+                        'info registers',
+                        'x/4i $pc',
+                        f'xp/4gx {TIDCP_LOG_PA:#x}',
+                        f'xp/{4 * TIDCP_MAX}gx {TIDCP_LOG_PA + 0x20:#x}',
+                        *probe_cmds,
+                    ], settle=1.0 if probe_cmds else 0.4)
+                    until = time.time() + 15
+                    while time.time() < until and not all(
+                            f.exists() and f.stat().st_size >= size for _, (f, size) in stop_cmds):
+                        time.sleep(0.2)
+                    proc.kill()
+                    break
+                if disk_path and ('Got boot device' in cur or 'BSD root:' in cur or 'cannot mount root' in cur or 'Failed to mount root' in cur or 'panic' in cur):
+                    time.sleep(4.0)
                     monitor_text = _monitor_ask(mon, [
                         'info registers',
                         'x/4i $pc',
@@ -353,6 +377,22 @@ def boot(args):
         if args.drop_pcie:
             from dataclasses import replace as _replace3
             layout = _replace3(layout, drop_nodes=layout.drop_nodes + ('/device-tree/arm-io/pcie',))
+    disk = (0, 0)
+    disk_path = None
+    if getattr(args, 'root_disk', None):
+        disk_path = pathlib.Path(args.root_disk).resolve()
+        if not disk_path.exists():
+            print(f'FAIL: root disk not found: {disk_path}')
+            return 1
+        disk = (0xa0000000, disk_path.stat().st_size)
+        from dataclasses import replace as _replace_boot
+        # The template's arm-io window, so the PCIe memory range (and BAR0
+        # in it) translates; see ClassicLayout.armio_size.
+        layout = _replace_boot(layout, armio_size=0x70000000)
+        if getattr(args, 'boot_args', None):
+            layout = _replace_boot(layout, cmdline=args.boot_args)
+        else:
+            layout = _replace_boot(layout, cmdline=layout.cmdline + ' rd=disk0s1')
     payload, payload_pa, entry_pa, x0 = kcload.lay_out(kc, out, layout)
     mmio_log = out / 'mmio-trace.log'
     extra = []
@@ -367,9 +407,18 @@ def boot(args):
                                                    # The monitor layout's RAM and screen
                                                    # reach 0x9e258000; QEMU RAM starts at
                                                    # 0x40000000.
-                                                   memory='1536M' if args.monitor else '576M',
-                                                   s2=s2_range(layout) if args.monitor else (0, 0))
+                                                   memory='2048M' if (args.monitor or disk_path) else '576M',
+                                                   s2=s2_range(layout) if args.monitor else (0, 0),
+                                                   disk=disk, disk_path=disk_path)
+    try:
+        import fcntl
+        fl = fcntl.fcntl(1, fcntl.F_GETFL)
+        if fl & os.O_NONBLOCK:
+            fcntl.fcntl(1, fcntl.F_SETFL, fl & ~os.O_NONBLOCK)
+    except Exception:
+        pass
     sys.stdout.write(text)
+    sys.stdout.flush()
     print('--- smoke boot result ---')
     if timed_out:
         print(f'NO EXIT within {args.timeout}s; last serial above')
@@ -556,6 +605,8 @@ def report_monitor(text, mmio_log, out, screen=None):
         problems.append('the run stopped before the kernel banner')
     elif 'Waiting on' in text and 'IOMedia' in text:
         pass                                    # the harness timeout ends it here
+    elif 'Got boot device' in text or 'BSD root:' in text or 'AppleVirtIO' in text:
+        pass                                    # root disk detected and matched (Phase 4 P2)
     else:
         problems.append('the root-mount wait was not reached')
     for p in problems:
@@ -563,7 +614,10 @@ def report_monitor(text, mmio_log, out, screen=None):
     if problems:
         print('RESULT: FAIL (monitor boot)')
         return 1
-    print('RESULT: PASS (monitor: root-mount wait with no QEMU device visible)')
+    if 'Got boot device' in text or 'BSD root:' in text or 'AppleVirtIO' in text:
+        print('RESULT: PASS (monitor: root disk matched / mounted via VirtIO block controller)')
+    else:
+        print('RESULT: PASS (monitor: root-mount wait with no QEMU device visible)')
     return 0
 
 
@@ -582,6 +636,13 @@ def build(args):
 
 
 def main():
+    try:
+        import fcntl
+        fl = fcntl.fcntl(1, fcntl.F_GETFL)
+        if fl & os.O_NONBLOCK:
+            fcntl.fcntl(1, fcntl.F_SETFL, fl & ~os.O_NONBLOCK)
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest='cmd', required=True)
     b = sub.add_parser('build')
@@ -628,6 +689,10 @@ def main():
             s.add_argument('--keep-nodes', action='store_true',
                            help='with --monitor: keep the paravirtual device nodes the '
                                 'monitor layout otherwise drops (bisection aid)')
+            s.add_argument('--root-disk',
+                           help='path to raw root disk / APFS image to attach (Phase 4 P2)')
+            s.add_argument('--boot-args',
+                           help='override kernel command line arguments')
     a = ap.parse_args()
     return {'selftest': selftest, 'boot': boot, 'build': build}[a.cmd](a)
 
