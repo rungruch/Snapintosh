@@ -179,7 +179,7 @@ During Step P2 QEMU smoke boot validation with `test-root.raw`, the stock macOS 
    - In `probes/classicload.py`, the layout previously truncated `/arm-io` ranges to `0x40000000`.
    - The PCIe memory window begins at arm-io offset `0x40000000` (`ranges = 0x50000000` via parent `0x40000000`, size `0x2fff0000`).
    - With an `armio` size of `0x40000000`, `IOPCIBridge::getDTNubAddressing()` could not translate the BAR0 range in `assigned-addresses`, failing with `kIOReturnNotFound` and creating zero `IODeviceMemory` objects.
-   - Restoring the template's authoritative window size `0x70000000` allowed full address translation; `AppleVirtIOPCITransport` successfully mapped BAR0 into kernel memory.
+   - The baseline default stays `0x40000000` (AGENTS.md Rule 3). Only the opt-in `--root-disk` path in `smoke.py` widens it to the template's `0x70000000`, which allowed full address translation; `AppleVirtIOPCITransport` successfully mapped BAR0 into kernel memory.
 
 2. **Byte-Wise Device Configuration Space Reads:**
    - Disassembly and runtime tracing revealed `AppleVirtIOPCITransport` reads `virtio_blk_config` one byte at a time (e.g. 1-byte read of `max_secure_erase_sectors` at offset `0x3c` for root-variant detection).
@@ -195,6 +195,6 @@ During Step P2 QEMU smoke boot validation with `test-root.raw`, the stock macOS 
      nx_mount:1482: disk1 checkpoint search: largest xid 2, best xid 2 @ 3
      handle_mount:893: disk1s1 vol-uuid: 51EB8A19-CC0A-438E-A0E0-37BD22D66872 block size: 4096 block count: 7803
      apfs_log_op_with_proc:3279: disk1s1 mount-complete volume TestRoot, requested by: kernel_task (pid 0)
-     RESULT: PASS (monitor: root disk matched / mounted via VirtIO block controller)
+     RESULT: PASS (monitor: APFS root volume mounted via VirtIO block controller)
      ```
 

@@ -353,6 +353,39 @@ def test_monitor_bar():
             check(got == want, f'monitor bar, {name}: exit {got}, want {want}')
 
 
+def test_monitor_root_disk_gate():
+    """With --root-disk, PASS requires APFS mount-complete: driver match
+    or handle_mount alone must fail, and the non-root baseline is unchanged."""
+    import io, contextlib, tempfile
+    import smoke
+    base = 'EL2: monitor: stage 2 default-deny\nDarwin Kernel Version 27\n'
+
+    def run(extra, root_disk):
+        with tempfile.TemporaryDirectory() as d:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                got = smoke.report_monitor(base + extra, None, pathlib.Path(d),
+                                           root_disk=root_disk)
+            return got, buf.getvalue()
+
+    got, out = run('apfs_log_op_with_proc:3279: disk1s1 mount-complete volume TestRoot\n', True)
+    check(got == 0 and 'APFS root volume mounted via VirtIO block controller' in out,
+          f'root-disk mount-complete passes strictly: exit {got}, {out!r}')
+    for name, extra in (
+            ('handle_mount only', 'handle_mount:893: disk1s1 vol-uuid: x\n'),
+            ('AppleVirtIO only', 'AppleVirtIO matched\n'),
+            ('root-mount wait only', 'Waiting on <dict><key>IOProviderClass</key>'
+                                     '<string>IOMedia</string></dict>\n'),
+            ('named stop only', 'EL2: stop: unmodelled IPA 0000000000000000 read\n')):
+        got, out = run(extra, True)
+        check(got == 1 and 'RESULT: FAIL' in out and 'APFS root volume mounted' not in out,
+              f'root-disk {name} fails without mount-complete: exit {got}, {out!r}')
+    got, out = run('AppleVirtIO matched\n', False)
+    check(got == 0 and 'root disk matched via VirtIO block controller' in out
+          and 'APFS root volume mounted' not in out,
+          f'non-root AppleVirtIO baseline unchanged: exit {got}, {out!r}')
+
+
 def main():
     test_dt_completion()
     test_nvram()
@@ -363,6 +396,7 @@ def main():
     test_tidcp_report_distinguishes_empty_from_unreadable()
     test_mmio_report()
     test_monitor_bar()
+    test_monitor_root_disk_gate()
     print(f'PASS test-vmapple-smoke: {checks} checks')
 
 

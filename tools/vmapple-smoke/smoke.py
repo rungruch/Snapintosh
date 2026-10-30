@@ -433,7 +433,8 @@ def boot(args):
     kcload.report_tidcp(text, monitor_text, out)
     if args.monitor:
         return report_monitor(text, mmio_log if args.mmio_trace else None, out,
-                              screen=screen if args.framebuffer else None)
+                              screen=screen if args.framebuffer else None,
+                              root_disk=disk_path is not None)
     if args.mmio_trace:
         kcload.report_mmio(mmio_log.read_text(errors='replace') if mmio_log.exists() else '',
                            (out / 'devicetree.vma2smoke').read_bytes(), out)
@@ -529,12 +530,14 @@ def check_screen(screen, stop_line, out, mailbox=False, gic_line=None):
     return problems
 
 
-def report_monitor(text, mmio_log, out, screen=None):
+def report_monitor(text, mmio_log, out, screen=None, root_disk=False):
     """The Phase 3 P3 verdict: with no QEMU device visible to the guest,
     the boot reaches the root-mount wait, or the kernel's console and then a
     named stop at the first contract the monitor does not model (Phase 3's
     acceptance), and QEMU's MMIO trace shows only the monitor's own
-    devices."""
+    devices. With root_disk (--root-disk), the verdict is stricter: only
+    an APFS mount-complete line passes. Driver matching or handle_mount
+    alone fail, because both print before mounting finishes."""
     import kcload
     problems = []
     stopped = 'EL2: stop:' in text
@@ -597,16 +600,23 @@ def report_monitor(text, mmio_log, out, screen=None):
                             f'RD FRAME {int(m[3]) % 10}')
                 break
         problems += check_screen(screen, stop_line, out, mailbox, gic_line)
+    mounted = 'mount-complete' in text
     if stopped:
         if banner and 'RESULT' not in text:
-            for p in problems:
-                print(f'FAIL: {p}')
-            print('RESULT: ' + ('PASS' if not problems else 'FAIL') +
-                  ' (monitor: banner reached, then a named stop)')
-            return 0 if not problems else 1
-        problems.append('the run stopped before the kernel banner')
-    elif 'mount-complete' in text or 'handle_mount' in text:
+            if root_disk and not mounted:
+                problems.append('root-disk boot stopped before APFS mount-complete')
+            elif not root_disk:
+                for p in problems:
+                    print(f'FAIL: {p}')
+                print('RESULT: ' + ('PASS' if not problems else 'FAIL') +
+                      ' (monitor: banner reached, then a named stop)')
+                return 0 if not problems else 1
+        else:
+            problems.append('the run stopped before the kernel banner')
+    elif mounted:
         pass                                    # APFS root volume mounted (Phase 4 P2)
+    elif root_disk:
+        problems.append('root-disk boot did not reach APFS mount-complete')
     elif 'Waiting on' in text and 'IOMedia' in text:
         pass                                    # the harness timeout ends it here
     elif 'Got boot device' in text or 'BSD root:' in text or 'AppleVirtIO' in text:
@@ -618,7 +628,7 @@ def report_monitor(text, mmio_log, out, screen=None):
     if problems:
         print('RESULT: FAIL (monitor boot)')
         return 1
-    if 'mount-complete' in text or 'handle_mount' in text:
+    if mounted:
         print('RESULT: PASS (monitor: APFS root volume mounted via VirtIO block controller)')
     elif 'Got boot device' in text or 'BSD root:' in text or 'AppleVirtIO' in text:
         print('RESULT: PASS (monitor: root disk matched via VirtIO block controller)')
