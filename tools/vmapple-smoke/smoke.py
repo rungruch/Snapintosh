@@ -383,6 +383,8 @@ def boot(args):
         disk_path = pathlib.Path(args.root_disk).resolve()
         if not disk_path.exists():
             print(f'FAIL: root disk not found: {disk_path}')
+            print('To generate a minimal 32 MiB APFS test root image on macOS:')
+            print(f'  diskutil image create blank --format RAW --size 32m --fs APFS --volumeName TestRoot {disk_path}')
             return 1
         disk = (0xa0000000, disk_path.stat().st_size)
         from dataclasses import replace as _replace_boot
@@ -603,10 +605,12 @@ def report_monitor(text, mmio_log, out, screen=None):
                   ' (monitor: banner reached, then a named stop)')
             return 0 if not problems else 1
         problems.append('the run stopped before the kernel banner')
+    elif 'mount-complete' in text or 'handle_mount' in text:
+        pass                                    # APFS root volume mounted (Phase 4 P2)
     elif 'Waiting on' in text and 'IOMedia' in text:
         pass                                    # the harness timeout ends it here
     elif 'Got boot device' in text or 'BSD root:' in text or 'AppleVirtIO' in text:
-        pass                                    # root disk detected and matched (Phase 4 P2)
+        pass                                    # root disk detected and matched
     else:
         problems.append('the root-mount wait was not reached')
     for p in problems:
@@ -614,8 +618,10 @@ def report_monitor(text, mmio_log, out, screen=None):
     if problems:
         print('RESULT: FAIL (monitor boot)')
         return 1
-    if 'Got boot device' in text or 'BSD root:' in text or 'AppleVirtIO' in text:
-        print('RESULT: PASS (monitor: root disk matched / mounted via VirtIO block controller)')
+    if 'mount-complete' in text or 'handle_mount' in text:
+        print('RESULT: PASS (monitor: APFS root volume mounted via VirtIO block controller)')
+    elif 'Got boot device' in text or 'BSD root:' in text or 'AppleVirtIO' in text:
+        print('RESULT: PASS (monitor: root disk matched via VirtIO block controller)')
     else:
         print('RESULT: PASS (monitor: root-mount wait with no QEMU device visible)')
     return 0
