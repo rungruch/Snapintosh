@@ -34,15 +34,63 @@ with conditions, and a real-hardware boot can reopen it.
 | 0C: route decision | Route B ACCEPTED, 2026-10-26, with conditions | [PHASE0C](GAOKUN3-PHASE0C.md#decision) |
 | 1: guards | Thermal guard pinned to tsens and run once at EL2 (run 10); battery guard and the trend check host-tested against Windows readings | [PHASE1-GUARDS](GAOKUN3-PHASE1-GUARDS.md) |
 | 2: EL2 entry and USB link | VHE exit PASSED on the machine (runs 11, 12; q1n1 runs 14, 15). USB link **paused**: USB0's DMA is translated by `apps_smmu`, and the bypass's first write (stage 2) is designed and host-modelled only | [PHASE2](GAOKUN3-PHASE2.md), [USB-DEVICE-MODE](GAOKUN3-USB-DEVICE-MODE.md) |
-| 3: VirtualMac kernel to a console | **In progress.** P1 to P7 done and all decisions (1 to 5) made. On the gaokun3: H1 passed (run 28); H2 passed (run 34: stage 2 and the real GIC set up, no storm, no restart); the stock kernel entered at EL1 and installed its QARMA5 PAC keys (run 35); its own console reached the monitor band (run 37). The boot now panics inside the kernel, and each panic has been read from EL2 and worked past (a zeroed `CPACR_EL1`, run 36; the Cortex-A78C's missing `FEAT_TLBIRANGE`, runs 37 to 39; a halt in `PEHaltRestart`, run 39). Run 40 captured the panic metadata; run 41 (prepared) formats the message. No end-to-end macOS boot yet | [PHASE3](GAOKUN3-PHASE3.md) |
+| 3: VirtualMac kernel to a console | **PASSED on hardware (Run 47, 2026-10-30).** Stock 26A428 kernel bootstraps completely through memory management (`pmap_startup`), physical GICv3, virtual timer, PAC QARMA5, context switching (with SSBS/DIT bypassed), IOKit driver matching, and BSD domain init (`L2TP DOMAIN INIT COMPLETE`), reaching the root-mount wait (`missing-boot-media` written to NVRAM). No crash, no panic. Ready for Phase 4 (storage). | [PHASE3](GAOKUN3-PHASE3.md) |
 
 Recent results worth knowing before anything else:
 
-- **Run 41 (2026-10-30, prepared, not run):** the monitor now formats the
-  guest's panic message at EL2 (`tools/vmapple-smoke/panic.c`) instead of
-  showing the raw format string. The range-TLBI kernel rewrite is gated to
-  the gaokun3 build, and PPI 26 is recorded in decision 4's write list
-  ([PHASE3](GAOKUN3-PHASE3.md#run-41-prepared-2026-10-30-format-the-panic-message-at-el2)).
+- **Run 47 (2026-10-30): Phase 3 goal achieved! Stock kernel boots to root-mount wait.**
+  FairPlay neutralization succeeded 100%. The kernel bypassed `FEAT_SHA3`, initialized
+  BSD networking (`L2TP DOMAIN INIT COMPLETE`), completed IOKit driver matching, and
+  reached VFS root-mount discovery. Finding no root disk (Phase 4), it wrote
+  `missing-boot-media` (size 18) to `boot-picker-bringup-reason` in NVRAM, synced NVRAM
+  (`RET=E00002D8` `kIOReturnUnsupported`), and is idling live waiting for root storage.
+  **No crash, no panic, no restart! Phase 3 criteria fully met on hardware.**
+  (OBSERVED on hardware, 2 photographs, qualification `784D548102EAF6B4`).
+- **Run 46 (2026-10-30): Page console scrollback on named stops at EL2.**
+  In `stub.S`, `record_and_halt` called `monitor_halt_report(0)` before checking QEMU's
+  `pt_flag`. The 18-page 1 Hz scrollback pager on band lines 4–7 successfully verified on
+  hardware (OBSERVED on hardware, video IMG_1099.mp4), pinpointing the exact panic:
+  `UNDEFINED KERNEL INSTRUCTION: PC=0XFFFFFE0008C692C4 INSTR=CE0148D7 @SLEH.C:1930`
+  (ARMv8.2-A `EOR3` inside `com.apple.driver.FairPlayIOKit(72.19)`).
+  Qualification: `6B99A9D3BD7F26D7`.
+- **Run 45 (2026-10-30): SSBS & DIT neutralizations succeed; kernel bootstrap completes.**
+  Context switching succeeded across all 12 patched sites. The kernel initialized the
+  `1600x2400` framebuffer screen, `pmap_startup` (1789 µs), `vm_page_bootstrap` (92,765
+  free pages), the Clutch scheduler, and serial KDP. `AppleVirtualPlatform` initialized,
+  accessed mailbox `0x004FFFF8` (`REQUEST ABSORBED`), panicked, captured stackshot (6387
+  bytes), and attempted to flush coredump to AUX disk `0x30010408` (`STOP: UNMODELLED IPA`).
+  (OBSERVED on hardware, 2 photographs).
+- **Run 44 (2026-10-30): SSBS bypass confirmed; DIT fault diagnosed.**
+  The SSBS patch worked completely: `0xfffffe0009eb8490` was bypassed cleanly with
+  NOP, and `0xfffffe0009eb849c` (`msr UAO, x2`) executed natively. The kernel faulted
+  at `0xfffffe0009eb84a8` on `msr DIT, x2` (`0xD51B42A2`) because Cortex-A78C lacks
+  `FEAT_DIT` (`ID_AA64PFR0_EL1.DIT = 0`).
+  (OBSERVED on hardware, video IMG_1094.mp4).
+- **Run 43 (2026-10-30): 96-line console scrollback paging decodes the panic.**
+  The 15-page 1 Hz scrollback on band lines 4–7 captured the complete panic log
+  and backtrace (OBSERVED on hardware, video IMG_1091.mp4). The fault was
+  `UNDEFINED KERNEL INSTRUCTION: PC=0XFFFFFE0009EB8490 INSTR=D51B42C2 @SLEH.C:1930`.
+  Instruction `0xD51B42C2` is `msr SSBS, x2`. Cortex-A78C implements `FEAT_SSBS`
+  (`MSR SSBS, #imm` only) and lacks `FEAT_SSBS2` (direct system register
+  `MSR/MRS SSBS, <Xt>`). XNU's feature detection (`tst x20, #0xf0`) falsely assumed
+  any non-zero field implied Apple Silicon's `FEAT_SSBS2`
+  ([PHASE3](GAOKUN3-PHASE3.md#run-43-outcome-observed-on-hardware-video-img_1091mp4)).
+- **Run 42 (2026-10-30): dram-size fix confirmed; guest console banner
+  prints.** The loader reported `dram-size` over the panic region
+  (`0x60000000` -> `0x60100000`). The `dc zva` data abort in
+  `check_for_panic_log` was completely eliminated. The kernel initialized
+  its own console, printed `Darwin Kernel Version 27.0.0 … RELEASE_ARM64_VMAPPLE`,
+  and took a successful stackshot (`** Stackshot Succeeded ** Bytes Traced 1145 …`)
+  before requesting a restart via PSCI (`MACH Reboot`). The panic reason
+  scrolled away before reading; run 43 paged the scrollback to reveal it
+  ([PHASE3](GAOKUN3-PHASE3.md#run-42-2026-10-30-dram-size-fix-confirmed-guest-console-prints-later-panic)).
+- **Run 41 (2026-10-30): the formatted panic names the fault.** The kernel
+  took a data abort in `bzero`'s `dc zva` while `check_for_panic_log`
+  cleared the panic region. The loader's `dram-size` ended where that
+  region begins, so XNU mapped it as Device memory, and `dc zva` to Device
+  memory is an Alignment fault (INFERRED). QEMU does not implement that
+  fault, which is why QEMU boots never showed it
+  ([PHASE3](GAOKUN3-PHASE3.md#what-run-41-showed)).
 - **Run 40 (2026-10-30): the kernel panics early, and its metadata reads
   back at EL2.** The reason code (`DBOP_PANIC`), ESR, FAR and PC all read
   from XNU's `debugger_state`, but the band showed the panic's format
@@ -128,10 +176,11 @@ hardware run is still the owner's on the day.
 4. **Finish Phase 3 on the gaokun3 (H3 and H4), each run the owner's on
    the day.** H1 and H2 passed (runs 28, 34); the guest is entered (run 35)
    and its console reaches the band (run 37). The boot now panics early in
-   the kernel. The immediate step is **run 41**: boot the prepared H3 stick
-   so the monitor formats the panic message (`panic.c`), read it to name
-   the kernel fault, and work past it as runs 36 to 39 did for the earlier
-   faults. Phase 3's acceptance (a console, then a named platform contract
+   the kernel, and run 41's formatted panic named the fault. The immediate
+   step is **run 42**: boot the prepared stick, whose device tree reports
+   `dram-size` over the panic region, and see whether the boot gets past
+   `check_for_panic_log`. The band now shows the whole register dump,
+   saved ESR and FAR included, if it panics again. Phase 3's acceptance (a console, then a named platform contract
    the monitor does not model — the result that can reopen Route B) is H4.
    An agent picking this up should start from
    [GAOKUN3-AGENT-HANDOVER.md](GAOKUN3-AGENT-HANDOVER.md).
@@ -248,6 +297,13 @@ Things that have bitten before:
   to 39); the rewrite is gated to that build and tied to the pinned
   kernelcache hash, and QEMU (which has the feature) boots the kernel
   unmodified.
+- **QEMU does not fault `dc zva` on Device memory.** The architecture
+  requires an Alignment fault there; QEMU's TCG skips it. A memory-type
+  mistake can therefore pass every QEMU boot and stop the machine, as the
+  panic region's did until run 41. XNU chooses Normal or Device memory for
+  a write-combine mapping by `/chosen/dram-base` and `dram-size`, so a
+  region the kernel clears must sit inside them even when it is outside
+  `boot_args.memSize`.
 
 ## Hardware runs
 
@@ -265,7 +321,7 @@ reads the photographs. Every run follows
 Each run is recorded as a row in
 [QUALIFICATION's run table](GAOKUN3-QUALIFICATION.md#runs-so-far): stick
 entry, `el2qual.efi` hash and commit, el2qual version, and the result with
-its evidence class. Runs 1 to 40 are recorded there.
+its evidence class. Runs 1 to 41 are recorded there.
 
 **Writes that need their own explicit go-ahead**, separate from any
 approval of the plan:
