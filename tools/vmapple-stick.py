@@ -93,24 +93,32 @@ def q1n1_bundle(manifest, qualification):
     (a `monitor` entry in the manifest) extends it to 176 bytes with the
     monitor's entry and parameter page, the stage-2 RAM range and the
     screen split, for the H2 hand-off; --vmapple-place still accepts both,
-    the entering mode requires version 2."""
+    the entering mode requires version 2. Version 3 (a `ramdisk` entry)
+    extends version 2 to 192 bytes with the disk's address and size,
+    which q1n1 writes to the parameter page at +0x58/+0x60."""
     chunks = manifest['chunks']
     if not 0 < len(chunks) <= Q1N1_VMB_MAX:
         refusal(f'{len(chunks)} chunks; q1n1 places 1 to {Q1N1_VMB_MAX}')
     seed = manifest['seed']
     monitor = manifest.get('monitor')
+    ramdisk = manifest.get('ramdisk')
     if monitor is None:
         body = struct.pack('<8Q32s', Q1N1_VMB_MAGIC, 1, len(chunks), 112, manifest['entry_pa'],
                            manifest['boot_args_pa'], seed['pa'], seed['chunk'],
                            bytes.fromhex(qualification))
     else:
         fb = monitor['framebuffer']
-        body = struct.pack('<18Q32s', Q1N1_VMB_MAGIC, 2, len(chunks), 112,
-                           manifest['entry_pa'], manifest['boot_args_pa'],
-                           seed['pa'], seed['chunk'], monitor['entry_pa'],
-                           monitor['params_pa'], monitor['s2_lo'], monitor['s2_hi'],
-                           fb['pa'], fb['width'], fb['stride'], fb['guest_rows'],
-                           fb['band_rows'], 0, bytes.fromhex(qualification))
+        head = (Q1N1_VMB_MAGIC, 3 if ramdisk else 2, len(chunks), 112,
+                manifest['entry_pa'], manifest['boot_args_pa'],
+                seed['pa'], seed['chunk'], monitor['entry_pa'],
+                monitor['params_pa'], monitor['s2_lo'], monitor['s2_hi'],
+                fb['pa'], fb['width'], fb['stride'], fb['guest_rows'],
+                fb['band_rows'], 0)
+        if ramdisk is None:
+            body = struct.pack('<18Q32s', *head, bytes.fromhex(qualification))
+        else:
+            body = struct.pack('<20Q32s', *head, ramdisk['pa'], ramdisk['size'],
+                               bytes.fromhex(qualification))
     for c in chunks:
         path = '\\' + c['file'].replace('/', '\\')
         raw = path.encode('ascii')
@@ -121,12 +129,17 @@ def q1n1_bundle(manifest, qualification):
     return body
 
 
-def bundle_bytes(image, seed_pa, seed_chunk, monitor=None):
+def bundle_bytes(image, seed_pa, seed_chunk, monitor=None, ramdisk=None):
     """(manifest_dict, {relative path: bytes}) for a ClassicImage whose seed
     slot is empty (deferred_seed_image). `monitor` is (data, pa, params_pa,
     s2_range, framebuffer) for a version 2 bundle: the monitor image as one
     more chunk, entered at its first byte. framebuffer is
-    (pa, width, stride, guest_rows, band_rows) or None."""
+    (pa, width, stride, guest_rows, band_rows) or None. `ramdisk` is
+    (data, pa) for a Phase 4 P3 RAM-backed root disk: one more chunk,
+    recorded in the manifest, and bundle.bin version 3 carries its
+    address and size for q1n1 to write to the parameter page
+    (+0x58/+0x60). A ramdisk without a monitor is refused: the monitor
+    is what mediates it as a VirtIO block device."""
     files = {}
     chunks = []
     for i, (pa, data) in enumerate(image.chunks):
@@ -166,6 +179,25 @@ def bundle_bytes(image, seed_pa, seed_chunk, monitor=None):
             'framebuffer': {'pa': fb_pa, 'width': fb_width, 'stride': fb_stride,
                             'guest_rows': fb_guest, 'band_rows': fb_band},
         }
+    if ramdisk is not None:
+        data, pa = ramdisk
+        if monitor is None:
+            refusal('a ramdisk bundle needs a monitor to mediate the disk')
+        if not data:
+            refusal('a ramdisk chunk cannot be empty')
+        if pa % 0x4000:
+            refusal(f'the ramdisk at {pa:#x} is not 16 KiB aligned')
+        placed = sorted((c['pa'], c['pa'] + c['size']) for c in chunks)
+        if monitor is not None:
+            placed.append((manifest['monitor']['params_pa'],
+                           manifest['monitor']['params_pa'] + 0x1000))
+        for lo, hi in placed:
+            if pa < hi and lo < pa + len(data):
+                refusal(f'the ramdisk at {pa:#x} overlaps {lo:#x}')
+        name = f'{STICK_DIR}/chunk{len(chunks)}.bin'
+        files[name] = data
+        chunks.append({'file': name, 'pa': pa, 'size': len(data), 'sha256': _sha(data)})
+        manifest['ramdisk'] = {'chunk': len(chunks) - 1, 'pa': pa, 'size': len(data)}
     files[f'{STICK_DIR}/bundle.bin'] = q1n1_bundle(manifest, qualification_hash(manifest))
     return manifest, files
 
@@ -214,6 +246,15 @@ def build(args):
             reserved, firmware_reserved=regions(args.uefi_reserved))
     else:  # pragma: no cover - argparse choices guard this
         refusal(f'unknown layout {args.layout}')
+    if args.boot_args or args.ramdisk:
+        from dataclasses import replace
+        if args.boot_args:
+            layout = replace(layout, cmdline=args.boot_args)
+        if args.ramdisk:
+            # As smoke.py --root-disk: the PCIe memory range sits at
+            # arm-io offset 0x40000000, which the baseline window cannot
+            # translate, so BAR0 never maps (see ClassicLayout.armio_size).
+            layout = replace(layout, armio_size=0x70000000)
     image, seed_pa, seed_chunk = deferred_seed_image(args.kernelcache, dt_path, layout)
     validate_chunks(image, layout)
     monitor = None
@@ -229,7 +270,20 @@ def build(args):
             fb = (vbase, vwidth, vstride, vrows, brows)
         monitor = (pathlib.Path(args.monitor).read_bytes(), args.monitor_pa,
                    args.params_pa, s2, fb)
-    manifest, files = bundle_bytes(image, seed_pa, seed_chunk, monitor)
+    ramdisk = None
+    if args.ramdisk:
+        data = pathlib.Path(args.ramdisk).read_bytes()
+        occupied = [(pa, len(chunk)) for pa, chunk in image.chunks]
+        if monitor is not None:
+            occupied += [(monitor[1], len(monitor[0])), (monitor[2], 0x1000)]
+        if layout.video is not None:
+            vbase, _, vrows, vstride, _ = layout.video
+            occupied.append((vbase, vrows * vstride))
+        if layout.monitor_band is not None:
+            bbase, _, brows, bstride = layout.monitor_band
+            occupied.append((bbase, brows * bstride))
+        ramdisk = (data, classicload.place_ramdisk(layout, len(data), occupied))
+    manifest, files = bundle_bytes(image, seed_pa, seed_chunk, monitor, ramdisk)
     out = pathlib.Path(args.out)
     for name, data in files.items():
         (out / name).parent.mkdir(parents=True, exist_ok=True)
@@ -309,6 +363,10 @@ def main():
                    help='physical address the monitor image is placed and entered at')
     b.add_argument('--params-pa', type=lambda v: int(v, 0),
                    help='physical address of the parameter page q1n1 writes for the monitor')
+    b.add_argument('--ramdisk', help='raw root-disk image placed above the panic chunk '
+                                     'as one more bundle chunk (Phase 4 P3)')
+    b.add_argument('--boot-args', help='override the layout kernel command line '
+                                       '(e.g. to name the root device with --ramdisk)')
     b.add_argument('--out', required=True)
     c = sub.add_parser('check')
     c.add_argument('--out', required=True)

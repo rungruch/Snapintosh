@@ -468,6 +468,26 @@ def split_screen(layout, framebuffer, monitor_rows):
                                  stride)).validate()
 
 
+def place_ramdisk(layout, size, occupied=()):
+    """First 16 KiB-aligned PA for a RAM-backed root disk (Phase 4 P3).
+
+    The disk sits above the panic chunk, outside the DRAM the guest is
+    told it owns, so the kernel allocator can never hand its pages out:
+    the monitor reads it at EL2 and the guest only sees a VirtIO device,
+    as the QEMU smoke's loader disk at 0xa0000000 already does. There is
+    no host-side ceiling above the panic chunk; `occupied` must name
+    every range there (framebuffer, monitor band, other chunks), and on
+    hardware q1n1's AllocateAddress against the live map is the final
+    arbiter of whether the chosen address is free."""
+    if size <= 0:
+        raise ValueError('classic layout: a ramdisk needs a positive size')
+    pa = (layout.panic_pa + layout.panic_size + 0x3fff) & ~0x3fff
+    for lo, hi in sorted((base, base + span) for base, span in occupied):
+        if pa < hi and lo < pa + size:
+            pa = (hi + 0x3fff) & ~0x3fff
+    return pa
+
+
 # The gaokun3's screen: the device tree's simple-framebuffer at 0xC6200000,
 # 1600x2560 portrait (el2qual's DT read, runs 14-27, OBSERVED). Its no-map
 # region is 0xFA0000 bytes = 1600 * 2560 * 4, so the stride is 6400 bytes.

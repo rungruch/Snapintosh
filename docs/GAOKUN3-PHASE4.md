@@ -166,7 +166,7 @@ Placed at Bus 0, Device 1, Function 0 (`BDF 00:01.0`):
 | --- | --- | --- | --- |
 | **P1** | **VirtIO Block Controller Host Model** | Implement `storage.c`/`storage.h` with PCIe ECAM decoding, BAR0 registers, Modern VirtIO queue processing, and Apple variant tagging. Host test suite (`test-vmapple-storage.py`) with 100% PASS under ASan/UBSan. | **COMPLETE** (44 checks PASS) |
 | **P2** | **QEMU Smoke Boot with Root Disk** | Wire `storage.c` into `smoke.py`. Boot stock 26A428 kernel with a minimal test APFS disk under QEMU. Verify `AppleVirtIOBlockStorageDevice` matching, BAR0 mapping, virtqueue requests, and APFS root mount. | **COMPLETE** (mount-complete TestRoot, PASS) |
-| **P3** | **Stick Bundle Ramdisk Provisioning** | Add ramdisk chunk support to `probes/classicload.py`, `tools/vmapple-stick.py`, and q1n1 `--vmapple-place`. Memory layout verification. | **NEXT** |
+| **P3** | **Stick Bundle Ramdisk Provisioning** | Add ramdisk chunk support to `probes/classicload.py`, `tools/vmapple-stick.py`, and q1n1 `--vmapple-place`. Memory layout verification. | **COMPLETE** (host + QEMU rehearsal: `place_ramdisk` above the panic chunk, bundle.bin version 3, q1n1 places and enters, `mount-complete volume TestRoot` through the stick path; a stick build with a ramdisk must also widen the `/arm-io` window to `0x70000000` or BAR0 never maps) |
 | **P4** | **Hardware Qualification on gaokun3** | Boot on the tablet with the RAM-backed root disk. Verify `vfs_mountroot()` success and single-user shell or launchd transition. | Pending P3 |
 
 ---

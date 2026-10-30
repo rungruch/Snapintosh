@@ -22,6 +22,11 @@ Build q1n1 first:
       Q1N1_DEFINES="-DQ1N1_VHE_EXIT -DQ1N1_VMAPPLE_STICK -DQ1N1_VMAPPLE_TEST_SEED"
 
   python3 tools/test-vmapple-handoff-qemu.py [--kernelcache PATH] [--timeout 900]
+
+With --root-disk PATH the bundle is version 3 (Phase 4 P3): the disk is
+one more stick chunk, q1n1 writes its address and size to the monitor's
+parameter page, and the kernel must reach APFS mount-complete instead of
+the root-mount wait.
 """
 import argparse
 import importlib.util
@@ -52,10 +57,13 @@ def load(name, path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--kernelcache', default=str(DEFAULT_KC))
+    ap.add_argument('--root-disk', help='raw APFS root disk for a version 3 '
+                                        'bundle; the boot must mount it')
     ap.add_argument('--timeout', type=int, default=900)
     args = ap.parse_args()
     kc = pathlib.Path(args.kernelcache)
     if not kc.exists() or not Q1N1_EFI.exists() or not FIRMWARE.exists() \
+            or (args.root_disk and not pathlib.Path(args.root_disk).exists()) \
             or not shutil.which('qemu-system-aarch64'):
         print('SKIP: needs the locally extracted kernelcache, the q1n1 rehearsal '
               'build (see this file\'s header) and QEMU with EDK2')
@@ -67,12 +75,14 @@ def main():
     esp.mkdir(parents=True)
     _, stub_bin = smoke.build_image(smoke.llvm_dir(None), out, smoke.HERE / 'stub.S',
                                     'stub', MONITOR_PA)
-    built = subprocess.run(
-        [sys.executable, str(ROOT / 'tools' / 'vmapple-stick.py'), 'build',
-         '--kernelcache', str(kc), '--layout', 'qemu-monitor',
-         '--monitor', str(stub_bin), '--monitor-pa', hex(MONITOR_PA),
-         '--params-pa', hex(PARAMS_PA), '--out', str(esp)],
-        capture_output=True, text=True)
+    build_cmd = [sys.executable, str(ROOT / 'tools' / 'vmapple-stick.py'), 'build',
+                 '--kernelcache', str(kc), '--layout', 'qemu-monitor',
+                 '--monitor', str(stub_bin), '--monitor-pa', hex(MONITOR_PA),
+                 '--params-pa', hex(PARAMS_PA), '--out', str(esp)]
+    if args.root_disk:
+        build_cmd += ['--ramdisk', str(pathlib.Path(args.root_disk).resolve()),
+                      '--boot-args', '-v serial=3 -noprogress rd=disk0s1']
+    built = subprocess.run(build_cmd, capture_output=True, text=True)
     print(built.stdout, end='')
     if built.returncode:
         print(built.stderr)
@@ -91,6 +101,8 @@ def main():
         deadline = time.monotonic() + args.timeout
         while time.monotonic() < deadline and proc.poll() is None:
             text = serial.read_text(errors='replace') if serial.exists() else ''
+            if args.root_disk and 'mount-complete' in text:
+                break
             if 'Waiting on' in text and 'IOMedia' in text:
                 break
             if 'EL2: stop:' in text or 'panic(' in text:
@@ -109,7 +121,10 @@ def main():
             problems.append(f'no "{want}"')
     if 'SEED FROM RAW' in text:
         problems.append('the rehearsal claimed the RAW seed source')
-    if not ('Waiting on' in text and 'IOMedia' in text):
+    if args.root_disk:
+        if 'mount-complete' not in text:
+            problems.append('the APFS root volume did not mount (no mount-complete)')
+    elif not ('Waiting on' in text and 'IOMedia' in text):
         problems.append('the root-mount wait was not reached')
     if 'panic(' in text:
         problems.append('the guest panicked')
@@ -118,9 +133,15 @@ def main():
     if problems:
         print('FAIL vmapple-handoff-qemu (serial log: build/vmapple-handoff/serial.log)')
         return 1
-    print('PASS vmapple-handoff-qemu: q1n1 placed and kept the version 2 bundle, '
-          'entered the monitor at EL2, and the kernel reached the root-mount wait '
-          '(QEMU only; the seed was the test-only source, never RAW)')
+    if args.root_disk:
+        print('PASS vmapple-handoff-qemu: q1n1 placed and kept the version 3 bundle, '
+              'entered the monitor at EL2, and the kernel mounted the APFS root volume '
+              'from the stick ramdisk (QEMU only; the seed was the test-only source, '
+              'never RAW)')
+    else:
+        print('PASS vmapple-handoff-qemu: q1n1 placed and kept the version 2 bundle, '
+              'entered the monitor at EL2, and the kernel reached the root-mount wait '
+              '(QEMU only; the seed was the test-only source, never RAW)')
     return 0
 
 

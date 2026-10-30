@@ -359,6 +359,26 @@ def test_real_inputs(tmp):
         check(val == opcode, f'FairPlay {desc} at {hex(off)} matches stock opcode {hex(opcode)}: {hex(val)}')
 
 
+def test_ramdisk_placement():
+    """P3 ramdisk placement: above the panic chunk, outside the DRAM the
+    guest is told it owns, 16 KiB aligned, skipping occupied ranges."""
+    layout = classicload.QEMU_MONITOR_LAYOUT
+    panic_end = layout.panic_pa + layout.panic_size
+    pa = classicload.place_ramdisk(layout, 0x2000000)
+    check(pa == panic_end and pa % 0x4000 == 0,
+          f'ramdisk sits 16 KiB aligned directly above the panic chunk: {pa:#x}')
+    check(pa >= layout.ram_base + layout.mem_size,
+          'ramdisk is outside the reported guest DRAM')
+    fb = (0x9E000000, 600 * 4096)
+    pa = classicload.place_ramdisk(layout, 0x2000000, occupied=[fb])
+    check(pa == fb[0] + fb[1],
+          f'a ramdisk that would meet the framebuffer moves above it: {pa:#x}')
+    pa = classicload.place_ramdisk(layout, 0x100000, occupied=[(panic_end, 0x100000)])
+    check(pa == panic_end + 0x100000, f'occupied ranges are skipped: {pa:#x}')
+    check(refuses(classicload.place_ramdisk, layout, 0), 'a zero-size ramdisk is refused')
+    check(refuses(classicload.place_ramdisk, layout, -1), 'a negative ramdisk is refused')
+
+
 def main():
     test_profile()
     with tempfile.TemporaryDirectory() as d:
@@ -367,6 +387,7 @@ def main():
         test_monitor_layout(tmp)
         test_gaokun3_layout()
         test_device_windows()
+        test_ramdisk_placement()
         test_real_inputs(tmp)
     print(f'PASS test-vmapple-classic: {checks} checks')
 

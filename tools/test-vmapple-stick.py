@@ -15,6 +15,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools' / 'vmapple-smoke'))
 sys.path.insert(0, str(ROOT / 'probes'))
+import appledt
 import classicload
 
 _spec = importlib.util.spec_from_file_location('stick_tool', ROOT / 'tools' / 'vmapple-stick.py')
@@ -129,6 +130,46 @@ def main():
               and struct.unpack_from('<Q', binary, 8)[0] == 1,
               'a bundle without a monitor stays version 1, byte for byte')
 
+        disk_data = bytes(range(256)) * 64
+        disk_pa = classicload.place_ramdisk(layout, len(disk_data),
+                                            occupied=[(pa, s) for pa, s in
+                                                      [(c[0], len(c[1])) for c in image.chunks]])
+        check(refuses(stick.bundle_bytes, image, seed_pa, seed_chunk,
+                      None, (disk_data, disk_pa)),
+              'a ramdisk without a monitor is refused: nothing mediates it')
+        mon_rd = (mon_data, 0x40200000, 0x43000000, (0x81000000, 0x9D200000), None)
+        manifest_rd, files_rd = stick.bundle_bytes(image, seed_pa, seed_chunk,
+                                                   monitor=mon_rd,
+                                                   ramdisk=(disk_data, disk_pa))
+        rd = manifest_rd['ramdisk']
+        check(files_rd[manifest_rd['chunks'][rd['chunk']]['file']] == disk_data
+              and (rd['pa'], rd['size']) == (disk_pa, len(disk_data)),
+              'the ramdisk is a bundle chunk recorded in the manifest')
+        binary_rd = files_rd['Snapintosh/vmapple/bundle.bin']
+        count_rd = len(manifest_rd['chunks'])
+        check(len(binary_rd) == 192 + 112 * count_rd
+              and struct.unpack_from('<Q', binary_rd, 8)[0] == 3
+              and struct.unpack_from('<2Q', binary_rd, 144) == (disk_pa, len(disk_data))
+              and binary_rd[160:192] == bytes.fromhex(stick.qualification_hash(manifest_rd)),
+              'a ramdisk bundle is version 3: disk address and size before the '
+              'qualification hash')
+        out_rd = tmp / 'bundle-ramdisk'
+        for name, data in files_rd.items():
+            (out_rd / name).parent.mkdir(parents=True, exist_ok=True)
+            (out_rd / name).write_bytes(data)
+        (out_rd / 'manifest.json').write_text(json.dumps(manifest_rd, sort_keys=True))
+        check(stick.check(Args(out=str(out_rd))) == 0, 'check agrees with a ramdisk bundle')
+        check(refuses(stick.bundle_bytes, image, seed_pa, seed_chunk,
+                      mon_rd, (disk_data, disk_pa + 0x1000)),
+              'an unaligned ramdisk address is refused')
+        check(refuses(stick.bundle_bytes, image, seed_pa, seed_chunk,
+                      mon_rd, (disk_data, image.chunks[0][0])),
+              'a ramdisk overlapping a guest chunk is refused')
+        check(refuses(stick.bundle_bytes, image, seed_pa, seed_chunk,
+                      mon_rd, (b'', disk_pa)),
+              'an empty ramdisk is refused')
+        check('ramdisk' not in manifest, 'a bundle without a ramdisk is unchanged')
+
         chunk0 = out / 'Snapintosh' / 'vmapple' / 'chunk0.bin'
         chunk0.write_bytes(b'\x00' + files['Snapintosh/vmapple/chunk0.bin'][1:])
         check(refuses(stick.check, Args(out=str(out))), 'a tampered chunk is refused')
@@ -147,6 +188,28 @@ def main():
         check(refuses(stick.check, Args(out=str(out))), 'a bundle carrying a seed is refused')
         (out / name).write_bytes(files[name])
         (out / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+
+        real_dt = ROOT / 'downloads' / 'extracted' / 'vma2macosap' / 'DeviceTree.vma2macosap'
+        if not real_dt.exists():
+            print('SKIP test-vmapple-stick armio build: downloads/extracted/vma2macosap absent')
+        else:
+            mon_file = tmp / 'monitor.bin'
+            mon_file.write_bytes(mon_data)
+            disk_file = tmp / 'ramdisk.raw'
+            disk_file.write_bytes(disk_data)
+            for name, ramdisk_arg, want in (('plain', None, 0x40000000),
+                                            ('ramdisk', str(disk_file), 0x70000000)):
+                out_b = tmp / f'build-{name}'
+                rc = stick.build(Args(kernelcache=str(kc), layout='qemu-monitor',
+                                      reserved='', uefi_reserved='',
+                                      monitor=str(mon_file), monitor_pa=0x40200000,
+                                      params_pa=0x43000000, ramdisk=ramdisk_arg,
+                                      boot_args=None, out=str(out_b)))
+                ranges = appledt.DeviceTree((out_b / 'devicetree.bin').read_bytes()).get(
+                    '/device-tree/arm-io', 'ranges')
+                got = struct.unpack('<QQQ', ranges)[2]
+                check(rc == 0 and got == want,
+                      f'a {name} stick build writes the {want:#x} arm-io window: {got:#x}')
 
         sha = stick.qualification_hash(manifest)
         check(stick.check_boot(Args(out=str(out), qualification_sha256=sha)) == 0,
