@@ -269,6 +269,61 @@ _start:
 	str	w5, [x3]
 	dc	civac, x3
 2:
+	// Cortex-A78C implements ARMv8.2-A. It lacks:
+	// 1. FEAT_SSBS2 (ARMv8.5-A): direct system register MSR/MRS SSBS, <Xt>
+	//    (Op0=3, Op1=3, CRn=4, CRm=2, Op2=6). ID_AA64PFR1_EL1.SSBS is 0b0001
+	//    (FEAT_SSBS, MSR SSBS, #<imm> only). XNU falsely inferred FEAT_SSBS2
+	//    from any non-zero field (VERIFIED run 43, PC=0xfffffe0009eb8490).
+	// 2. FEAT_DIT (ARMv8.4-A): Data Independent Timing system register
+	//    MSR/MRS DIT, <Xt> (Op0=3, Op1=3, CRn=4, CRm=2, Op2=5). ID_AA64PFR0_EL1.DIT
+	//    is 0 (reset value 0x1100000010111112). XNU's context switch executes
+	//    MSR/MRS DIT unconditionally (VERIFIED run 44, PC=0xfffffe0009eb84a8 INSTR=D51B42A2).
+	// 3. FEAT_SHA3 (ARMv8.2-A SHA3 Cryptographic Extension): ID_AA64ISAR0_EL1.SHA3 is 0.
+	//    com.apple.driver.FairPlayIOKit compiles EOR3/BCAX/RAX1 directly without dynamic CPU
+	//    feature dispatch (VERIFIED run 46, PC=0xfffffe0008c692c4 INSTR=CE0148D7 eor3).
+	//    FairPlay is Apple's DRM subsystem and not required for root mount. Neutralize
+	//    FairPlayIOKit::start to return false (w0=0) and FairPlayIOKit::stop to return
+	//    immediately so IOKit cleanly detaches the service without triggering an undefined
+	//    instruction exception.
+	// Neutralize all 15 CPU feature mismatch sites:
+	adr	x6, cpu_feat_patch_table
+	mov	w7, #15
+3:
+	ldr	w2, [x6], #4		// offset from mh_va
+	ldr	w4, [x6], #4		// expected stock opcode
+	ldr	w5, [x6], #4		// replacement opcode
+	add	x3, x0, x2
+	ldr	w8, [x3]
+	cmp	w8, w4
+	b.ne	4f
+	str	w5, [x3]
+	dc	civac, x3
+4:
+	subs	w7, w7, #1
+	b.ne	3b
+	b	cpu_feat_patch_end
+
+	.p2align 2
+cpu_feat_patch_table:
+	// SSBS neutralization (FEAT_SSBS2 missing on Cortex-A78C)
+	.word	0x02eb4490, 0xd51b42c2, 0xd503201f	// Site 1: msr SSBS, x2  -> nop
+	.word	0x02eb46d4, 0xd53b42c4, 0xd2800004	// Site 2: mrs x4, SSBS  -> mov x4, #0
+	.word	0x02eb47b0, 0xd51b42c4, 0xd503201f	// Site 3: msr SSBS, x4  -> nop
+	.word	0x02eb48f4, 0xd53b42cc, 0xd280000c	// Site 4: mrs x12, SSBS -> mov x12, #0
+	.word	0x02eb49d4, 0xd53b42c2, 0xd2800002	// Site 5: mrs x2, SSBS  -> mov x2, #0
+	.word	0x02eb4ac8, 0xd51b42c2, 0xd503201f	// Site 6: msr SSBS, x2  -> nop
+	// DIT neutralization (FEAT_DIT missing on Cortex-A78C)
+	.word	0x02eb44a8, 0xd51b42a2, 0xd503201f	// Site 7: msr DIT, x2   -> nop
+	.word	0x02eb46e0, 0xd53b42a4, 0xd2800004	// Site 8: mrs x4, DIT   -> mov x4, #0
+	.word	0x02eb47c8, 0xd51b42a4, 0xd503201f	// Site 9: msr DIT, x4   -> nop
+	.word	0x02eb4900, 0xd53b42ac, 0xd280000c	// Site 10: mrs x12, DIT -> mov x12, #0
+	.word	0x02eb49e0, 0xd53b42a2, 0xd2800002	// Site 11: mrs x2, DIT  -> mov x2, #0
+	.word	0x02eb4ae0, 0xd51b42a2, 0xd503201f	// Site 12: msr DIT, x2  -> nop
+	// FairPlayIOKit FEAT_SHA3 neutralization (FEAT_SHA3 missing on Cortex-A78C)
+	.word	0x01c4027c, 0xd503237f, 0x52800000	// Site 13: FairPlay start pacibsp -> mov w0, #0
+	.word	0x01c40280, 0xa9be4ff4, 0xd65f03c0	// Site 14: FairPlay start stp     -> ret
+	.word	0x01c40308, 0xd503237f, 0xd65f03c0	// Site 15: FairPlay stop pacibsp  -> ret
+cpu_feat_patch_end:
 	dsb	sy
 	isb
 #endif
@@ -785,6 +840,14 @@ tidcp_record:
 	ret
 
 psci_off:
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	// The guest will not run again. Page its last console lines through
+	// the band (its panic log, in run 42's case), with interrupts still
+	// masked from the hvc entry; w26 is the PSCI function id.
+	mov	w0, w26
+	bl	monitor_halt_report		// returns only without a band
+	b	halt
+#endif
 	ldr	x0, =monitor_enabled
 	ldr	x0, [x0]
 	cbz	x0, smoke_exit
@@ -1311,15 +1374,19 @@ record_and_halt:
 	mrs	x0, HCR_EL2
 	str	x0, [x19, #FAULT_HCR]
 	dsb	sy
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+	// Page the console scrollback ring through the band on any named stop
+	// or unhandled fault, exactly as psci_off does on panic reset.
+	mov	w0, #0
+	bl	monitor_halt_report
+	b	halt
+#endif
 	// With the split console, stay up: the harness reads the screen
 	// through QEMU's monitor once this record appears, then ends the run.
 	ldr	x0, =pt_flag
 	ldr	x0, [x0]
 	tbnz	x0, #8, halt
 	// Stop QEMU so the harness does not wait out its timeout.
-#ifdef VMAPPLE_GAOKUN3_MONITOR
-	b	halt
-#endif
 	mov	x0, #0x18
 	ldr	x1, =0x20023		// ADP_Stopped_RunTimeError
 	hlt	#0xf000

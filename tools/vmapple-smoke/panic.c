@@ -143,22 +143,57 @@ static uint64_t rd64_va(uint64_t va, int *ok)
     return *(const volatile uint64_t *)(uintptr_t)pa;
 }
 
-/* Copy the C string at guest VA into buf, bounded by the page the VA
- * lands in (a longer string that crosses a page is truncated rather than
- * read through a stale translation). Returns 0 on success. */
+/* Copy the C string at guest VA into buf (at most cap-1 characters).
+ * Each 4 KiB page is translated on its own, because the guest's stage-1
+ * mapping need not be physically contiguous across pages (XNU's
+ * kernel-state panic format is 651 bytes and can cross one). A page that
+ * does not translate ends the string where it is. Returns 0 when the
+ * first page translated. */
 static int copy_str_va(uint64_t va, char *buf, unsigned cap)
 {
-    uint64_t par = mon_translate_va(va);
-    if (par & 1) { buf[0] = 0; return -1; }
-    uint64_t pa = (par & 0x0000fffffffff000ull) | (va & 0xfff);
-    unsigned page_left = 0x1000u - (unsigned)(va & 0xfff);
-    unsigned limit = cap - 1 < page_left ? cap - 1 : page_left;
-    mon_clean_range(pa, limit);
-    const volatile char *s = (const volatile char *)(uintptr_t)pa;
     unsigned i = 0;
-    for (; i < limit && s[i]; i++) buf[i] = s[i];
+    while (i + 1 < cap) {
+        uint64_t par = mon_translate_va(va);
+        if (par & 1) {
+            buf[i] = 0;
+            return i ? 0 : -1;
+        }
+        uint64_t pa = (par & 0x0000fffffffff000ull) | (va & 0xfff);
+        unsigned page_left = 0x1000u - (unsigned)(va & 0xfff);
+        unsigned limit = cap - 1 - i < page_left ? cap - 1 - i : page_left;
+        mon_clean_range(pa, limit);
+        const volatile char *s = (const volatile char *)(uintptr_t)pa;
+        for (unsigned j = 0; j < limit; j++) {
+            if (!s[j]) { buf[i] = 0; return 0; }
+            buf[i++] = s[j];
+        }
+        va += limit;
+    }
     buf[i] = 0;
     return 0;
+}
+
+/* The band's font has no glyph for a control character and draws it as
+ * '?', which turned XNU's "\n\t  x0:" into "??  x0:" (run 41). Draw each
+ * run of spaces, tabs and line breaks as one space instead, which also
+ * fits more of the register dump on each page. */
+static unsigned squeeze_space(char *s, unsigned n)
+{
+    unsigned k = 0;
+    int space = 0;
+    for (unsigned i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+            if (!space && k) s[k++] = ' ';
+            space = 1;
+        } else {
+            s[k++] = c;
+            space = 0;
+        }
+    }
+    if (k && s[k - 1] == ' ') k--;
+    s[k] = 0;
+    return k;
 }
 
 struct el2_args { uint64_t base; };
@@ -177,6 +212,59 @@ static int el2_str(void *ctx, uint64_t va, char *buf, unsigned cap)
     return copy_str_va(va, buf, cap);
 }
 
+/* ---- the guest's console scrollback (run 43) ----------------------------
+ * Once the kernel's console prints, XNU writes its whole panic log there:
+ * the panic string, the saved registers, the backtrace and the kext list.
+ * The band shows only the console's first line and its last three, so in
+ * run 42 the panic string scrolled away before it could be read. These are
+ * the last CONSOLE_SCROLL_LINES committed lines, kept so that a halted
+ * guest's console can be paged back through the band. */
+static char scroll[CONSOLE_SCROLL_LINES][CONSOLE_SCROLL_COLS];
+static unsigned scroll_next, scroll_count;
+
+void console_scroll_reset(void)
+{
+    scroll_next = 0;
+    scroll_count = 0;
+}
+
+void console_scroll_add(const char *line)
+{
+    unsigned i = 0;
+    for (; i + 1 < CONSOLE_SCROLL_COLS && line[i]; i++) scroll[scroll_next][i] = line[i];
+    scroll[scroll_next][i] = 0;
+    scroll_next = (scroll_next + 1) % CONSOLE_SCROLL_LINES;
+    if (scroll_count < CONSOLE_SCROLL_LINES) scroll_count++;
+}
+
+static const char *scroll_line(unsigned oldest_index)
+{
+    return scroll[(scroll_next + CONSOLE_SCROLL_LINES - scroll_count + oldest_index)
+                  % CONSOLE_SCROLL_LINES];
+}
+
+unsigned console_scroll_page(const char *out[], unsigned rows, unsigned page)
+{
+    for (unsigned r = 0; r < rows; r++) out[r] = "";
+    if (!scroll_count || !rows) return 0;
+    /* Start a few lines before XNU's first "panic(cpu N caller ...)" line,
+     * so the reason comes first and what the kernel printed just before
+     * it stays in view. Without one, start at the oldest line kept. */
+    unsigned start = 0;
+    for (unsigned i = 0; i < scroll_count; i++) {
+        const char *s = scroll_line(i);
+        if (s[0] == 'p' && s[1] == 'a' && s[2] == 'n' && s[3] == 'i' && s[4] == 'c' && s[5] == '(') {
+            start = i > CONSOLE_SCROLL_CONTEXT ? i - CONSOLE_SCROLL_CONTEXT : 0;
+            break;
+        }
+    }
+    unsigned pages = (scroll_count - start + rows - 1) / rows;
+    unsigned first = start + (page % pages) * rows;
+    for (unsigned r = 0; r < rows; r++)
+        if (first + r < scroll_count) out[r] = scroll_line(first + r);
+    return pages;
+}
+
 unsigned panic_render(char out[][PANIC_LINE_CAP], unsigned maxlines, unsigned width,
                       unsigned page, uint64_t fmt_va, uint64_t args_va)
 {
@@ -191,10 +279,15 @@ unsigned panic_render(char out[][PANIC_LINE_CAP], unsigned maxlines, unsigned wi
     struct el2_args ea = { ok ? list : args_va };
     struct panic_args pa = { el2_get, el2_str, &ea };
 
-    char fmt[256];
+    /* Static, not on the EL2 stack: XNU's kernel-state panic is a 651-byte
+     * format with 41 conversions and formats to about 1,100 characters,
+     * including the saved ESR and FAR on its last line. This runs from
+     * the CNTHP interrupt handler on the one CPU, never reentrantly. */
+    static char fmt[1024];
+    static char msg[1536];
     if (copy_str_va(fmt_va, fmt, sizeof fmt) != 0) return 0;
-    char msg[640];
     unsigned total = panic_format(msg, sizeof msg, fmt, &pa);
+    total = squeeze_space(msg, total);
 
     unsigned start = page * maxlines * width;
     for (unsigned l = 0; l < maxlines; l++) {

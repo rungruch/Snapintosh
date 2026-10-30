@@ -144,6 +144,31 @@ unsigned panic_format(char *out, unsigned cap, const char *fmt,
 unsigned panic_render(char out[][PANIC_LINE_CAP], unsigned maxlines, unsigned width,
                       unsigned page, uint64_t fmt_va, uint64_t args_va);
 
+/* The guest's console scrollback (panic.c): the last CONSOLE_SCROLL_LINES
+ * lines the PL011 model committed, each at most CONSOLE_SCROLL_COLS-1
+ * characters (the model wraps longer ones). */
+#define CONSOLE_SCROLL_LINES   96
+#define CONSOLE_SCROLL_COLS    128
+#define CONSOLE_SCROLL_CONTEXT 3   /* lines shown before the first "panic(" */
+void console_scroll_reset(void);
+void console_scroll_add(const char *line);
+/* Fill out[0..rows-1] with page `page` (modulo the page count) of the
+ * scrollback, starting CONSOLE_SCROLL_CONTEXT lines before the first line
+ * that begins "panic(", else at the oldest line. Pointers stay valid until
+ * the next console_scroll_add. Returns the page count, 0 when empty. */
+unsigned console_scroll_page(const char *out[], unsigned rows, unsigned page);
+
+/* Draw page `page` of the console scrollback on band lines 4 to 7, with
+ * `what` and the page number on line 2; from then on new console lines are
+ * kept but no longer drawn. Returns the page count (0 without the 160-row
+ * band). */
+unsigned monitor_console_page(unsigned page, const char *what);
+/* The guest called PSCI SYSTEM_OFF or SYSTEM_RESET (psci_fn). On the
+ * 160-row band, page the console scrollback forever, one page a second;
+ * EL2 runs with interrupts masked here and the guest never runs again.
+ * Returns only when there is no band to page on. */
+void monitor_halt_report(uint32_t psci_fn);
+
 extern uint64_t monitor_handled;     /* accesses a model answered */
 extern uint64_t monitor_stop_ipa;    /* IPA of the named stop, if any */
 extern int monitor_stop_write;       /* the stopped access was a write */

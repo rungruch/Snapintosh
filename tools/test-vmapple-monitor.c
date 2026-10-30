@@ -27,6 +27,10 @@ static uint32_t insn_page[1024] __attribute__((aligned(4096)));
  * to panic_mem so panic_render's guest reads hit a real host buffer.
  * Every other VA keeps aliasing insn_page, as the decoder tests expect. */
 static uint32_t panic_mem[1024] __attribute__((aligned(4096)));
+/* The guest page after panic_mem's, deliberately not adjacent on the host,
+ * so a string that crosses the guest page boundary is read correctly only
+ * if each page is translated on its own. */
+static uint32_t panic_mem2[1024] __attribute__((aligned(4096)));
 #define PANIC_VA_BASE 0xfffffe00c0000000ull
 static void pm_u64(unsigned off, uint64_t v) { memcpy((uint8_t *)panic_mem + off, &v, 8); }
 static void pm_str(unsigned off, const char *s) { strcpy((char *)panic_mem + off, s); }
@@ -117,6 +121,10 @@ uint64_t mon_translate_va(uint64_t va)
 {
     if (va >= PANIC_VA_BASE && va < PANIC_VA_BASE + 0x1000)
         return (uint64_t)(uintptr_t)panic_mem;   /* page aligned; low 12 bits select the datum */
+    if (va >= PANIC_VA_BASE + 0x1000 && va < PANIC_VA_BASE + 0x2000)
+        return (uint64_t)(uintptr_t)panic_mem2;
+    if (va >= PANIC_VA_BASE + 0x2000 && va < PANIC_VA_BASE + 0x3000)
+        return 1;                                /* PAR.F: a page that does not translate */
     return (uint64_t)(uintptr_t)insn_page;       /* PAR form: PA in [47:12] */
 }
 
@@ -478,6 +486,86 @@ int main(void)
         unsigned t1 = panic_render(plines, 2, 44, 1, PANIC_VA_BASE, PANIC_VA_BASE + 0x800);
         CHECK(t1 == 100 && plines[0][0] == 'B' && strlen(plines[0]) == 12 && plines[1][0] == 0,
               "panic_render page 1 continues the long message");
+
+        /* XNU's register dump separates lines with "\n\t  ": the band's
+         * font drew those as "??" in run 41. Each run of white space is one
+         * space now. */
+        memset(panic_mem, 0, sizeof panic_mem);
+        pm_str(0x000, "pc 0x%llx\n\t  x0:  0x%llx\n");
+        pm_u64(0x200, 0x28);
+        pm_u64(0x208, 0x40);
+        pm_u64(0x300, PANIC_VA_BASE + 0x200);
+        unsigned tw = panic_render(plines, 2, 44, 0, PANIC_VA_BASE, PANIC_VA_BASE + 0x300);
+        CHECK(tw == 16 && strcmp(plines[0], "pc 0x28 x0: 0x40") == 0,
+              "panic_render draws newlines, tabs and space runs as one space, none trailing");
+
+        /* A format string that crosses a guest page boundary: the second
+         * page is a different host buffer, so this passes only if the copy
+         * translates each page on its own (run 41 cut the format at 256
+         * bytes, before the saved ESR and FAR). */
+        memset(panic_mem, 0, sizeof panic_mem);
+        memset(panic_mem2, 0, sizeof panic_mem2);
+        memcpy((char *)panic_mem + 0xff8, "ESR 0x%l", 8);
+        strcpy((char *)panic_mem2, "lx FAR 0x%llx");
+        pm_u64(0x200, 0x96000021);
+        pm_u64(0x208, 0xfffffe000e004040ull);
+        pm_u64(0x300, PANIC_VA_BASE + 0x200);
+        unsigned tc = panic_render(plines, 2, 44, 0, PANIC_VA_BASE + 0xff8, PANIC_VA_BASE + 0x300);
+        CHECK(tc == 37 && strcmp(plines[0], "ESR 0x96000021 FAR 0xfffffe000e004040") == 0,
+              "panic_render reads a format string across a guest page boundary");
+
+        /* A string that runs into a page that does not translate ends there
+         * rather than reading past it. */
+        memset(panic_mem2, 'Z', sizeof panic_mem2);
+        memcpy((char *)panic_mem2 + 0xffc, "wxyz", 4);
+        unsigned tu = panic_render(plines, 2, 44, 0, PANIC_VA_BASE + 0x1ffc, PANIC_VA_BASE + 0x300);
+        CHECK(tu == 4 && strcmp(plines[0], "wxyz") == 0,
+              "a format string ends at a page that does not translate");
+        /* One with no terminator for longer than the buffer stops at it. */
+        memcpy((char *)panic_mem + 0xffc, "abcd", 4);
+        unsigned tl = panic_render(plines, 2, 44, 0, PANIC_VA_BASE + 0xffc, PANIC_VA_BASE + 0x300);
+        CHECK(tl == 1023 && strncmp(plines[0], "abcdZZZZ", 8) == 0,
+              "an unterminated format string is bounded by the 1 KiB buffer");
+        CHECK(panic_render(plines, 2, 44, 0, PANIC_VA_BASE + 0x2000, PANIC_VA_BASE + 0x300) == 0
+              && plines[0][0] == 0, "an untranslatable format string renders nothing");
+    }
+
+    /* The console scrollback (run 43): pages start a few lines before the
+     * first "panic(" line, and the ring keeps the newest lines. */
+    {
+        const char *rows[4];
+        char line[32];
+        console_scroll_reset();
+        CHECK(console_scroll_page(rows, 4, 0) == 0 && rows[0][0] == 0,
+              "an empty scrollback has no pages");
+        for (int i = 0; i < 10; i++) {
+            snprintf(line, sizeof line, i == 5 ? "panic(cpu 0 caller 0x1): boom" : "line %d", i);
+            console_scroll_add(line);
+        }
+        unsigned sp = console_scroll_page(rows, 4, 0);
+        CHECK(sp == 2 && strcmp(rows[0], "line 2") == 0 && strcmp(rows[3], "panic(cpu 0 caller 0x1): boom") == 0,
+              "the scrollback starts three lines before the first panic( line");
+        console_scroll_page(rows, 4, 1);
+        CHECK(strcmp(rows[0], "line 6") == 0 && strcmp(rows[3], "line 9") == 0,
+              "the second page follows the panic line");
+        console_scroll_page(rows, 4, 2);
+        CHECK(strcmp(rows[0], "line 2") == 0, "the page number wraps to the first page");
+        console_scroll_reset();
+        for (int i = 0; i < 100; i++) {
+            snprintf(line, sizeof line, "L%d", i);
+            console_scroll_add(line);
+        }
+        sp = console_scroll_page(rows, 4, 0);
+        CHECK(sp == 24 && strcmp(rows[0], "L4") == 0,
+              "a full ring keeps the newest 96 lines and, with no panic( line, starts at the oldest");
+        console_scroll_page(rows, 4, 23);
+        CHECK(strcmp(rows[3], "L99") == 0, "the last page ends at the newest line");
+        console_scroll_reset();
+        console_scroll_add("panic(cpu 0 caller 0x2): first");
+        console_scroll_add("panic(cpu 0 caller 0x3): nested");
+        console_scroll_page(rows, 4, 0);
+        CHECK(strcmp(rows[0], "panic(cpu 0 caller 0x2): first") == 0 && rows[2][0] == 0,
+              "a nested panic pages from the first panic( line, short pages padded empty");
     }
 
     /* The 160-row monitor band: overwriting a note clears the old glyphs,
@@ -555,7 +643,49 @@ int main(void)
             for (unsigned x = 0; x < 640; x++)
                 if (fb[y * 640 + x] == 0x0080ff80u) line4_still_green = 1;
         CHECK(line4_still_green, "PL011 banner on line 4 is preserved against subsequent telemetry/snapshot");
+
+        /* After the console starts, the EL2 timer keeps running (run 42
+         * stopped it) and draws nothing while the guest has not panicked. */
+        fake_iar = MON_INTID_HYPTIMER;
+        fake_cnthp_calls = 0;
+        monitor_irq();
+        CHECK(fake_cnthp_calls == 1, "the EL2 timer is re-armed after the console has started");
+
+        /* A panic after the console started pages the scrollback (cyan on
+         * lines 4 to 7) under a yellow heading on line 2. */
+        const char *plog = "panic(cpu 0 caller 0xfffffe0000000001): test reason\n";
+        for (unsigned i = 0; plog[i]; i++) access(MON_UART_IPA, 0, 5, 1, (uint8_t)plog[i]);
+
+        /* A console line longer than the band's 127 characters wraps. */
+        for (unsigned i = 0; i < 200; i++) access(MON_UART_IPA, 0, 5, 1, 'A');
+        access(MON_UART_IPA, 0, 5, 1, '\n');
+        const char *rows[4];
+        console_scroll_page(rows, 4, 1);
+        CHECK(strlen(rows[0]) == 127 && strlen(rows[1]) == 73,
+              "a 200-character console line is kept as 127 + 73, not cut");
+
+        fake_elr_el2 = 0xfffffe0009eb2758ull;
+        monitor_timer_snapshot();
+        fake_elr_el2 = 0xfffffe000a065974ull;
+        int head_yellow = 0, row4_cyan = 0, row4_green = 0;
+        for (unsigned y = 6 + 2 * 20; y < 6 + 2 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++)
+                if (fb[y * 640 + x] == 0x00ffff40u) head_yellow = 1;
+        for (unsigned y = 6 + 4 * 20; y < 6 + 4 * 20 + 14; y++)
+            for (unsigned x = 0; x < 640; x++) {
+                if (fb[y * 640 + x] == 0x00c0ffffu) row4_cyan = 1;
+                if (fb[y * 640 + x] == 0x0080ff80u) row4_green = 1;
+            }
+        CHECK(head_yellow && row4_cyan && !row4_green,
+              "a panic after the console started pages the console scrollback on lines 4 to 7");
+        console_scroll_page(rows, 4, 0);
+        CHECK(strcmp(rows[0], "line two") == 0
+              && strncmp(rows[3], "panic(cpu 0 caller", 18) == 0,
+              "the console page shown first leads with the panic( line's context");
+        CHECK(monitor_console_page(0, "PSCI SYSTEM_RESET: CONSOLE") == 2,
+              "monitor_console_page draws a page and reports the page count");
         monitor_set_band(0, 0, 0, 0, 0, 0);
+        CHECK(monitor_console_page(0, "X") == 0, "without the 160-row band nothing is paged");
     }
 
     if (failures) {

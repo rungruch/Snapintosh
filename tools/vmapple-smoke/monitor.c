@@ -438,6 +438,7 @@ static unsigned uart_cur_len;
 static int uart_first_set;
 static char uart_tail[3][UART_LINE_CAP];
 static unsigned uart_tail_count;
+static int console_paging;           /* the band pages the scrollback now */
 static uint32_t count_hvc;
 static uint32_t last_hvc_id;
 static uint32_t count_mmio;
@@ -497,6 +498,8 @@ void monitor_set_band(int on, uint64_t fb_pa, unsigned width, unsigned stride,
     last_mmio_ipa = 0;
     timer_snapshot_count = 0;
     panic_page = 0;
+    console_paging = 0;
+    console_scroll_reset();
     if (!on) return;
     for (unsigned y = 0; y < band_rows; y++)
         for (unsigned x = 0; x < band_width; x++) band_pixel(x, y, MON_BAND_BG);
@@ -595,7 +598,6 @@ void monitor_telemetry_hvc(uint32_t fn_id)
 void monitor_timer_snapshot(void)
 {
     timer_snapshot_count++;
-    if (uart_first_set) return;
 
     uint64_t elr_el2 = mon_elr_el2();
     uint64_t spsr_el2 = mon_spsr_el2();
@@ -659,6 +661,17 @@ void monitor_timer_snapshot(void)
     }
 
     if (!band_on || band_rows < 160) return;
+
+    /* Once the guest's console prints, the band is its mirror and the
+     * register snapshot stays off it; a panic then pages the console's own
+     * panic log back (run 42 lost it to the three-line window). */
+    if (uart_first_set) {
+        if (is_panic) {
+            unsigned pages = monitor_console_page(panic_page, "GUEST PANICKED: CONSOLE");
+            panic_page = pages ? (panic_page + 1) % pages : 0;
+        }
+        return;
+    }
 
     if (is_panic) {
         char l4[64], l5[64];
@@ -757,6 +770,8 @@ static void uart_copy_line(char *dst, const char *src)
 static void uart_band_commit(const char *s)
 {
     if (!s[0]) return;
+    console_scroll_add(s);
+    if (console_paging) return;
     if (!uart_first_set) {
         uart_first_set = 1;
         band_note(4, s, MON_BAND_BANNER);
@@ -793,8 +808,46 @@ static void uart_band_putc(char c)
         return;
     }
     if (c == '\t') c = ' ';
-    if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7f && uart_cur_len < UART_LINE_CAP - 1)
+    if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7f) {
+        if (uart_cur_len == UART_LINE_CAP - 1) uart_band_flush();   /* wrap, not cut */
         uart_cur[uart_cur_len++] = c;
+    }
+}
+
+unsigned monitor_console_page(unsigned page, const char *what)
+{
+    if (!band_on || band_rows < 160) return 0;
+    uart_band_flush();
+    const char *rows[4];
+    unsigned pages = console_scroll_page(rows, 4, page);
+    char head[64];
+    unsigned k = 0;
+    append_str(head, &k, what);
+    append_str(head, &k, " PAGE ");
+    append_dec(head, &k, pages ? page % pages + 1 : 0);
+    append_str(head, &k, "/");
+    append_dec(head, &k, pages);
+    head[k] = 0;
+    console_paging = 1;
+    band_text(2, head, 0x00ffff40u);
+    for (unsigned r = 0; r < 4; r++) band_text(4 + r, rows[r], MON_BAND_UART);
+    band_clean();
+    return pages;
+}
+
+void monitor_halt_report(uint32_t psci_fn)
+{
+    if (!band_on || band_rows < 160) return;
+    const char *what = psci_fn == PSCI_SYSTEM_RESET ? "PSCI SYSTEM_RESET: CONSOLE"
+                       : psci_fn == PSCI_SYSTEM_OFF ? "PSCI SYSTEM_OFF: CONSOLE"
+                       : "GUEST STOPPED: CONSOLE";
+    uint64_t frq = mon_cntfrq();
+    if (!frq) frq = 19200000;
+    for (unsigned page = 0;; page++) {
+        monitor_console_page(page, what);
+        uint64_t t0 = mon_cntpct();
+        while (mon_cntpct() - t0 < frq) { }
+    }
 }
 
 static void band_stop(uint64_t ipa, int write)
@@ -1079,12 +1132,12 @@ static void handle_physical(uint64_t iar, int group0)
 {
     uint64_t intid = iar & 0xffffff;
     if (intid == MON_INTID_HYPTIMER) {               /* EL2 physical timer snapshot */
-        if (!uart_first_set) {
-            uint64_t frq = mon_cntfrq();
-            if (!frq) frq = 19200000;
-            mon_cnthp_rearm((uint32_t)frq);
-            monitor_timer_snapshot();
-        }
+        /* Kept running after the console starts: the snapshot then draws
+         * only when the guest has panicked. */
+        uint64_t frq = mon_cntfrq();
+        if (!frq) frq = 19200000;
+        mon_cnthp_rearm((uint32_t)frq);
+        monitor_timer_snapshot();
         if (group0) mon_eoir0_write(iar);
         else mon_eoir1_write(iar);
         return;

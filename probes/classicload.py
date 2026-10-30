@@ -124,10 +124,28 @@ class ClassicLayout:
     # (classic_refuse_window_overlap). Only the Phase 0C smoke's layout
     # opts out, to stay as it was committed.
     check_device_windows: bool = True
+    # Report /chosen/dram-size over the guest's DRAM *and* the panic region
+    # above it, as iBoot does: dram-base/dram-size describe the physical
+    # DRAM, carved regions included, while boot_args.memSize stays the part
+    # the kernel manages. XNU's is_dram_addr() reads dram-size, and its
+    # write-combine mapping of the panic region (check_for_panic_log) is
+    # Normal Non-cacheable only inside it; outside, the region is Device
+    # memory and bzero's DC ZVA takes an Alignment fault, which is what
+    # stopped the gaokun3 boot in run 41 (published XNU xnu-12377.121.6,
+    # pmap.c and pe_init.c; QEMU does not implement that fault, so QEMU
+    # never showed it). Only the Phase 0C smoke's layout opts out, to stay
+    # as it was committed.
+    dram_covers_panic: bool = True
 
     @property
     def gicr_size(self):
         return self.guest_cpus * 0x20000    # RD_base + SGI_base per CPU
+
+    @property
+    def dram_size(self):
+        """/chosen/dram-size: the reported DRAM, plus the panic region when
+        dram_covers_panic (validate() requires it to sit directly above)."""
+        return self.mem_size + (self.panic_size if self.dram_covers_panic else 0)
 
     def validate(self):
         top = self.ram_base + self.mem_size
@@ -144,6 +162,11 @@ class ClassicLayout:
             raise ValueError('classic layout: panic region overlaps the reported guest DRAM')
         if self.panic_pa < self.top_of_kernel_data:
             raise ValueError('classic layout: panic region overlaps the loader data')
+        # A dram-size that covers the panic region must not also cover a
+        # hole between them: is_dram_addr() would call that hole DRAM.
+        if self.dram_covers_panic and self.panic_pa != top:
+            raise ValueError('classic layout: dram-size can cover the panic region only '
+                             'when it sits directly above the reported DRAM')
         if not 0 < self.panic_log_size <= self.panic_size:
             raise ValueError('classic layout: panic log size exceeds its region')
         if self.guest_cpus < 1 or self.timebase_hz < 1:
@@ -186,7 +209,8 @@ QEMU_CLASSIC_LAYOUT = ClassicLayout(
     # ECAM window (0x38000000-0x47ffffff), which the window check would
     # refuse; that boot reaches the root-mount wait regardless (OBSERVED),
     # most likely because the overlap ends below the kernel's page tables.
-    check_device_windows=False).validate()
+    # Its dram-size likewise stays memSize, as committed.
+    check_device_windows=False, dram_covers_panic=False).validate()
 
 
 # QEMU virt with the Route B monitor (Phase 3 P3): the tree keeps the
@@ -346,7 +370,7 @@ def classic_complete_dt(dt, layout, entropy):
            struct.pack('<I', layout.panic_log_size))
 
     dt.add('/device-tree/chosen', 'dram-base', struct.pack('<Q', layout.ram_base))
-    dt.add('/device-tree/chosen', 'dram-size', struct.pack('<Q', layout.mem_size))
+    dt.add('/device-tree/chosen', 'dram-size', struct.pack('<Q', layout.dram_size))
     classic_trim_cpus(dt, layout.guest_cpus)
     dt.set_u32('/device-tree', 'clock-frequency', layout.timebase_hz)
     changed = dt.set_all('timebase-frequency', struct.pack('<Q', layout.timebase_hz),

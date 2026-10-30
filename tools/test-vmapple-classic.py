@@ -93,6 +93,9 @@ def test_classic_image(tmp):
     from dataclasses import replace as _replace
     check(refuses(lambda: _replace(layout, panic_pa=layout.top_of_kernel_data).validate()),
           'a panic region inside the reported DRAM is refused')
+    check(not layout.dram_covers_panic
+          and dt.get('/device-tree/chosen', 'dram-size') == struct.pack('<Q', layout.mem_size),
+          'the Phase 0C layout keeps dram-size = memSize, as committed')
     args = image.payload[layout.boot_args_pa - layout.ram_base:
                          layout.boot_args_pa - layout.ram_base + classicload.BOOT_ARGS_SIZE]
     check(bytes(args) == kcload._boot_args(seg_va, layout.dt_pa - layout.ram_base + seg_va,
@@ -141,6 +144,23 @@ def test_monitor_layout(tmp):
     check(dt.get('/device-tree/arm-io/uart0', 'reg')
           == struct.pack('<QQ', 0x10010000, 0x1000), 'the PL011 stays at its template IPA')
 
+    # dram-size covers the panic region (run 41): XNU's is_dram_addr()
+    # reads it, and outside it the panic region's write-combine mapping is
+    # Device memory, where bzero's DC ZVA takes an Alignment fault.
+    dram_base = struct.unpack('<Q', dt.get('/device-tree/chosen', 'dram-base'))[0]
+    dram_size = struct.unpack('<Q', dt.get('/device-tree/chosen', 'dram-size'))[0]
+    check(dram_base == layout.ram_base and dram_size == layout.mem_size + layout.panic_size,
+          'monitor layout: dram-size spans the reported DRAM and the panic region')
+    check(dram_base <= layout.panic_pa
+          and layout.panic_pa + layout.panic_size <= dram_base + dram_size,
+          'monitor layout: the whole panic region is inside dram-base..dram-size')
+    check(not (layout.ram_base <= layout.panic_pa < layout.ram_base + layout.mem_size),
+          'monitor layout: the panic region stays outside boot_args.memSize')
+    check(refuses(lambda: replace(layout, panic_pa=layout.panic_pa + 0x4000).validate()),
+          'a panic region with a hole below it cannot be covered by dram-size')
+    check(replace(layout, panic_pa=layout.panic_pa + 0x4000, dram_covers_panic=False).validate(),
+          'without the cover, a panic region with a hole below it is still accepted')
+
 
 # Reserved regions measured from the gaokun3's SLB device tree
 # (build/phase1/gaokun3-el2.dts, reserved-memory) plus its UEFI GOP
@@ -173,6 +193,8 @@ def test_gaokun3_layout():
               f'the guest window avoids reserved region {base:#x}')
     check(layout.panic_pa == layout.ram_base + layout.mem_size,
           'the panic chunk sits just above the reported DRAM')
+    check(layout.dram_covers_panic and layout.dram_size == layout.mem_size + layout.panic_size,
+          'gaokun3: dram-size covers the panic region (run 41)')
     # Run 24: UEFI reserves 0xC6200000-0xC8600000, past the tree's region.
     uefi = [(0xC6200000, 0x2400000)]
     both = classicload.derive_gaokun3_layout(GAOKUN3_RESERVED, firmware_reserved=uefi)
@@ -289,6 +311,52 @@ def test_real_inputs(tmp):
     check(payload.read_bytes() == mine.payload, 'smoke lay_out is byte-identical to the xnuboot loader')
     check((payload_pa, entry_pa, x0) == (mine.payload_pa, mine.entry_pa, mine.boot_args_pa),
           'smoke lay_out returns the xnuboot addresses')
+
+    # gaokun3 runtime kernel patches: verify the stock opcodes in the pinned
+    # 26A428 kernelcache against stub.S's patch tables.
+    data = kc.read_bytes()
+    import struct
+    # Range TLBI sites
+    w1 = struct.unpack_from('<I', data, 0x3061870)[0]
+    check(w1 == 0x54000483, f'TLBI range site 1 is b.lo +0x90: {hex(w1)}')
+    w2 = struct.unpack_from('<I', data, 0x306a014)[0]
+    check(w2 == 0x54000148, f'TLBI range site 2 is b.hi +0x28: {hex(w2)}')
+
+    # SSBS FEAT_SSBS2 neutralization sites (ARMv8.5 sysreg missing on Cortex-A78C)
+    ssbs_expected = [
+        (0x02eb4490, 0xd51b42c2, 'Site 1: msr SSBS, x2'),
+        (0x02eb46d4, 0xd53b42c4, 'Site 2: mrs x4, SSBS'),
+        (0x02eb47b0, 0xd51b42c4, 'Site 3: msr SSBS, x4'),
+        (0x02eb48f4, 0xd53b42cc, 'Site 4: mrs x12, SSBS'),
+        (0x02eb49d4, 0xd53b42c2, 'Site 5: mrs x2, SSBS'),
+        (0x02eb4ac8, 0xd51b42c2, 'Site 6: msr SSBS, x2'),
+    ]
+    for off, opcode, desc in ssbs_expected:
+        val = struct.unpack_from('<I', data, off)[0]
+        check(val == opcode, f'SSBS {desc} at {hex(off)} matches stock opcode {hex(opcode)}: {hex(val)}')
+
+    # DIT FEAT_DIT neutralization sites (ARMv8.4 sysreg missing on Cortex-A78C)
+    dit_expected = [
+        (0x02eb44a8, 0xd51b42a2, 'Site 7: msr DIT, x2'),
+        (0x02eb46e0, 0xd53b42a4, 'Site 8: mrs x4, DIT'),
+        (0x02eb47c8, 0xd51b42a4, 'Site 9: msr DIT, x4'),
+        (0x02eb4900, 0xd53b42ac, 'Site 10: mrs x12, DIT'),
+        (0x02eb49e0, 0xd53b42a2, 'Site 11: mrs x2, DIT'),
+        (0x02eb4ae0, 0xd51b42a2, 'Site 12: msr DIT, x2'),
+    ]
+    for off, opcode, desc in dit_expected:
+        val = struct.unpack_from('<I', data, off)[0]
+        check(val == opcode, f'DIT {desc} at {hex(off)} matches stock opcode {hex(opcode)}: {hex(val)}')
+
+    # FairPlay FEAT_SHA3 neutralization sites (ARMv8.2-A SHA3 missing on Cortex-A78C)
+    fairplay_expected = [
+        (0x01c4027c, 0xd503237f, 'Site 13: FairPlay start pacibsp -> mov w0, #0'),
+        (0x01c40280, 0xa9be4ff4, 'Site 14: FairPlay start stp     -> ret'),
+        (0x01c40308, 0xd503237f, 'Site 15: FairPlay stop pacibsp  -> ret'),
+    ]
+    for off, opcode, desc in fairplay_expected:
+        val = struct.unpack_from('<I', data, off)[0]
+        check(val == opcode, f'FairPlay {desc} at {hex(off)} matches stock opcode {hex(opcode)}: {hex(val)}')
 
 
 def main():
