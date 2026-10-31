@@ -1168,11 +1168,6 @@ static void handle_physical(uint64_t iar, int group0)
         uint64_t frq = mon_cntfrq();
         if (!frq) frq = 19200000;
         mon_cnthp_rearm((uint32_t)frq);
-#ifdef VMAPPLE_GAOKUN3_MONITOR
-        if ((mon_lr0_read() >> 62) == 0) {
-            mon_redist_write(GICR_ISENABLER0, GUEST_TIMER_PPIS);
-        }
-#endif
         monitor_timer_snapshot();
         if (group0) mon_eoir0_write(iar);
         else mon_eoir1_write(iar);

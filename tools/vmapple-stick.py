@@ -251,7 +251,7 @@ def build(args):
         if args.boot_args:
             layout = replace(layout, cmdline=args.boot_args)
         elif args.ramdisk:
-            layout = replace(layout, cmdline=layout.cmdline + ' amfi_get_out_of_my_way=1 -s -nobsdmgroot rd=disk0s1')
+            layout = replace(layout, cmdline=layout.cmdline + ' rd=disk0s1')
         if args.ramdisk:
             # As smoke.py --root-disk: the PCIe memory range sits at
             # arm-io offset 0x40000000, which the baseline window cannot

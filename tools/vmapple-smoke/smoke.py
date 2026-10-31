@@ -411,7 +411,7 @@ def boot(args):
         if getattr(args, 'boot_args', None):
             layout = _replace_boot(layout, cmdline=args.boot_args)
         else:
-            layout = _replace_boot(layout, cmdline=layout.cmdline + ' amfi_get_out_of_my_way=1 -s -nobsdmgroot rd=disk0s1')
+            layout = _replace_boot(layout, cmdline=layout.cmdline + ' rd=disk0s1')
     payload, payload_pa, entry_pa, x0 = kcload.lay_out(kc, out, layout)
     mmio_log = out / 'mmio-trace.log'
     extra = []
