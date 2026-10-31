@@ -658,6 +658,20 @@ void monitor_timer_snapshot(void)
 
 #ifdef VMAPPLE_GAOKUN3_MONITOR
     update_line1_storage();
+    if ((spsr_el2 & 0x0fu) == 0 ||
+        (elr_el2 >= 0x100000000ull && elr_el2 < 0xffff000000000000ull) ||
+        (elr_el1 >= 0x100000000ull && elr_el1 < 0xffff000000000000ull)) {
+        band_note_line(2, "USERSPACE: PID 1 RUNNING (/sbin/launchd)", 0x00ffff40u);
+        char l3[64];
+        unsigned k = 0;
+        append_str(l3, &k, "EL0 PC ");
+        uint64_t user_pc = ((spsr_el2 & 0x0fu) == 0) ? elr_el2 : elr_el1;
+        append_hex(l3, &k, user_pc, 16);
+        append_str(l3, &k, " SPSR ");
+        append_hex(l3, &k, spsr_el2, 8);
+        l3[k] = 0;
+        band_note_line(3, l3, 0x00ffff40u);
+    }
 #endif
 
     /* Once the guest's console prints, the band is its mirror and the
@@ -1154,6 +1168,11 @@ static void handle_physical(uint64_t iar, int group0)
         uint64_t frq = mon_cntfrq();
         if (!frq) frq = 19200000;
         mon_cnthp_rearm((uint32_t)frq);
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+        if ((mon_lr0_read() >> 62) == 0) {
+            mon_redist_write(GICR_ISENABLER0, GUEST_TIMER_PPIS);
+        }
+#endif
         monitor_timer_snapshot();
         if (group0) mon_eoir0_write(iar);
         else mon_eoir1_write(iar);
