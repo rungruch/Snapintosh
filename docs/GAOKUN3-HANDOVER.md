@@ -35,10 +35,17 @@ with conditions, and a real-hardware boot can reopen it.
 | 1: guards | Thermal guard pinned to tsens and run once at EL2 (run 10); battery guard and the trend check host-tested against Windows readings | [PHASE1-GUARDS](GAOKUN3-PHASE1-GUARDS.md) |
 | 2: EL2 entry and USB link | VHE exit PASSED on the machine (runs 11, 12; q1n1 runs 14, 15). USB link **paused**: USB0's DMA is translated by `apps_smmu`, and the bypass's first write (stage 2) is designed and host-modelled only | [PHASE2](GAOKUN3-PHASE2.md), [USB-DEVICE-MODE](GAOKUN3-USB-DEVICE-MODE.md) |
 | 3: VirtualMac kernel to a console | **PASSED on hardware (Run 47, 2026-10-30).** Stock 26A428 kernel bootstraps completely through memory management (`pmap_startup`), physical GICv3, virtual timer, PAC QARMA5, context switching (with SSBS/DIT bypassed), IOKit driver matching, and BSD domain init (`L2TP DOMAIN INIT COMPLETE`), reaching the root-mount wait (`missing-boot-media` written to NVRAM). No crash, no panic. Ready for Phase 4 (storage). | [PHASE3](GAOKUN3-PHASE3.md) |
-| 4: Storage mediation and root mount | **IN PROGRESS (2026-10-30).** Step P1 (host model) and Step P2 (QEMU smoke boot validation with APFS mount-complete) PASSED. Step P3 (stick bundle ramdisk provisioning) next. | [PHASE4](GAOKUN3-PHASE4.md) |
+| 4: Storage mediation and root mount | **PASSED on hardware (Run 48, 2026-10-31).** Stock 26A428 VirtualMac2,1 kernel mounted APFS root filesystem (`TestRoot`) from RAM-backed VirtIO block device on PCIe. `ACT=1`, `BAR0=226`, `VQ=62`, `IRQ=65`. Line 2 locked in green: `APFS MOUNT: COMPLETE (VOLUME TESTROOT)`. Zero NVMe writes. | [PHASE4](GAOKUN3-PHASE4.md) |
 
 Recent results worth knowing before anything else:
 
+- **Run 48 (2026-10-31): Phase 4 goal achieved! Root APFS filesystem mounted on hardware.**
+  The stock 26A428 VirtualMac2,1 kernel mounted the APFS root volume (`TestRoot`, `disk1s1`)
+  from the RAM-backed VirtIO block device on PCIe. The monitor verified `ACT=1`, `PA=0x162108000`,
+  `SZ=0x01E84800` (32 MB), `BAR0=226` (226 MMIO transactions), `VQ=62` (all 62 virtqueue requests
+  completed), and `IRQ=65` (GICv3 virtual interrupt delivery). Line 2 permanently locked in green:
+  `APFS MOUNT: COMPLETE (VOLUME TESTROOT)`. Zero NVMe writes (Rule 5).
+  (VERIFIED on hardware, panel photograph, qualification `8850C93FC6FFEEA2`).
 - **Run 47 (2026-10-30): Phase 3 goal achieved! Stock kernel boots to root-mount wait.**
   FairPlay neutralization succeeded 100%. The kernel bypassed `FEAT_SHA3`, initialized
   BSD networking (`L2TP DOMAIN INIT COMPLETE`), completed IOKit driver matching, and
