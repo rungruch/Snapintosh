@@ -40,6 +40,14 @@ with conditions, and a real-hardware boot can reopen it.
 
 Recent results worth knowing before anything else:
 
+- **Run 53 (2026-10-31): Armed on USB stick for hardware execution.**
+  Updated freestanding `/sbin/launchd` syscalls to `0x2000004` (`SYS_write`) and `0x2000005` (`SYS_open`).
+  Armed Line 2 to latch `USERSPACE: PID 1 RUNNING (/sbin/launchd)` in yellow on `sd.vq_requests >= 65`
+  or EL0 register detection. Line 3 reports live EL0 PC / SPSR or storage progress.
+- **Run 52 (2026-10-31): Phase 5 launchd load verified on clean boot arguments.**
+  Restored clean `-v serial=3 -noprogress rd=disk0s1`. Darwin mounted APFS `TestRoot`
+  (`APFS MOUNT: COMPLETE` in green) and read `/sbin/launchd` (`BAR0=232, VQ=65, IRQ=65`).
+  (VERIFIED on hardware, photograph `media_1793450257904_85adce04.jpg`).
 - **Run 51 (2026-10-31): Userspace telemetry monitor test.**
   Added hardware EL0 detection (`spsr_el2 & 0x0f == 0` / user virtual PC on `elr_el2` / `elr_el1`)
   and redistributor virtual timer PPI re-arm. In Run 51 with `-s -nobsdmgroot`, the block device initialized
