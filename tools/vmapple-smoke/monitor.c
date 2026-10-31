@@ -776,6 +776,11 @@ static void uart_band_commit(const char *s)
             band_note_line(2, "APFS MOUNT: COMPLETE (volume TestRoot)", 0x0080ff80u);
             break;
         }
+        if (p[0] == 'U' && p[1] == 'S' && p[2] == 'E' && p[3] == 'R' &&
+            p[4] == 'S' && p[5] == 'P' && p[6] == 'A' && p[7] == 'C' && p[8] == 'E') {
+            band_note_line(2, "USERSPACE: PID 1 RUNNING (/sbin/launchd)", 0x00ffff40u);
+            break;
+        }
     }
 #endif
     if (console_paging) return;

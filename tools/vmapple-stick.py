@@ -250,11 +250,14 @@ def build(args):
         from dataclasses import replace
         if args.boot_args:
             layout = replace(layout, cmdline=args.boot_args)
+        elif args.ramdisk:
+            layout = replace(layout, cmdline=layout.cmdline + ' amfi_get_out_of_my_way=1 -s -nobsdmgroot rd=disk0s1')
         if args.ramdisk:
             # As smoke.py --root-disk: the PCIe memory range sits at
             # arm-io offset 0x40000000, which the baseline window cannot
             # translate, so BAR0 never maps (see ClassicLayout.armio_size).
-            layout = replace(layout, armio_size=0x70000000)
+            layout = replace(layout, armio_size=0x70000000,
+                             boot_uuid='CC453B28-C3F1-49AD-B0A5-389C17A60F40')
     image, seed_pa, seed_chunk = deferred_seed_image(args.kernelcache, dt_path, layout)
     validate_chunks(image, layout)
     monitor = None

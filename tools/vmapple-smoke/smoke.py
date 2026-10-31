@@ -231,8 +231,8 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, 
                         time.sleep(0.2)
                     proc.kill()
                     break
-                if disk_path and ('Got boot device' in cur or 'BSD root:' in cur or 'cannot mount root' in cur or 'Failed to mount root' in cur or 'panic' in cur):
-                    time.sleep(4.0)
+                if disk_path and ('[USERSPACE]' in cur or 'cannot mount root' in cur or 'Failed to mount root' in cur or 'panic' in cur):
+                    time.sleep(1.0)
                     monitor_text = _monitor_ask(mon, [
                         'info registers',
                         'x/4i $pc',
@@ -246,6 +246,23 @@ def run_qemu(qemu, out, stub_bin, payload_bin, payload_pa, entry_pa, x0, flags, 
                         time.sleep(0.2)
                     proc.kill()
                     break
+                if disk_path and 'mount-complete' in cur:
+                    # Give Darwin up to 180 seconds in TCG emulation after mount to execute userspace init
+                    if not hasattr(proc, 'mount_time'):
+                        proc.mount_time = time.time()
+                    elif time.time() - proc.mount_time > 180.0:
+                        monitor_text = _monitor_ask(mon, [
+                            'info registers',
+                            'x/4i $pc',
+                            'xp/4gx 0x84c0a360',
+                            'xp/4wx 0x84bdf2d0',
+                            f'pmemsave 0x81000000 0x8000000 "{out / "ram.raw"}"',
+                            f'xp/4gx {TIDCP_LOG_PA:#x}',
+                            f'xp/{4 * TIDCP_MAX}gx {TIDCP_LOG_PA + 0x20:#x}',
+                            *probe_cmds,
+                        ], settle=2.0)
+                        proc.kill()
+                        break
                 if stop_cmds:
                     record = _monitor_ask(mon, [f'xp/1gx {FAULT_PA:#x}'], settle=0.2)
                     if f'{SMOKE_FAULT_MAGIC:016x}' in record.lower():
@@ -389,12 +406,15 @@ def boot(args):
         disk = (0xa0000000, disk_path.stat().st_size)
         from dataclasses import replace as _replace_boot
         # The template's arm-io window, so the PCIe memory range (and BAR0
-        # in it) translates; see ClassicLayout.armio_size.
-        layout = _replace_boot(layout, armio_size=0x70000000)
+        # in it) translates; see ClassicLayout.armio_size. Set boot_uuid so
+        # /chosen/boot-uuid and /chosen/apfs-preboot-uuid match the APFS root
+        # volume for IOPlatformExpert::getBootMedia().
+        layout = _replace_boot(layout, armio_size=0x70000000,
+                               boot_uuid='CC453B28-C3F1-49AD-B0A5-389C17A60F40')
         if getattr(args, 'boot_args', None):
             layout = _replace_boot(layout, cmdline=args.boot_args)
         else:
-            layout = _replace_boot(layout, cmdline=layout.cmdline + ' rd=disk0s1')
+            layout = _replace_boot(layout, cmdline=layout.cmdline + ' amfi_get_out_of_my_way=1 -s -nobsdmgroot rd=disk0s1')
     payload, payload_pa, entry_pa, x0 = kcload.lay_out(kc, out, layout)
     mmio_log = out / 'mmio-trace.log'
     extra = []
@@ -628,7 +648,9 @@ def report_monitor(text, mmio_log, out, screen=None, root_disk=False):
     if problems:
         print('RESULT: FAIL (monitor boot)')
         return 1
-    if mounted:
+    if '[USERSPACE]' in text:
+        print('RESULT: PASS (userspace: PID 1 /sbin/launchd executed from APFS root)')
+    elif mounted:
         print('RESULT: PASS (monitor: APFS root volume mounted via VirtIO block controller)')
     elif 'Got boot device' in text or 'BSD root:' in text or 'AppleVirtIO' in text:
         print('RESULT: PASS (monitor: root disk matched via VirtIO block controller)')
