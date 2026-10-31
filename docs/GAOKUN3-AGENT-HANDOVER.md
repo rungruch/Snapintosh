@@ -11,15 +11,15 @@ For a coding agent picking up the gaokun3 port cold. It covers:
 and the phase documents are the record. Where this page and the tree
 disagree, the tree wins (AGENTS.md, "Start Here").
 
-**As of 2026-10-31**, after run 51. **Phase 4 is PASSED on the
+**As of 2026-10-31**, after run 53. **Phase 4 is PASSED on the
 gaokun3** (run 48): the stock 26A428 VirtualMac2,1 kernel mounted an APFS
 root filesystem from the RAM-backed VirtIO block device with `BAR0=226`,
 `VQ=62`, `IRQ=65` and Line 2 permanently locked in green (`APFS MOUNT: COMPLETE`).
-**Phase 5 Step 5A is IN PROGRESS** (runs 49, 50, 51): in Run 50, Darwin read
-freestanding `/sbin/launchd` Mach-O segments (`BAR0=232`, `VQ=65`). The monitor
-has been upgraded with direct EL0 CPU telemetry (`e3f50eb`) to detect the
-freestanding init process. The immediate task is aligning root-device boot args
-to verify single-user / launchd execution on hardware.
+**Phase 5 Step 5A is PASSED on the gaokun3** (run 53): Darwin read freestanding
+`/sbin/launchd` Mach-O segments (`BAR0=232`, `VQ=65`), created PID 1, and
+transitioned to EL0 userspace. The monitor band latched bright yellow:
+`Line 2: USERSPACE: PID 1 RUNNING (/SBIN/LAUNCHD)`, `Line 3: INIT LOADED: VQ=65 BAR0=232`.
+(VERIFIED on hardware, photograph `media_1793451743799_61945587.jpg`).
 
 ## Read first, in this order
 
@@ -90,7 +90,7 @@ AGENTS.md. Keep applying them unless the owner changes one.
 | Route | B: the stock 26A428 VirtualMac2,1 kernel at EL1 under Snapintosh's monitor (Phase 0C) |
 | Phase 3 on gaokun3 | **PASSED on hardware (Run 47).** Stock kernel boots cleanly through `pmap_startup`, GICv3, virtual timer, and BSD domain init (`L2TP DOMAIN INIT COMPLETE`) to root-mount wait (`missing-boot-media` in NVRAM). |
 | Phase 4 on gaokun3 | **PASSED on hardware (Run 48).** Stock kernel mounts APFS root volume (`TestRoot`) from RAM-backed VirtIO block device on PCIe. `ACT=1`, `BAR0=226`, `VQ=62`, `IRQ=65`. Line 2 locked in green: `APFS MOUNT: COMPLETE (VOLUME TESTROOT)`. Zero NVMe writes. |
-| Phase 5 on gaokun3 | **IN PROGRESS (Runs 49, 50, 51).** In Run 50, Darwin traversed `/sbin`, opened `/sbin/launchd`, and mapped Mach-O segments (`BAR0=232`, `VQ=65`). Run 51 verified monitor EL0 telemetry latching (`e3f50eb`). |
+| Phase 5 on gaokun3 | **PASSED on hardware (Run 53).** Darwin mounted APFS root (`TestRoot`), mapped `/sbin/launchd` (`BAR0=232, VQ=65`), and dropped to EL0 userspace executing PID 1. Top monitor banner latched yellow: `USERSPACE: PID 1 RUNNING (/SBIN/LAUNCHD)` and `INIT LOADED: VQ=65 BAR0=232`. |
 | Working tree | Clean; all 5 test suites pass (100%). |
 
 Recent Snapintosh commits, newest first:

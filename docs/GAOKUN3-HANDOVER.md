@@ -36,14 +36,18 @@ with conditions, and a real-hardware boot can reopen it.
 | 2: EL2 entry and USB link | VHE exit PASSED on the machine (runs 11, 12; q1n1 runs 14, 15). USB link **paused**: USB0's DMA is translated by `apps_smmu`, and the bypass's first write (stage 2) is designed and host-modelled only | [PHASE2](GAOKUN3-PHASE2.md), [USB-DEVICE-MODE](GAOKUN3-USB-DEVICE-MODE.md) |
 | 3: VirtualMac kernel to a console | **PASSED on hardware (Run 47, 2026-10-30).** Stock 26A428 kernel bootstraps completely through memory management (`pmap_startup`), physical GICv3, virtual timer, PAC QARMA5, context switching (with SSBS/DIT bypassed), IOKit driver matching, and BSD domain init (`L2TP DOMAIN INIT COMPLETE`), reaching the root-mount wait (`missing-boot-media` written to NVRAM). No crash, no panic. Ready for Phase 4 (storage). | [PHASE3](GAOKUN3-PHASE3.md) |
 | 4: Storage mediation and root mount | **PASSED on hardware (Run 48, 2026-10-31).** Stock 26A428 VirtualMac2,1 kernel mounted APFS root filesystem (`TestRoot`) from RAM-backed VirtIO block device on PCIe. `ACT=1`, `BAR0=226`, `VQ=62`, `IRQ=65`. Line 2 locked in green: `APFS MOUNT: COMPLETE (VOLUME TESTROOT)`. Zero NVMe writes. | [PHASE4](GAOKUN3-PHASE4.md) |
-| 5: Userspace transition (`/sbin/launchd`) | **IN PROGRESS (2026-10-31).** In Run 50 (photo `380d7757`), Darwin read `/sbin/launchd` from APFS (`VQ=65`, `BAR0=232`) and initialized PID 1. In Run 51 (photo `3983f7f5`), deployed hardware EL0 telemetry monitor and investigated device matching parameters. Host models and test suites pass (100%). | [PHASE5](GAOKUN3-PHASE5.md) |
+| 5: Userspace transition (`/sbin/launchd`) | **PASSED on hardware (Run 53, 2026-10-31).** Stock 26A428 VirtualMac2,1 kernel mounted APFS root filesystem (`TestRoot`), parsed `/sbin/launchd` Mach-O binary (`VQ=65`, `BAR0=232`), mapped user segments, and launched PID 1 into EL0 userspace. Line 2 latched bright yellow `USERSPACE: PID 1 RUNNING (/SBIN/LAUNCHD)`. Line 3 latched yellow `INIT LOADED: VQ=65 BAR0=232`. Steady-state idle at EL0 with zero kernel panics. | [PHASE5](GAOKUN3-PHASE5.md) |
 
 Recent results worth knowing before anything else:
 
-- **Run 53 (2026-10-31): Armed on USB stick for hardware execution.**
-  Updated freestanding `/sbin/launchd` syscalls to `0x2000004` (`SYS_write`) and `0x2000005` (`SYS_open`).
-  Armed Line 2 to latch `USERSPACE: PID 1 RUNNING (/sbin/launchd)` in yellow on `sd.vq_requests >= 65`
-  or EL0 register detection. Line 3 reports live EL0 PC / SPSR or storage progress.
+- **Run 53 (2026-10-31): Phase 5 Step 5A PASSED! Userspace PID 1 verified on hardware.**
+  Darwin 26A428 mounted the APFS root volume (`TestRoot`) from the RAM-backed VirtIO block device,
+  executed `load_init_program()` targeting `/sbin/launchd`, mapped Mach-O segments (`BAR0=232, VQ=65, IRQ=65`),
+  and dropped to EL0 userspace executing freestanding `/sbin/launchd`.
+  The top monitor banner latched bright yellow:
+  `Line 2: USERSPACE: PID 1 RUNNING (/SBIN/LAUNCHD)`
+  `Line 3: INIT LOADED: VQ=65 BAR0=232`
+  (VERIFIED on hardware, photograph `media_1793451743799_61945587.jpg`).
 - **Run 52 (2026-10-31): Phase 5 launchd load verified on clean boot arguments.**
   Restored clean `-v serial=3 -noprogress rd=disk0s1`. Darwin mounted APFS `TestRoot`
   (`APFS MOUNT: COMPLETE` in green) and read `/sbin/launchd` (`BAR0=232, VQ=65, IRQ=65`).
