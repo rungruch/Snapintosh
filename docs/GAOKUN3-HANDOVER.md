@@ -36,8 +36,27 @@ with conditions, and a real-hardware boot can reopen it.
 | 2: EL2 entry and USB link | VHE exit PASSED on the machine (runs 11, 12; q1n1 runs 14, 15). USB link **paused**: USB0's DMA is translated by `apps_smmu`, and the bypass's first write (stage 2) is designed and host-modelled only | [PHASE2](GAOKUN3-PHASE2.md), [USB-DEVICE-MODE](GAOKUN3-USB-DEVICE-MODE.md) |
 | 3: VirtualMac kernel to a console | **PASSED on hardware (Run 47, 2026-10-30).** Stock 26A428 kernel bootstraps completely through memory management (`pmap_startup`), physical GICv3, virtual timer, PAC QARMA5, context switching (with SSBS/DIT bypassed), IOKit driver matching, and BSD domain init (`L2TP DOMAIN INIT COMPLETE`), reaching the root-mount wait (`missing-boot-media` written to NVRAM). No crash, no panic. Ready for Phase 4 (storage). | [PHASE3](GAOKUN3-PHASE3.md) |
 | 4: Storage mediation and root mount | **PASSED on hardware (Run 48, 2026-10-31).** Stock 26A428 VirtualMac2,1 kernel mounted APFS root filesystem (`TestRoot`) from RAM-backed VirtIO block device on PCIe. `ACT=1`, `BAR0=226`, `VQ=62`, `IRQ=65`. Line 2 locked in green: `APFS MOUNT: COMPLETE (VOLUME TESTROOT)`. Zero NVMe writes. | [PHASE4](GAOKUN3-PHASE4.md) |
+| 5: Userspace transition (`/sbin/launchd`) | **IN PROGRESS (2026-10-31).** In Run 50 (photo `380d7757`), Darwin read `/sbin/launchd` from APFS (`VQ=65`, `BAR0=232`) and initialized PID 1. In Run 51 (photo `3983f7f5`), deployed hardware EL0 telemetry monitor and investigated device matching parameters. Host models and test suites pass (100%). | [PHASE5](GAOKUN3-PHASE5.md) |
 
 Recent results worth knowing before anything else:
+
+- **Run 51 (2026-10-31): Userspace telemetry monitor test.**
+  Added hardware EL0 detection (`spsr_el2 & 0x0f == 0` / user virtual PC on `elr_el2` / `elr_el1`)
+  and redistributor virtual timer PPI re-arm. In Run 51 with `-s -nobsdmgroot`, the block device initialized
+  at `BAR0=104 VQ=1`, indicating root device matching did not proceed past initial sector 0 probe.
+  (OBSERVED on hardware, photograph `media_1793447878036_3983f7f5.jpg`).
+- **Run 50 (2026-10-31): Launchd Mach-O read from APFS root by Darwin kernel.**
+  With freestanding `/sbin/launchd` installed to `TestRoot` and `rd=disk0s1` restored,
+  Darwin mounted the APFS root volume (`APFS MOUNT: COMPLETE (VOLUME TESTROOT)` latched in green)
+  and executed 3 additional VirtQueue requests post-mount, advancing from `VQ=62` (Run 48) to
+  `VQ=65` (`BAR0=232`). This proves Darwin traversed `/sbin`, opened `/sbin/launchd`, and read its
+  Mach-O load commands. Line 2 stayed green because freestanding `/sbin/launchd` writes to `/dev/console`
+  (handled by the display console `km_tty`, not PL011 UART).
+  (VERIFIED on hardware, photograph `media_1793446798729_380d7757.jpg`).
+- **Run 49 (2026-10-31): boot-uuid injection investigation.**
+  Injecting `/chosen/boot-uuid` into device tree caused Darwin's `IOKitBSDInit` to prioritize
+  `boot-uuid-media` lookup, bypassing `rd=disk0s1` matching and halting at `VQ=39`. Reverted immediately.
+  (OBSERVED on hardware, photograph `media_1793446116927_fc8ecee5.jpg`).
 
 - **Run 48 (2026-10-31): Phase 4 goal achieved! Root APFS filesystem mounted on hardware.**
   The stock 26A428 VirtualMac2,1 kernel mounted the APFS root volume (`TestRoot`, `disk1s1`)
