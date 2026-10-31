@@ -225,6 +225,47 @@ class Layout(unittest.TestCase):
         with self.assertRaises(usb.LayoutError):                                     # not a PE app
             usb.build_layout('usb-inventory', self.out('v'), None, self.sdboot, usb_probe=self.slb)
 
+    def vmapple_bundle3(self, name='bundle3'):
+        """A version 3 bundle: as version 2, plus a ramdisk chunk."""
+        import importlib.util
+        root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(root / 'probes'))
+        import classicload
+        def load(mod, path):
+            spec = importlib.util.spec_from_file_location(mod, root / path)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            return m
+        classic = load('classic_fixtures_usb3', 'tools/test-vmapple-classic.py')
+        stick = load('vmapple_stick_usb3', 'tools/vmapple-stick.py')
+        kc = self.file('kernelcache3.synthetic', b'')
+        classic.synthetic_kernelcache(kc)
+        tree = self.file('devicetree3.synthetic', classic._fixtures.synthetic_tree())
+        from dataclasses import replace
+        layout = replace(classicload.QEMU_MONITOR_LAYOUT, drop_nodes=())
+        image, seed_pa, seed_chunk = stick.deferred_seed_image(kc, tree, layout)
+        disk_pa = classicload.place_ramdisk(layout, 4096)
+        manifest, files = stick.bundle_bytes(
+            image, seed_pa, seed_chunk,
+            monitor=(b'\x00' * 4096, 0x40200000, 0x43000000, (0x81000000, 0x9D200000),
+                     (0xC6200000, 1600, 6400, 2400, 160)),
+            ramdisk=(b'\x5a' * 4096, disk_pa))
+        out = Path(self.tmp.name) / name
+        for rel, data in files.items():
+            (out / rel).parent.mkdir(parents=True, exist_ok=True)
+            (out / rel).write_bytes(data)
+        (out / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+        return out
+
+    def test_vmapple_h3_ramdisk_stage(self):
+        q1n1 = self.file('q1n1-ramdisk.efi', pe(payload=b'--vmapple-enter VHE EXIT  DT SIMPLE-FB'))
+        bundle = self.vmapple_bundle3()
+        m = usb.build_layout('vmapple-h3', self.out('p4'), q1n1, self.sdboot, self.slb,
+                             self.tcb, self.dtb, bundle=bundle)
+        self.assert_manifest_complete(self.out('p4'), m)
+        self.assertIn('ramdisk', m)
+        self.assertTrue(m['ramdisk']['size'] == 4096)
+
     def vmapple_bundle2(self, name='bundle2'):
         """A version 2 bundle: the synthetic guest plus a monitor chunk."""
         import importlib.util

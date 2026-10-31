@@ -360,13 +360,14 @@ def build_vmapple_h1(out, systemd_boot, q1n1, dtb, bundle, replace, extra):
 
 
 def check_bundle_v2(bundle, manifest):
-    """An H2 bundle must be version 2 with a monitor to enter: the binary
-    header's version, a monitor entry inside its own chunk, a parameter
-    page, and a described screen split (the gaokun3 panel)."""
+    """An H2 bundle must be version 2 (or version 3 with a ramdisk) with
+    a monitor to enter: the binary header's version, a monitor entry
+    inside its own chunk, a parameter page, and a described screen split
+    (the gaokun3 panel)."""
     import struct as _struct
     binary = (Path(bundle) / BUNDLE_DIR / 'bundle.bin').read_bytes()
-    if len(binary) < 16 or _struct.unpack_from('<Q', binary, 8)[0] != 2:
-        raise LayoutError(f'bundle {bundle}: not a version 2 bundle (no monitor to enter); '
+    if len(binary) < 16 or _struct.unpack_from('<Q', binary, 8)[0] not in (2, 3):
+        raise LayoutError(f'bundle {bundle}: not a version 2 or 3 bundle (no monitor to enter); '
                           'rebuild it with tools/vmapple-stick.py --monitor')
     monitor = manifest.get('monitor') or {}
     chunks = manifest.get('chunks') or []
@@ -430,6 +431,8 @@ def build_vmapple_h2(out, systemd_boot, q1n1, slbounce, tcblaunch, dtb, bundle,
                 'params_pa': monitor['params_pa'],
                 'bundle_qualification': hashlib.sha256(
                     _json.dumps(bundle_manifest, sort_keys=True).encode()).hexdigest()}
+    if bundle_manifest.get('ramdisk'):
+        manifest['ramdisk'] = bundle_manifest['ramdisk']
     (out / MANIFEST).write_text(_json.dumps(manifest, indent=2) + '\n')
     return manifest
 
