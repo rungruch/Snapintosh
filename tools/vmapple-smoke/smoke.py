@@ -406,11 +406,8 @@ def boot(args):
         disk = (0xa0000000, disk_path.stat().st_size)
         from dataclasses import replace as _replace_boot
         # The template's arm-io window, so the PCIe memory range (and BAR0
-        # in it) translates; see ClassicLayout.armio_size. Set boot_uuid so
-        # /chosen/boot-uuid and /chosen/apfs-preboot-uuid match the APFS root
-        # volume for IOPlatformExpert::getBootMedia().
-        layout = _replace_boot(layout, armio_size=0x70000000,
-                               boot_uuid='CC453B28-C3F1-49AD-B0A5-389C17A60F40')
+        # in it) translates; see ClassicLayout.armio_size.
+        layout = _replace_boot(layout, armio_size=0x70000000)
         if getattr(args, 'boot_args', None):
             layout = _replace_boot(layout, cmdline=args.boot_args)
         else:

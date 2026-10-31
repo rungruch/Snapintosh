@@ -145,10 +145,6 @@ class ClassicLayout:
     # smoke 2026-10-30, OBSERVED: no BAR0 access after PCI configuration).
     # Only the opt-in block-storage path (smoke.py --root-disk) widens it.
     armio_size: int = 0x40000000
-    # Optional APFS boot volume UUID published under /chosen for AppleFileSystemDriver
-    # and IOPlatformExpert root matching. When present, /chosen/boot-uuid and
-    # /chosen/apfs-preboot-uuid are set to this null-terminated string.
-    boot_uuid: Optional[str] = None
 
     @property
     def gicr_size(self):
@@ -384,10 +380,6 @@ def classic_complete_dt(dt, layout, entropy):
 
     dt.add('/device-tree/chosen', 'dram-base', struct.pack('<Q', layout.ram_base))
     dt.add('/device-tree/chosen', 'dram-size', struct.pack('<Q', layout.dram_size))
-    if layout.boot_uuid:
-        uuid_bytes = layout.boot_uuid.encode('ascii') + b'\0'
-        dt.put('/device-tree/chosen', 'boot-uuid', uuid_bytes)
-        dt.put('/device-tree/chosen', 'apfs-preboot-uuid', uuid_bytes)
     classic_trim_cpus(dt, layout.guest_cpus)
     dt.set_u32('/device-tree', 'clock-frequency', layout.timebase_hz)
     changed = dt.set_all('timebase-frequency', struct.pack('<Q', layout.timebase_hz),

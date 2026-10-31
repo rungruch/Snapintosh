@@ -256,8 +256,7 @@ def build(args):
             # As smoke.py --root-disk: the PCIe memory range sits at
             # arm-io offset 0x40000000, which the baseline window cannot
             # translate, so BAR0 never maps (see ClassicLayout.armio_size).
-            layout = replace(layout, armio_size=0x70000000,
-                             boot_uuid='CC453B28-C3F1-49AD-B0A5-389C17A60F40')
+            layout = replace(layout, armio_size=0x70000000)
     image, seed_pa, seed_chunk = deferred_seed_image(args.kernelcache, dt_path, layout)
     validate_chunks(image, layout)
     monitor = None
