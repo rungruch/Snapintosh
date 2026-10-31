@@ -420,7 +420,26 @@ int main(void)
         CHECK(ret == 0, "BDIF AUX retval set to VBLK_RET_SUCCESS (0)");
     }
 
-    /* 7. Parameter Page Initialization (layout.h offsets 0x58 and 0x60) */
+    /* 7. Live Storage Diagnostics */
+    {
+        struct storage_diag diag;
+        storage_get_diag(&diag);
+        CHECK(diag.is_active == 1, "diag is_active == 1");
+        CHECK(diag.disk_pa == (uintptr_t)synthetic_disk, "diag disk_pa matches synthetic_disk");
+        CHECK(diag.disk_size == disk_size, "diag disk_size matches");
+        CHECK(diag.bar0_accesses > 0, "diag bar0_accesses recorded");
+        CHECK(diag.vq_requests >= 2, "diag vq_requests recorded");
+        CHECK(diag.last_irq == 0x47, "diag last_irq recorded programmed line 0x47");
+
+        char rendered[128];
+        int len = storage_render_diag(rendered, sizeof(rendered));
+        CHECK(len > 0, "storage_render_diag returns non-zero len");
+        CHECK(strstr(rendered, "STORAGE: ACT=1") != NULL, "storage_render_diag contains ACT=1");
+        CHECK(strstr(rendered, "BAR0=") != NULL, "storage_render_diag contains BAR0=");
+        CHECK(strstr(rendered, "IRQ=71") != NULL, "storage_render_diag contains IRQ=71");
+    }
+
+    /* 8. Parameter Page Initialization (layout.h offsets 0x58 and 0x60) */
     {
         uint8_t fake_params[0x70];
         memset(fake_params, 0, sizeof(fake_params));
@@ -431,6 +450,13 @@ int main(void)
 
         storage_init_params((uintptr_t)fake_params);
         CHECK(storage_is_active() == 1, "storage_init_params activated disk controller");
+
+        struct storage_diag diag;
+        storage_get_diag(&diag);
+        CHECK(diag.is_active == 1, "storage_init_params diag is_active == 1");
+        CHECK(diag.disk_pa == param_disk_pa, "storage_init_params diag disk_pa matches");
+        CHECK(diag.disk_size == param_disk_size, "storage_init_params diag disk_size matches");
+        CHECK(diag.bar0_accesses == 0, "storage_init_params reset bar0_accesses");
     }
 
     free(synthetic_disk);

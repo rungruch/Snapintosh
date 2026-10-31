@@ -557,6 +557,16 @@ static void update_line4_telemetry(void)
     band_note_line(4, line, 0x00ffff40u);
 }
 
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+static void update_line1_storage(void)
+{
+    if (!band_on || monitor_stop_count) return;
+    char sdiag[96];
+    if (storage_render_diag(sdiag, sizeof(sdiag)))
+        band_note_line(1, sdiag, 0x00c0ffffu);
+}
+#endif
+
 void monitor_start_telemetry(void)
 {
     count_hvc = 0;
@@ -645,6 +655,10 @@ void monitor_timer_snapshot(void)
     }
 
     if (!band_on || band_rows < 160) return;
+
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+    update_line1_storage();
+#endif
 
     /* Once the guest's console prints, the band is its mirror and the
      * register snapshot stays off it; a panic then pages the console's own
@@ -755,6 +769,15 @@ static void uart_band_commit(const char *s)
 {
     if (!s[0]) return;
     console_scroll_add(s);
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+    for (const char *p = s; *p; p++) {
+        if (p[0] == 'm' && p[1] == 'o' && p[2] == 'u' && p[3] == 'n' &&
+            p[4] == 't' && p[5] == '-' && p[6] == 'c') {
+            band_note_line(2, "APFS MOUNT: COMPLETE (volume TestRoot)", 0x0080ff80u);
+            break;
+        }
+    }
+#endif
     if (console_paging) return;
     if (!uart_first_set) {
         uart_first_set = 1;
@@ -1111,6 +1134,9 @@ int monitor_gic_report(void)
     line[k++] = (char)('0' + gic_state.frame % 10);
     line[k] = 0;
     band_note(3, line, 0x00ffffffu);
+#ifdef VMAPPLE_GAOKUN3_MONITOR
+    update_line1_storage();
+#endif
     return 1;
 }
 

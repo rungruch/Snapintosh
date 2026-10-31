@@ -39,4 +39,17 @@ int storage_bdif_cmd(uint64_t devid, uint64_t cmd_pa);
 /* Query whether a root storage device is currently active */
 int storage_is_active(void);
 
+/* Live diagnostics for monitor band */
+struct storage_diag {
+    int is_active;
+    uint64_t disk_pa;
+    uint64_t disk_size;
+    uint32_t bar0_accesses;
+    uint32_t vq_requests;
+    uint32_t last_irq;
+};
+
+void storage_get_diag(struct storage_diag *diag);
+int storage_render_diag(char *buf, unsigned max_len);
+
 #endif /* SNAPINTOSH_VMAPPLE_STORAGE_H */

@@ -122,6 +122,7 @@ struct virtio_blk_req_hdr {
 struct virtio_blk_state {
     /* Backing storage */
     const uint8_t *disk_data;
+    uint64_t disk_pa;
     uint64_t disk_size;
     int is_readonly;
     int is_active;
@@ -149,10 +150,13 @@ struct virtio_blk_state {
     uint64_t queue_device;
     uint16_t last_avail_idx;
 
-    /* Statistics */
+    /* Statistics & Diagnostics */
     uint32_t reads_completed;
     uint32_t writes_completed;
     uint32_t bytes_transferred;
+    uint32_t bar0_accesses;
+    uint32_t vq_requests;
+    uint32_t last_irq;
 };
 
 static struct virtio_blk_state blk_dev;
@@ -190,6 +194,7 @@ void storage_set_mem_access(void (*r)(void *, uint64_t, uint64_t),
 void storage_init(const void *disk_data, uint64_t disk_size, int read_only)
 {
     blk_dev.disk_data = (const uint8_t *)disk_data;
+    blk_dev.disk_pa = (uint64_t)(uintptr_t)disk_data;
     blk_dev.disk_size = disk_size;
     blk_dev.is_readonly = read_only;
     blk_dev.is_active = (disk_data != 0 && disk_size > 0);
@@ -214,6 +219,9 @@ void storage_init(const void *disk_data, uint64_t disk_size, int read_only)
     blk_dev.reads_completed = 0;
     blk_dev.writes_completed = 0;
     blk_dev.bytes_transferred = 0;
+    blk_dev.bar0_accesses = 0;
+    blk_dev.vq_requests = 0;
+    blk_dev.last_irq = 0;
 }
 
 void storage_init_params(uint64_t params_pa)
@@ -221,8 +229,11 @@ void storage_init_params(uint64_t params_pa)
     if (!params_pa) return;
     uint64_t disk_pa = *(const volatile uint64_t *)(uintptr_t)(params_pa + 0x58);
     uint64_t disk_size = *(const volatile uint64_t *)(uintptr_t)(params_pa + 0x60);
+    blk_dev.disk_pa = disk_pa;
+    blk_dev.disk_size = disk_size;
     if (disk_pa && disk_size) {
         storage_init((const void *)(uintptr_t)disk_pa, disk_size, 0);
+        blk_dev.disk_pa = disk_pa;
     }
 }
 
@@ -386,6 +397,7 @@ static void process_virtqueue(void)
     guest_read_fn(&used_idx, blk_dev.queue_device + 2, 2);
 
     while (blk_dev.last_avail_idx != avail_idx) {
+        blk_dev.vq_requests++;
         uint16_t head_idx = 0;
         uint64_t elem_offset = blk_dev.queue_driver + 4 + (blk_dev.last_avail_idx % blk_dev.queue_size) * 2;
         guest_read_fn(&head_idx, elem_offset, 2);
@@ -477,6 +489,7 @@ static void process_virtqueue(void)
 
     /* Assert Queue Interrupt in ISR and signal virtual interrupt to guest */
     blk_dev.isr_status |= 1;
+    blk_dev.last_irq = blk_dev.irq_line;
     monitor_inject_virq(blk_dev.irq_line);
 }
 
@@ -489,6 +502,7 @@ static void put_le(uint8_t *buf, unsigned off, uint64_t v, unsigned n)
 int storage_bar0_access(uint64_t off, unsigned size, int write, uint64_t *value)
 {
     if (!blk_dev.is_active) return 0;
+    blk_dev.bar0_accesses++;
     log_str("EL2: storage: BAR0 access off ");
     log_hex(off);
     if (write) { log_str(" write "); log_hex(*value); log_str("\n"); }
@@ -637,4 +651,63 @@ int storage_bdif_cmd(uint64_t devid, uint64_t cmd_pa)
         }
     }
     return 1;
+}
+
+/* ---- Diagnostic Rendering ------------------------------------------------ */
+static void diag_append_str(char *buf, unsigned *pos, unsigned max_len, const char *s)
+{
+    while (*s && *pos + 1 < max_len) buf[(*pos)++] = *s++;
+}
+
+static void diag_append_hex(char *buf, unsigned *pos, unsigned max_len, uint64_t val, int nibbles)
+{
+    for (int i = nibbles - 1; i >= 0 && *pos + 1 < max_len; i--)
+        buf[(*pos)++] = "0123456789ABCDEF"[(val >> (4 * i)) & 15];
+}
+
+static void diag_append_dec(char *buf, unsigned *pos, unsigned max_len, uint32_t val)
+{
+    char tmp[10];
+    int n = 0;
+    if (val == 0) {
+        if (*pos + 1 < max_len) buf[(*pos)++] = '0';
+        return;
+    }
+    while (val > 0 && n < 10) {
+        tmp[n++] = (char)('0' + (val % 10));
+        val /= 10;
+    }
+    for (int i = n - 1; i >= 0 && *pos + 1 < max_len; i--)
+        buf[(*pos)++] = tmp[i];
+}
+
+void storage_get_diag(struct storage_diag *diag)
+{
+    if (!diag) return;
+    diag->is_active = blk_dev.is_active;
+    diag->disk_pa = blk_dev.disk_pa;
+    diag->disk_size = blk_dev.disk_size;
+    diag->bar0_accesses = blk_dev.bar0_accesses;
+    diag->vq_requests = blk_dev.vq_requests;
+    diag->last_irq = blk_dev.last_irq;
+}
+
+int storage_render_diag(char *buf, unsigned max_len)
+{
+    if (!buf || max_len < 32) return 0;
+    unsigned k = 0;
+    diag_append_str(buf, &k, max_len, "STORAGE: ACT=");
+    diag_append_dec(buf, &k, max_len, (uint32_t)blk_dev.is_active);
+    diag_append_str(buf, &k, max_len, " PA=");
+    diag_append_hex(buf, &k, max_len, blk_dev.disk_pa, 16);
+    diag_append_str(buf, &k, max_len, " SZ=");
+    diag_append_hex(buf, &k, max_len, blk_dev.disk_size, 8);
+    diag_append_str(buf, &k, max_len, " BAR0=");
+    diag_append_dec(buf, &k, max_len, blk_dev.bar0_accesses);
+    diag_append_str(buf, &k, max_len, " VQ=");
+    diag_append_dec(buf, &k, max_len, blk_dev.vq_requests);
+    diag_append_str(buf, &k, max_len, " IRQ=");
+    diag_append_dec(buf, &k, max_len, blk_dev.last_irq);
+    buf[k] = 0;
+    return (int)k;
 }
