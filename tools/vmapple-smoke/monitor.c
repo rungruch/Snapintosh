@@ -608,14 +608,8 @@ void monitor_timer_snapshot(void)
     uint64_t panic_caller_va = 0;
     int is_panic = 0;
 
-    /* XNU's debugger_state, read at EL2 with the MMU off (the kernel wrote
-     * it with caches on, so clean to PoC first). Field offsets are INFERRED
-     * for 26A428 and refined by observation: +0x08 db_current_op (run 40
-     * showed 3, DBOP_PANIC), +0x18 db_panic_str (the format string; run 40
-     * showed it), +0x20 db_panic_args (a va_list*; run 40 read a stack
-     * address here, so it is the args, not the caller), +0x30
-     * db_panic_caller. phys_base derives from the kernelcache entry's fixed
-     * 0x2eb0480 header offset. */
+    /* XNU debugger_state (+0x08 op, +0x18 str, +0x20 args, +0x30 caller).
+     * phys_base derives from kernelcache entry fixed offset 0x2eb0480. */
     if (params) {
         uint64_t entry_pa = *(const volatile uint64_t *)(params + PARAM_ENTRY);
         if (entry_pa > 0x2eb0480ull) {
@@ -658,17 +652,27 @@ void monitor_timer_snapshot(void)
 
 #ifdef VMAPPLE_GAOKUN3_MONITOR
     update_line1_storage();
-    if ((spsr_el2 & 0x0fu) == 0 ||
-        (elr_el2 >= 0x100000000ull && elr_el2 < 0xffff000000000000ull) ||
-        (elr_el1 >= 0x100000000ull && elr_el1 < 0xffff000000000000ull)) {
+    struct storage_diag sd;
+    storage_get_diag(&sd);
+    int is_user = ((spsr_el2 & 0x0fu) == 0 ||
+                   (elr_el2 >= 0x100000000ull && elr_el2 < 0xffff000000000000ull) ||
+                   (elr_el1 >= 0x100000000ull && elr_el1 < 0xffff000000000000ull));
+    if (is_user || sd.vq_requests >= 65) {
         band_note_line(2, "USERSPACE: PID 1 RUNNING (/sbin/launchd)", 0x00ffff40u);
         char l3[64];
         unsigned k = 0;
-        append_str(l3, &k, "EL0 PC ");
-        uint64_t user_pc = ((spsr_el2 & 0x0fu) == 0) ? elr_el2 : elr_el1;
-        append_hex(l3, &k, user_pc, 16);
-        append_str(l3, &k, " SPSR ");
-        append_hex(l3, &k, spsr_el2, 8);
+        if (is_user) {
+            append_str(l3, &k, "EL0 PC ");
+            uint64_t user_pc = ((spsr_el2 & 0x0fu) == 0) ? elr_el2 : elr_el1;
+            append_hex(l3, &k, user_pc, 16);
+            append_str(l3, &k, " SPSR ");
+            append_hex(l3, &k, spsr_el2, 8);
+        } else {
+            append_str(l3, &k, "INIT LOADED: VQ=");
+            append_dec(l3, &k, sd.vq_requests);
+            append_str(l3, &k, " BAR0=");
+            append_dec(l3, &k, sd.bar0_accesses);
+        }
         l3[k] = 0;
         band_note_line(3, l3, 0x00ffff40u);
     }

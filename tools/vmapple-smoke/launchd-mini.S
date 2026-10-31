@@ -3,10 +3,16 @@
  * Freestanding ARM64 Darwin userspace init program (/sbin/launchd).
  *
  * Implements direct XNU BSD system calls without dyld, libSystem, or libc:
- * - SYS_write (4): writes greeting banner to stdout/stderr
- * - SYS_open (5): opens /dev/console (O_WRONLY = 1, mode = 0) and writes banner
+ * - SYS_write (0x2000004): writes greeting banner to stdout/stderr
+ * - SYS_open (0x2000005): opens /dev/console (O_WRONLY = 1, mode = 0) and writes banner
  * - Idle loop (wfe): remains active at EL0 without exiting or causing a panic.
  */
+
+.macro bsd_syscall num
+    movz    x16, #\num
+    movk    x16, #0x0200, lsl #16
+    svc     #0x80
+.endm
 
 .global _start
 .align 4
@@ -17,22 +23,19 @@ _start:
     mov     x0, #1                      /* fd = 1 (stdout) */
     adr     x1, banner_msg
     mov     x2, #BANNER_LEN
-    mov     x16, #4                     /* SYS_write = 4 */
-    svc     #0x80
+    bsd_syscall 4                       /* SYS_write */
 
     /* 2. Attempt write to stderr (fd 2) */
     mov     x0, #2                      /* fd = 2 (stderr) */
     adr     x1, banner_msg
     mov     x2, #BANNER_LEN
-    mov     x16, #4                     /* SYS_write = 4 */
-    svc     #0x80
+    bsd_syscall 4                       /* SYS_write */
 
     /* 3. Attempt to open /dev/console (O_WRONLY = 1, mode = 0) */
     adr     x0, dev_console
     mov     x1, #1                      /* O_WRONLY = 1 */
     mov     x2, #0                      /* mode = 0 */
-    mov     x16, #5                     /* SYS_open = 5 */
-    svc     #0x80
+    bsd_syscall 5                       /* SYS_open */
     b.cs    skip_console
 
     /* open succeeded: x0 is console fd; write banner to it */
@@ -40,8 +43,7 @@ _start:
     mov     x0, x19
     adr     x1, banner_msg
     mov     x2, #BANNER_LEN
-    mov     x16, #4                     /* SYS_write = 4 */
-    svc     #0x80
+    bsd_syscall 4                       /* SYS_write */
 
 skip_console:
     /* 4. Steady-state idle loop at EL0: remain alive without crashing */
